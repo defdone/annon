@@ -147,3 +147,10 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# Private: never in the public repo
+internal/
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.env*
