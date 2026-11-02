@@ -88,7 +88,8 @@ impl Annon {
                 source: args.source,
                 cipher_hash,
                 moderator: args.moderator,
-                sales_stopped: false,
+                sales_stopped_at: 0,
+                taken_down: 0,
             },
         );
         self.files.flush();
@@ -147,6 +148,7 @@ impl Annon {
             recover_eip191(&self.reopen_message(args.clone()), &sig) == Some(wallet),
             "signature is not from the wallet"
         );
+        require!(file.taken_down == 0, "file taken down");
         require!(
             file.seller == wallet || self.buyers.contains_key(&buyer_entry(&file_id, &wallet)),
             "only the seller or a buyer can reopen"
@@ -193,7 +195,8 @@ mod tests {
         assert_eq!(f.source, Source::Payaion);
         assert_eq!(f.cipher_hash, a.cipher_hash);
         assert_eq!(f.moderator, a.moderator);
-        assert!(!f.sales_stopped);
+        assert_eq!(f.sales_stopped_at, None);
+        assert_eq!(f.taken_down, None);
     }
 
     #[test]

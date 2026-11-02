@@ -10,6 +10,7 @@ use near_sdk::{env, near, require, AccountId, PanicOnDefault};
 
 mod events;
 mod evm;
+mod moderation;
 mod mpc;
 mod register;
 mod storage;
@@ -18,6 +19,7 @@ mod tests;
 mod unlock;
 
 use evm::{bytes, hex0x};
+pub use moderation::{StopSalesArgs, TakedownReason};
 pub use register::{RegisterArgs, ReopenArgs};
 use unlock::buyer_entry;
 pub use unlock::UnlockArgs;
@@ -40,7 +42,10 @@ pub struct FileView {
     pub source: Source,
     pub cipher_hash: String,
     pub moderator: Option<AccountId>,
-    pub sales_stopped: bool,
+    /// Unix seconds when the seller stopped sales, if they did.
+    pub sales_stopped_at: Option<u64>,
+    /// Set while the moderator has the file taken down.
+    pub taken_down: Option<TakedownReason>,
 }
 
 #[near(serializers = [borsh])]
@@ -50,7 +55,11 @@ struct File {
     source: Source,
     cipher_hash: [u8; 32],
     moderator: Option<AccountId>,
-    sales_stopped: bool,
+    // Fixed width, paid for at `register`, so a stop or takedown never grows storage.
+    /// Unix seconds of `stop_sales`; 0 while the file is on sale.
+    sales_stopped_at: u64,
+    /// 0 while available, else a `TakedownReason` code (`moderation::reason`).
+    taken_down: u8,
 }
 
 #[near(contract_state)]
@@ -121,7 +130,8 @@ impl Annon {
                 source: f.source.clone(),
                 cipher_hash: hex0x(&f.cipher_hash),
                 moderator: f.moderator.clone(),
-                sales_stopped: f.sales_stopped,
+                sales_stopped_at: (f.sales_stopped_at != 0).then_some(f.sales_stopped_at),
+                taken_down: moderation::reason(f.taken_down),
             })
     }
 }

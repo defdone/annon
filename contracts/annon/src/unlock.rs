@@ -6,6 +6,7 @@ use near_sdk::{env, near, require, AccountId, Gas, GasWeight, NearToken};
 
 use crate::events::emit;
 use crate::evm::{bytes, hex0x};
+use crate::moderation::payment_allowed;
 use crate::{Annon, AnnonExt, File, Source};
 
 /// The callback checks the answer, then asks for CKD (30) and its confirmation (10); it also gets
@@ -65,6 +66,9 @@ impl Annon {
             .get(&file_id)
             .unwrap_or_else(|| env::panic_str("unknown file"));
         let (payer, payment, amount) = self.check_payment(file, &file_id, &buyer_key, &args.logs);
+        if let Err(reason) = payment_allowed(file, args.logs[0].block_number) {
+            env::panic_str(reason);
+        }
         require!(!self.used.contains_key(&payment), "payment already used");
 
         if prepaid {
@@ -126,6 +130,7 @@ impl Annon {
             &payer,
             payment,
             &bytes::<32>(&payload_hash, "payload_hash"),
+            block_number,
         );
         match recorded {
             Ok(cost) => {
@@ -229,13 +234,15 @@ impl Annon {
         (payer, payment, amount)
     }
 
-    /// Checks MPC's answer and records the buyer and the payment. Returns the storage it used.
+    /// Checks MPC's answer and that the file may still be sold, then records the buyer and the
+    /// payment. Returns the storage it used.
     fn record_payment(
         &mut self,
         file_id: &[u8; 32],
         payer: &[u8; 20],
         payment: [u8; 40],
         expected: &[u8; 32],
+        block_number: u64,
     ) -> Result<NearToken, &'static str> {
         // An answer is a hash and a signature; anything larger is refused unread.
         let answer = env::promise_result_checked(0, 1024)
@@ -245,6 +252,9 @@ impl Annon {
         if &response.payload_hash.0 != expected {
             return Err("MPC verified a different payload");
         }
+        // A stop or takedown may have landed while MPC was checking; the payment stays unused.
+        let file = self.files.get(file_id).ok_or("unknown file")?;
+        payment_allowed(file, block_number)?;
         let before = env::storage_usage();
         // Checked again here: two unlocks for one payment can both be in flight.
         if self.used.insert(payment, ()).is_some() {
