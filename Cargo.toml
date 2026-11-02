@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["contracts/annon"]
+members = ["contracts/annon", "contracts/mock-mpc"]
 
 [profile.release]
 codegen-units = 1

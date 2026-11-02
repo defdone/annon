@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn message_names_the_contract_and_every_field() {
+    fn message_names_the_contract_and_the_key_fields() {
         let c = contract();
         let seller = Seller::new(1);
         let m = c.register_message(args(&seller));
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn seller_can_get_the_key_again_after_mpc_failed() {
+    fn the_seller_can_ask_for_the_key_again() {
         let mut c = contract();
         let seller = Seller::new(1);
         let a = registered(&mut c, &seller);
@@ -454,11 +454,14 @@ mod tests {
     }
 
     #[test]
-    fn reopen_and_register_messages_never_match() {
+    fn register_and_reopen_messages_have_their_own_prefix() {
         let c = contract();
         let seller = Seller::new(1);
         let m = c.reopen_message(reopen_args(&args(&seller).file_id, &seller));
         assert!(m.starts_with("Annon: open a file again\n"), "{m}");
+        assert!(c
+            .register_message(args(&seller))
+            .starts_with("Annon: list a file for sale\n"));
         assert!(m.contains(CONTRACT));
     }
 

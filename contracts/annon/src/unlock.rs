@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn two_unlocks_in_flight_release_once() {
+    fn a_second_callback_for_a_used_payment_releases_nothing() {
         let mut c = listed();
         mpc_answered(verified(SPLIT_PAYLOAD_HASH));
         callback(&mut c);
