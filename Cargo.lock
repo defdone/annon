@@ -24,6 +24,8 @@ dependencies = [
  "bs58 0.5.1",
  "hex",
  "k256",
+ "near-mpc-bounded-collections",
+ "near-mpc-contract-interface",
  "near-sdk",
  "sha3 0.10.9",
 ]
@@ -1224,6 +1226,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8452105ba047068f40ff7093dd1d9da90898e63dd61736462e9cdda6a90ad3c3"
 
 [[package]]
+name = "mpc-primitives"
+version = "3.17.0"
+source = "git+https://github.com/near/mpc?rev=d0fc87b19e2643299e7becdd7d9611afcd5d5a78#d0fc87b19e2643299e7becdd7d9611afcd5d5a78"
+dependencies = [
+ "borsh",
+ "derive_more",
+ "hex",
+ "near-account-id 2.6.0",
+ "schemars 0.8.22",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "near-account-id"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "702dbca982e748975658812c7be2ca53211f454137486f98f6cf768934e2cb29"
+dependencies = [
+ "borsh",
+ "schemars 0.8.22",
+ "serde",
+]
+
+[[package]]
 name = "near-account-id"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1259,7 +1286,7 @@ dependencies = [
  "derive_more",
  "ed25519-dalek",
  "hex",
- "near-account-id",
+ "near-account-id 3.0.0",
  "near-config-utils",
  "near-schema-checker-lib",
  "near-stdx",
@@ -1319,7 +1346,7 @@ dependencies = [
  "cfg_eval",
  "digest-io",
  "hex",
- "near-account-id",
+ "near-account-id 3.0.0",
  "near-crypto-hash",
  "near-digest",
  "near-primitives-core",
@@ -1331,6 +1358,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "near-mpc-bounded-collections"
+version = "0.0.1"
+source = "git+https://github.com/near/mpc?rev=d0fc87b19e2643299e7becdd7d9611afcd5d5a78#d0fc87b19e2643299e7becdd7d9611afcd5d5a78"
+dependencies = [
+ "borsh",
+ "derive_more",
+ "hex",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "near-mpc-contract-interface"
+version = "0.0.1"
+source = "git+https://github.com/near/mpc?rev=d0fc87b19e2643299e7becdd7d9611afcd5d5a78#d0fc87b19e2643299e7becdd7d9611afcd5d5a78"
+dependencies = [
+ "borsh",
+ "derive_more",
+ "mpc-primitives",
+ "near-mpc-bounded-collections",
+ "near-mpc-crypto-types",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "serde_with",
+ "sha2 0.10.9",
+ "thiserror",
+]
+
+[[package]]
+name = "near-mpc-crypto-types"
+version = "0.0.1"
+source = "git+https://github.com/near/mpc?rev=d0fc87b19e2643299e7becdd7d9611afcd5d5a78#d0fc87b19e2643299e7becdd7d9611afcd5d5a78"
+dependencies = [
+ "borsh",
+ "bs58 0.5.1",
+ "derive_more",
+ "mpc-primitives",
+ "near-account-id 2.6.0",
+ "near-mpc-bounded-collections",
+ "serde",
+ "serde_with",
+ "sha3 0.10.9",
+ "thiserror",
+]
+
+[[package]]
 name = "near-parameters"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1338,7 +1412,7 @@ checksum = "e69ee1681e87a51856ab87b9ddb3612f601da99d07bbb6385d4790331c720f88"
 dependencies = [
  "borsh",
  "enum-map",
- "near-account-id",
+ "near-account-id 3.0.0",
  "near-primitives-core",
  "near-schema-checker-lib",
  "num-rational",
@@ -1402,7 +1476,7 @@ dependencies = [
  "bs58 0.4.0",
  "derive_more",
  "enum-map",
- "near-account-id",
+ "near-account-id 3.0.0",
  "near-gas",
  "near-schema-checker-lib",
  "near-token",
@@ -1446,7 +1520,7 @@ dependencies = [
  "borsh",
  "bs58 0.5.1",
  "hex-literal",
- "near-account-id",
+ "near-account-id 3.0.0",
  "near-crypto",
  "near-gas",
  "near-global-contracts",
@@ -1477,7 +1551,7 @@ dependencies = [
  "borsh",
  "bs58 0.5.1",
  "hex",
- "near-account-id",
+ "near-account-id 3.0.0",
  "near-crypto",
  "near-crypto-hash",
  "near-gas",
@@ -1952,6 +2026,18 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "schemars"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
+dependencies = [
+ "dyn-clone",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cd191f9397d57d581cddd31014772520aa448f65ef991055d7f61582c65165f"
@@ -1972,6 +2058,18 @@ dependencies = [
  "ref-cast",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2046,6 +2144,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

@@ -1,11 +1,15 @@
 use super::*;
 use k256::ecdsa::SigningKey;
+use near_mpc_contract_interface::types::{EvmLog, Hash160, Hash256};
 use near_sdk::test_utils::{get_created_receipts, VMContextBuilder};
-use near_sdk::{testing_env, NearToken};
+use near_sdk::{testing_env, NearToken, PromiseResult};
 use sha3::{Digest, Keccak256};
 
 const CONTRACT: &str = "v1.annon.defdone.near";
 const NOW_S: u64 = 1_793_000_000;
+const SPLITTER: &str = "0x5151515151515151515151515151515151515151";
+/// Address of Seller::new(7), the test buyer.
+const PAYER: &str = "0x4a62316623ad457f02cdc5d997ded67a383ec569";
 
 struct Seller(SigningKey);
 
@@ -42,7 +46,7 @@ fn context(deposit: NearToken) {
 
 fn contract() -> Annon {
     context(NearToken::from_millinear(100));
-    Annon::new("v1.signer".parse().unwrap(), 2)
+    Annon::new("v1.signer".parse().unwrap(), 2, 3, SPLITTER.into())
 }
 
 fn args(seller: &Seller) -> RegisterArgs {
@@ -376,4 +380,325 @@ fn reopen_and_register_messages_never_match() {
     let m = c.reopen_message(reopen_args(&args(&seller).file_id, &seller));
     assert!(m.starts_with("Annon: open a file again\n"), "{m}");
     assert!(m.contains(CONTRACT));
+}
+
+// A PaymentSplit log for args(Seller::new(1)) paid with buyer key 0x33..33. Its payload hash
+// (fff5f9d0...) was computed by the R2 spike code, which matched NEAR MPC byte for byte on mainnet.
+const SPLIT_TOPIC: &str = "1d53deaef03137ccd2fa5503b6c280dacfce2e7ae1483128fb0ebfc6fa050e8c";
+const SPLIT_DATA: &str = "0x000000000000000000000000000000000000000000000000000000000000271000000000000000000000000000000000000000000000000000000000000001f4000000000000000000000000000000000000000000000000000000000000251c52112c22da1c1cb9865e7e136a5162eca47f68141120192b9b448b228fc7c059";
+const SPLIT_PAYLOAD_HASH: &str = "fff5f9d04947a46e1cd2ce279446e48cd6827d1e9faa3784638ae88b5ce7f9d0";
+
+fn h256(s: &str) -> Hash256 {
+    Hash256(
+        hex::decode(s.trim_start_matches("0x"))
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    )
+}
+
+fn topic_address(a: &str) -> Hash256 {
+    h256(&format!(
+        "{}{}",
+        "00".repeat(12),
+        a.trim_start_matches("0x")
+    ))
+}
+
+fn split_log() -> EvmLog {
+    EvmLog {
+        removed: false,
+        log_index: 7,
+        transaction_index: 5,
+        transaction_hash: h256(&"aa".repeat(32)),
+        block_hash: h256(&"bb".repeat(32)),
+        block_number: 0x3000000,
+        address: Hash160([0x51; 20]),
+        data: SPLIT_DATA.into(),
+        topics: vec![
+            h256(SPLIT_TOPIC),
+            topic_address(PAYER),
+            topic_address(&Seller::new(1).address()),
+        ],
+    }
+}
+
+fn unlock_args(log: EvmLog) -> UnlockArgs {
+    UnlockArgs {
+        file_id: format!("0x{}", "11".repeat(32)),
+        buyer_key: format!("0x{}", "33".repeat(48)),
+        log,
+    }
+}
+
+/// A contract with the test file registered, ready for unlock.
+fn listed() -> Annon {
+    let mut c = contract();
+    registered(&mut c, &Seller::new(1));
+    context(UNLOCK_DEPOSIT);
+    c
+}
+
+fn mpc_call() -> near_sdk::serde_json::Value {
+    get_created_receipts()
+        .into_iter()
+        .filter(|r| r.receiver_id.as_str() == "v1.signer")
+        .flat_map(|r| r.actions)
+        .find_map(|action| match action {
+            near_sdk::mock::MockAction::FunctionCallWeight {
+                method_name, args, ..
+            } if method_name == b"verify_foreign_transaction" => {
+                Some(near_sdk::serde_json::from_slice(&args).unwrap())
+            }
+            _ => None,
+        })
+        .expect("no verify_foreign_transaction call")
+}
+
+#[test]
+fn unlock_asks_mpc_to_verify_the_exact_log_on_base() {
+    let mut c = listed();
+    c.unlock(unlock_args(split_log()));
+    let req = &mpc_call()["request"];
+    assert_eq!(req["expected_payload_hash"], SPLIT_PAYLOAD_HASH);
+    assert_eq!(req["domain_id"], 3);
+    assert_eq!(req["request"]["Base"]["finality"], "Safe");
+    assert_eq!(
+        req["request"]["Base"]["extractors"][0]["Log"]["log_index"],
+        7
+    );
+}
+
+#[test]
+#[should_panic(expected = "log is not from the payment source")]
+fn unlock_rejects_a_log_from_another_contract() {
+    let mut c = listed();
+    let mut log = split_log();
+    log.address = Hash160([0x52; 20]);
+    c.unlock(unlock_args(log));
+}
+
+#[test]
+#[should_panic(expected = "not a PaymentSplit event")]
+fn unlock_rejects_another_event() {
+    let mut c = listed();
+    let mut log = split_log();
+    log.topics[0] = h256(&"cd".repeat(32));
+    c.unlock(unlock_args(log));
+}
+
+#[test]
+#[should_panic(expected = "payment went to another seller")]
+fn unlock_rejects_a_payment_to_someone_else() {
+    let mut c = listed();
+    let mut log = split_log();
+    log.topics[2] = topic_address(&Seller::new(2).address());
+    c.unlock(unlock_args(log));
+}
+
+#[test]
+#[should_panic(expected = "payment is below the price")]
+fn unlock_rejects_a_payment_below_the_price() {
+    let mut c = listed();
+    let mut log = split_log();
+    log.data = SPLIT_DATA.replacen("2710", "270f", 1); // 9999 instead of 10000
+    c.unlock(unlock_args(log));
+}
+
+#[test]
+#[should_panic(expected = "payment was not made for this file and key")]
+fn unlock_rejects_a_payment_bound_to_another_key() {
+    let mut c = listed();
+    let mut a = unlock_args(split_log());
+    a.buyer_key = format!("0x{}", "44".repeat(48));
+    c.unlock(a);
+}
+
+#[test]
+#[should_panic(expected = "log was removed")]
+fn unlock_rejects_a_removed_log() {
+    let mut c = listed();
+    let mut log = split_log();
+    log.removed = true;
+    c.unlock(unlock_args(log));
+}
+
+#[test]
+#[should_panic(expected = "unknown file")]
+fn unlock_rejects_an_unknown_file() {
+    let mut c = listed();
+    let mut a = unlock_args(split_log());
+    a.file_id = format!("0x{}", "99".repeat(32));
+    c.unlock(a);
+}
+
+fn mpc_answered(result: PromiseResult) {
+    testing_env!(
+        VMContextBuilder::new()
+            .current_account_id(CONTRACT.parse().unwrap())
+            .predecessor_account_id(CONTRACT.parse().unwrap())
+            .block_timestamp(NOW_S * 1_000_000_000)
+            .build(),
+        near_sdk::test_vm_config(),
+        near_sdk::RuntimeFeesConfig::test(),
+        Default::default(),
+        vec![result],
+    );
+}
+
+fn verified(hash: &str) -> PromiseResult {
+    let body = near_sdk::serde_json::json!({
+        "payload_hash": hash,
+        "signature": { "scheme": "Secp256k1", "big_r": { "affine_point": "02".to_string() + &"11".repeat(32) },
+            "s": { "scalar": "22".repeat(32) }, "recovery_id": 0 },
+    });
+    PromiseResult::Successful(body.to_string().into_bytes())
+}
+
+fn callback(c: &mut Annon) {
+    c.on_payment_verified(
+        format!("0x{}", "11".repeat(32)),
+        format!("0x{}", "33".repeat(48)),
+        PAYER.into(),
+        format!("0x{}{}", "aa".repeat(32), "0000000000000007"),
+        SPLIT_PAYLOAD_HASH.into(),
+        "relayer.annon.defdone.near".parse().unwrap(),
+        U128(UNLOCK_DEPOSIT.as_yoctonear()),
+    );
+}
+
+/// NEAR sent back to the relayer since `before` receipts.
+fn refunded(before: usize) -> u128 {
+    get_created_receipts()[before..]
+        .iter()
+        .filter(|r| r.receiver_id.as_str() == "relayer.annon.defdone.near")
+        .flat_map(|r| r.actions.clone())
+        .map(|a| match a {
+            near_sdk::mock::MockAction::Transfer { deposit, .. } => deposit.as_yoctonear(),
+            _ => 0,
+        })
+        .sum()
+}
+
+fn assert_refused(reason: &str, before: usize) {
+    assert!(
+        near_sdk::test_utils::get_logs()
+            .iter()
+            .any(|l| l.contains(reason)),
+        "no log with {reason}: {:?}",
+        near_sdk::test_utils::get_logs()
+    );
+    assert_eq!(
+        refunded(before),
+        UNLOCK_DEPOSIT.as_yoctonear(),
+        "deposit not refunded in full"
+    );
+    assert!(!get_created_receipts()[before..]
+        .iter()
+        .any(|r| r.receiver_id.as_str() == "v1.signer"));
+}
+
+#[test]
+fn a_verified_payment_releases_the_key_and_records_the_buyer() {
+    let mut c = listed();
+    mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+    let before = get_created_receipts().len();
+    callback(&mut c);
+    let ckd = get_created_receipts()[before..]
+        .iter()
+        .filter(|r| r.receiver_id.as_str() == "v1.signer")
+        .count();
+    assert_eq!(ckd, 1, "no CKD request after a verified payment");
+    assert!(c.is_buyer(format!("0x{}", "11".repeat(32)), PAYER.into()));
+}
+
+#[test]
+fn a_different_payload_releases_nothing_and_refunds() {
+    let mut c = listed();
+    mpc_answered(verified(&"00".repeat(32)));
+    let before = get_created_receipts().len();
+    callback(&mut c);
+    assert_refused("MPC verified a different payload", before);
+    assert!(!c.is_buyer(format!("0x{}", "11".repeat(32)), PAYER.into()));
+}
+
+#[test]
+fn a_failed_mpc_call_releases_nothing_and_refunds() {
+    let mut c = listed();
+    mpc_answered(PromiseResult::Failed);
+    let before = get_created_receipts().len();
+    callback(&mut c);
+    assert_refused("MPC could not verify the payment", before);
+}
+
+#[test]
+fn a_failed_mpc_call_leaves_the_payment_unused() {
+    let mut c = listed();
+    mpc_answered(PromiseResult::Failed);
+    callback(&mut c);
+    context(UNLOCK_DEPOSIT);
+    c.unlock(unlock_args(split_log())); // retry is accepted
+}
+
+#[test]
+fn a_verified_payment_refunds_what_storage_did_not_use() {
+    let mut c = listed();
+    mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+    let before = get_created_receipts().len();
+    callback(&mut c);
+    let back = refunded(before);
+    assert!(
+        back > 0 && back < UNLOCK_DEPOSIT.as_yoctonear(),
+        "refund {back}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "attach at least")]
+fn unlock_needs_a_storage_deposit() {
+    let mut c = listed();
+    context(NearToken::from_yoctonear(0));
+    c.unlock(unlock_args(split_log()));
+}
+
+#[test]
+#[should_panic(expected = "payment already used")]
+fn one_payment_unlocks_once() {
+    let mut c = listed();
+    mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+    callback(&mut c);
+    context(UNLOCK_DEPOSIT);
+    c.unlock(unlock_args(split_log()));
+}
+
+#[test]
+fn two_unlocks_in_flight_release_once() {
+    let mut c = listed();
+    mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+    callback(&mut c);
+    mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+    let before = get_created_receipts().len();
+    callback(&mut c);
+    assert_refused("payment already used", before);
+}
+
+#[test]
+fn a_buyer_can_reopen_and_a_stranger_cannot() {
+    let mut c = listed();
+    mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+    callback(&mut c);
+    context(NearToken::from_yoctonear(0));
+    let file = format!("0x{}", "11".repeat(32));
+    let buyer = Seller::new(7);
+    assert_eq!(buyer.address(), PAYER);
+    let r = reopen_args(&file, &buyer);
+    let before = ckd_calls();
+    c.reopen(r.clone(), buyer.sign(&c.reopen_message(r)));
+    assert_eq!(ckd_calls(), before + 1);
+
+    let stranger = Seller::new(8);
+    let r = reopen_args(&file, &stranger);
+    let sig = stranger.sign(&c.reopen_message(r.clone()));
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.reopen(r, sig)));
+    assert!(refused.is_err());
 }
