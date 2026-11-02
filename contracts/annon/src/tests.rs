@@ -68,7 +68,7 @@ fn registers_a_file_signed_by_its_seller() {
     let seller = Seller::new(1);
     let a = args(&seller);
     let sig = signed(&c, &seller, &a);
-    c.register(a.clone(), sig).detach();
+    c.register(a.clone(), sig);
 
     let f = c.get_file(a.file_id).unwrap();
     assert_eq!(f.seller, seller.address());
@@ -89,7 +89,7 @@ fn registers_a_direct_x402_file() {
     };
     a.moderator = None;
     let sig = signed(&c, &seller, &a);
-    c.register(a.clone(), sig).detach();
+    c.register(a.clone(), sig);
     assert_eq!(c.get_file(a.file_id).unwrap().source, a.source);
 }
 
@@ -115,7 +115,7 @@ fn rejects_a_signature_from_someone_else() {
     let mut c = contract();
     let a = args(&Seller::new(1));
     let sig = signed(&c, &Seller::new(2), &a);
-    c.register(a, sig).detach();
+    c.register(a, sig);
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn rejects_a_field_changed_after_signing() {
     let mut a = args(&seller);
     let sig = signed(&c, &seller, &a);
     a.price = U128(1);
-    c.register(a, sig).detach();
+    c.register(a, sig);
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn rejects_a_signature_made_for_another_contract() {
     let other = c
         .register_message(a.clone())
         .replace(CONTRACT, "v2.annon.defdone.near");
-    c.register(a, seller.sign(&other)).detach();
+    c.register(a, seller.sign(&other));
 }
 
 #[test]
@@ -148,9 +148,9 @@ fn rejects_the_same_file_twice() {
     let seller = Seller::new(1);
     let a = args(&seller);
     let sig = signed(&c, &seller, &a);
-    c.register(a.clone(), sig.clone()).detach();
+    c.register(a.clone(), sig.clone());
     context(NearToken::from_millinear(100));
-    c.register(a, sig).detach();
+    c.register(a, sig);
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn rejects_an_expired_signature() {
     let mut a = args(&seller);
     a.deadline = NOW_S - 1;
     let sig = signed(&c, &seller, &a);
-    c.register(a, sig).detach();
+    c.register(a, sig);
 }
 
 #[test]
@@ -172,7 +172,7 @@ fn rejects_a_free_file() {
     let mut a = args(&seller);
     a.price = U128(0);
     let sig = signed(&c, &seller, &a);
-    c.register(a, sig).detach();
+    c.register(a, sig);
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn rejects_a_short_file_id() {
     let seller = Seller::new(1);
     let mut a = args(&seller);
     a.file_id = "0x1234".into();
-    c.register(a, "0x00".into()).detach();
+    c.register(a, "0x00".into());
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn rejects_a_wrong_size_one_time_key() {
     let seller = Seller::new(1);
     let mut a = args(&seller);
     a.seller_key = format!("0x{}", "33".repeat(32));
-    c.register(a, "0x00".into()).detach();
+    c.register(a, "0x00".into());
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn rejects_a_call_that_does_not_pay_for_storage() {
     let a = args(&seller);
     let sig = signed(&c, &seller, &a);
     context(NearToken::from_yoctonear(0));
-    c.register(a, sig).detach();
+    c.register(a, sig);
 }
 
 #[test]
@@ -228,7 +228,7 @@ fn no_moderator_and_an_account_named_none_sign_differently() {
     a.moderator = None;
     let sig = signed(&c, &seller, &a);
     a.moderator = Some("none".parse().unwrap());
-    c.register(a, sig).detach();
+    c.register(a, sig);
 }
 
 #[test]
@@ -248,7 +248,7 @@ fn asks_mpc_for_the_file_key_encrypted_to_the_seller() {
     let seller = Seller::new(1);
     let a = args(&seller);
     let sig = signed(&c, &seller, &a);
-    c.register(a, sig).detach();
+    c.register(a, sig);
 
     let call = get_created_receipts()
         .into_iter()
@@ -281,7 +281,7 @@ fn asks_mpc_for_the_file_key_encrypted_to_the_seller() {
 fn registered(c: &mut Annon, seller: &Seller) -> RegisterArgs {
     let a = args(seller);
     let sig = signed(c, seller, &a);
-    c.register(a.clone(), sig).detach();
+    c.register(a.clone(), sig);
     a
 }
 
@@ -309,7 +309,7 @@ fn seller_can_get_the_key_again_after_mpc_failed() {
     let before = ckd_calls();
     let r = reopen_args(&a.file_id, &seller);
     let sig = seller.sign(&c.reopen_message(r.clone()));
-    c.reopen(r, sig).detach();
+    c.reopen(r, sig);
     assert_eq!(ckd_calls(), before + 1);
 }
 
@@ -321,7 +321,7 @@ fn a_stranger_cannot_reopen() {
     let stranger = Seller::new(2);
     let r = reopen_args(&a.file_id, &stranger);
     let sig = stranger.sign(&c.reopen_message(r.clone()));
-    c.reopen(r, sig).detach();
+    c.reopen(r, sig);
 }
 
 #[test]
@@ -332,7 +332,7 @@ fn reopen_needs_the_wallet_signature() {
     let a = registered(&mut c, &seller);
     let r = reopen_args(&a.file_id, &seller);
     let sig = Seller::new(2).sign(&c.reopen_message(r.clone()));
-    c.reopen(r, sig).detach();
+    c.reopen(r, sig);
 }
 
 #[test]
@@ -344,7 +344,7 @@ fn a_reopen_signature_cannot_be_moved_to_another_key() {
     let mut r = reopen_args(&a.file_id, &seller);
     let sig = seller.sign(&c.reopen_message(r.clone()));
     r.key = format!("0x{}", "55".repeat(48));
-    c.reopen(r, sig).detach();
+    c.reopen(r, sig);
 }
 
 #[test]
@@ -356,7 +356,7 @@ fn rejects_an_expired_reopen() {
     let mut r = reopen_args(&a.file_id, &seller);
     r.deadline = NOW_S - 1;
     let sig = seller.sign(&c.reopen_message(r.clone()));
-    c.reopen(r, sig).detach();
+    c.reopen(r, sig);
 }
 
 #[test]
@@ -366,7 +366,7 @@ fn rejects_reopen_of_an_unknown_file() {
     let seller = Seller::new(1);
     let r = reopen_args(&format!("0x{}", "99".repeat(32)), &seller);
     let sig = seller.sign(&c.reopen_message(r.clone()));
-    c.reopen(r, sig).detach();
+    c.reopen(r, sig);
 }
 
 #[test]
