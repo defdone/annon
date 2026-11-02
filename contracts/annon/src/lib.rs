@@ -2,7 +2,7 @@
 use near_sdk::json_types::U128;
 use near_sdk::serde_json::json;
 use near_sdk::store::LookupMap;
-use near_sdk::{env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise};
+use near_sdk::{env, near, require, AccountId, Gas, NearToken, PanicOnDefault};
 
 /// Gas for `request_app_private_key`, as in NEAR MPC's own test contract.
 const CKD_GAS: Gas = Gas::from_tgas(30);
@@ -96,7 +96,7 @@ impl Annon {
     /// `register_message(args)` makes it valid. The caller pays for storage; the rest is refunded.
     /// Returns MPC's CKD answer (`big_y`, `big_c`): the file key encrypted to `seller_key`.
     #[payable]
-    pub fn register(&mut self, args: RegisterArgs, sig: String) -> Promise {
+    pub fn register(&mut self, args: RegisterArgs, sig: String) {
         let file_id = bytes::<32>(&args.file_id, "file_id");
         let seller = bytes::<20>(&args.seller, "seller");
         let cipher_hash = bytes::<32>(&args.cipher_hash, "cipher_hash");
@@ -169,7 +169,7 @@ impl Annon {
     /// Releases the file key again, to a new one-time key, with no new payment. Needs an EIP-191
     /// signature from `wallet` over `reopen_message(args)`. Replaying it gives nothing: the answer
     /// is encrypted to `args.key`, and only the signer holds its secret.
-    pub fn reopen(&mut self, args: ReopenArgs, sig: String) -> Promise {
+    pub fn reopen(&mut self, args: ReopenArgs, sig: String) {
         let file_id = bytes::<32>(&args.file_id, "file_id");
         let wallet = bytes::<20>(&args.wallet, "wallet");
         let key = bytes::<48>(&args.key, "key");
@@ -227,18 +227,24 @@ impl Annon {
 impl Annon {
     /// Asks MPC for the key of `file/<file_id>`, encrypted to the one-time key `to`.
     /// The key depends only on this contract's account and the path, never on `to`.
-    fn ckd(&self, file_id: &[u8; 32], to: &[u8; 48]) -> Promise {
+    /// Its answer becomes the return value of the calling method.
+    fn ckd(&self, file_id: &[u8; 32], to: &[u8; 48]) {
         let args = json!({ "request": {
             "derivation_path": format!("file/{}", hex::encode(file_id)),
             "app_public_key": { "AppPublicKey": format!("bls12381g1:{}", bs58::encode(to).into_string()) },
             "domain_id": self.ckd_domain,
         }});
-        Promise::new(self.mpc.clone()).function_call(
+        // Low-level promise API on purpose: near-sdk's `Promise` links every action host function,
+        // including ones mainnet doesn't have yet, and the deploy fails with a link error.
+        let p = env::promise_batch_create(&self.mpc);
+        env::promise_batch_action_function_call(
+            p,
             "request_app_private_key",
-            args.to_string().into_bytes(),
+            args.to_string().as_bytes(),
             NearToken::from_yoctonear(1),
             CKD_GAS,
-        )
+        );
+        env::promise_return(p);
     }
 }
 
@@ -287,9 +293,8 @@ fn pay_for_storage(bytes_used: u64) {
     );
     let refund = attached.saturating_sub(cost);
     if refund > NearToken::from_yoctonear(0) {
-        Promise::new(env::predecessor_account_id())
-            .transfer(refund)
-            .detach();
+        let p = env::promise_batch_create(&env::predecessor_account_id());
+        env::promise_batch_action_transfer(p, refund);
     }
 }
 
