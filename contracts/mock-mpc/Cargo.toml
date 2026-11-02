@@ -1,0 +1,13 @@
+[package]
+name = "mock-mpc"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Test stand-in for NEAR MPC (v1.signer), for Annon's sandbox tests only"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+near-sdk = "5.30.0"
