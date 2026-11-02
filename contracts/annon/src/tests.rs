@@ -48,7 +48,13 @@ pub(crate) fn context(deposit: NearToken) {
 }
 
 pub(crate) fn contract() -> Annon {
+    as_caller(CONTRACT, NearToken::from_yoctonear(0)); // init is a self-call in the deploy tx
+    let c = init();
     context(NearToken::from_millinear(100));
+    c
+}
+
+pub(crate) fn init() -> Annon {
     Annon::new(
         "v1.signer".parse().unwrap(),
         2,

@@ -2,13 +2,15 @@
 use near_mpc_contract_interface::types::{EvmLog, VerifyForeignTransactionResponse};
 use near_sdk::json_types::U128;
 use near_sdk::serde_json::json;
-use near_sdk::{env, near, require, AccountId, Gas, NearToken};
+use near_sdk::{env, near, require, AccountId, Gas, GasWeight, NearToken};
 
 use crate::evm::{bytes, hex0x};
 use crate::{Annon, AnnonExt, File, Source};
 
-/// The callback checks the answer and then asks for CKD.
+/// The callback checks the answer and then asks for CKD; it also gets a share of the unused gas.
 const CALLBACK_GAS: Gas = Gas::from_tgas(50);
+/// Below this the callback could run out of gas after the deposit was reserved.
+const MIN_UNLOCK_GAS: Gas = Gas::from_tgas(150);
 /// Attached to `unlock` for the buyer and payment records (about 0.002 NEAR); the rest comes back.
 pub(crate) const UNLOCK_DEPOSIT: NearToken = NearToken::from_millinear(5);
 
@@ -39,6 +41,10 @@ impl Annon {
     /// balance. What storage doesn't use comes back, and all of it if MPC fails.
     #[payable]
     pub fn unlock(&mut self, args: UnlockArgs) {
+        require!(
+            env::prepaid_gas() >= MIN_UNLOCK_GAS,
+            "attach at least 150 Tgas"
+        );
         let caller = env::predecessor_account_id();
         let attached = env::attached_deposit();
         let prepaid = attached.is_zero()
@@ -65,9 +71,9 @@ impl Annon {
         let deposit = if prepaid { UNLOCK_DEPOSIT } else { attached };
 
         let (p, expected) = self.verify_logs(&args.logs);
-        let then = env::promise_then(
-            p,
-            env::current_account_id(),
+        let then = env::promise_batch_then(p, &env::current_account_id());
+        env::promise_batch_action_function_call_weight(
+            then,
             "on_payment_verified",
             json!({
                 "file_id": hex0x(&file_id),
@@ -83,6 +89,7 @@ impl Annon {
             .as_bytes(),
             NearToken::from_yoctonear(0),
             CALLBACK_GAS,
+            GasWeight(1),
         );
         env::promise_return(then);
     }
@@ -565,5 +572,45 @@ mod tests {
             false,
         );
         assert!(c.is_buyer(format!("0x{}", "11".repeat(32)), PAYER.into()));
+    }
+
+    #[test]
+    #[should_panic(expected = "attach at least 150 Tgas")]
+    fn unlock_refuses_too_little_gas_for_its_callback() {
+        let mut c = listed();
+        near_sdk::testing_env!(near_sdk::test_utils::VMContextBuilder::new()
+            .current_account_id(CONTRACT.parse().unwrap())
+            .predecessor_account_id(RELAYER.parse().unwrap())
+            .attached_deposit(UNLOCK_DEPOSIT)
+            .block_timestamp(NOW_S * 1_000_000_000)
+            .prepaid_gas(near_sdk::Gas::from_tgas(149))
+            .build());
+        c.unlock(unlock_args(split_log()));
+    }
+
+    #[test]
+    fn mpc_and_the_callback_get_the_unused_gas_too() {
+        let mut c = listed();
+        c.unlock(unlock_args(split_log()));
+        let weights: Vec<(String, u64)> = get_created_receipts()
+            .into_iter()
+            .flat_map(|r| r.actions)
+            .filter_map(|a| match a {
+                near_sdk::mock::MockAction::FunctionCallWeight {
+                    method_name,
+                    gas_weight,
+                    ..
+                } => Some((String::from_utf8(method_name).unwrap(), gas_weight.0)),
+                _ => None,
+            })
+            .filter(|(m, _)| m != "request_app_private_key")
+            .collect();
+        assert_eq!(
+            weights,
+            vec![
+                ("verify_foreign_transaction".into(), 1),
+                ("on_payment_verified".into(), 1)
+            ]
+        );
     }
 }
