@@ -64,6 +64,8 @@ pub struct Annon {
     foreign_tx_domain: u64,
     /// Partner's splitter on Base, the only valid emitter of `PaymentSplit`.
     partner_splitter: [u8; 20],
+    /// USDC on Base, the only valid emitter of `AuthorizationUsed` and `Transfer` for x402.
+    usdc: [u8; 20],
     /// `file_id ‖ buyer address` for every wallet that paid.
     buyers: LookupMap<[u8; 52], ()>,
     /// `tx_hash ‖ log_index` of every payment that has released a key.
@@ -81,6 +83,7 @@ impl Annon {
         ckd_domain: u64,
         foreign_tx_domain: u64,
         partner_splitter: String,
+        usdc: String,
     ) -> Self {
         Self {
             files: LookupMap::new(b"f"),
@@ -88,6 +91,7 @@ impl Annon {
             ckd_domain,
             foreign_tx_domain,
             partner_splitter: bytes::<20>(&partner_splitter, "partner_splitter"),
+            usdc: bytes::<20>(&usdc, "usdc"),
             buyers: LookupMap::new(b"b"),
             used: LookupMap::new(b"u"),
             balances: LookupMap::new(b"s"),

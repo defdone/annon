@@ -49,7 +49,13 @@ pub(crate) fn context(deposit: NearToken) {
 
 pub(crate) fn contract() -> Annon {
     context(NearToken::from_millinear(100));
-    Annon::new("v1.signer".parse().unwrap(), 2, 3, SPLITTER.into())
+    Annon::new(
+        "v1.signer".parse().unwrap(),
+        2,
+        3,
+        SPLITTER.into(),
+        USDC.into(),
+    )
 }
 
 pub(crate) fn args(seller: &Seller) -> RegisterArgs {
@@ -136,11 +142,77 @@ pub(crate) fn split_log() -> EvmLog {
 }
 
 pub(crate) fn unlock_args(log: EvmLog) -> UnlockArgs {
+    unlock_logs(vec![log])
+}
+
+pub(crate) fn unlock_logs(logs: Vec<EvmLog>) -> UnlockArgs {
     UnlockArgs {
         file_id: format!("0x{}", "11".repeat(32)),
         buyer_key: format!("0x{}", "33".repeat(48)),
-        log,
+        logs,
     }
+}
+
+pub(crate) const USDC: &str = "0x5252525252525252525252525252525252525252";
+/// Address of Seller::new(9), the x402 seller's `pay_to`.
+pub(crate) const PAY_TO: &str = "0x58da990a8f4a3a6ca7cb6315d68a140105917352";
+// USDC `AuthorizationUsed` (log 7) and `Transfer` (log 8) of one direct x402 payment for the test
+// file and buyer key. Payload hash of both logs from the reference code, as for PaymentSplit.
+pub(crate) const AUTH_USED_TOPIC: &str =
+    "98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5";
+pub(crate) const TRANSFER_TOPIC: &str =
+    "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+pub(crate) const X402_NONCE: &str =
+    "52112c22da1c1cb9865e7e136a5162eca47f68141120192b9b448b228fc7c059";
+pub(crate) const X402_PAYLOAD_HASH: &str =
+    "0210acf134dff365035ba3e3ee5b8d685e8944ca97c04b23992ce9f079c62a1b";
+
+pub(crate) fn x402_logs() -> Vec<EvmLog> {
+    let log = |log_index, topics, data: &str| EvmLog {
+        removed: false,
+        log_index,
+        transaction_index: 5,
+        transaction_hash: h256(&"cc".repeat(32)),
+        block_hash: h256(&"bb".repeat(32)),
+        block_number: 0x3000000,
+        address: Hash160([0x52; 20]),
+        data: data.into(),
+        topics,
+    };
+    vec![
+        log(
+            7,
+            vec![
+                h256(AUTH_USED_TOPIC),
+                topic_address(PAYER),
+                h256(X402_NONCE),
+            ],
+            "0x",
+        ),
+        log(
+            8,
+            vec![
+                h256(TRANSFER_TOPIC),
+                topic_address(PAYER),
+                topic_address(PAY_TO),
+            ],
+            &format!("0x{:064x}", 10_000),
+        ),
+    ]
+}
+
+/// A contract with the test file listed for a direct x402 payment to `PAY_TO`.
+pub(crate) fn listed_x402() -> Annon {
+    let mut c = contract();
+    let seller = Seller::new(1);
+    let mut a = args(&seller);
+    a.source = Source::X402 {
+        pay_to: PAY_TO.into(),
+    };
+    let sig = signed(&c, &seller, &a);
+    c.register(a, sig);
+    context(UNLOCK_DEPOSIT);
+    c
 }
 
 /// A contract with the test file registered, ready for unlock.

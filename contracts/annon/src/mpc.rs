@@ -38,23 +38,28 @@ impl Annon {
         env::promise_return(p);
     }
 
-    /// Asks MPC to verify one Base log at `Safe` finality and returns the promise and the payload
-    /// hash we expect MPC to sign. MPC only answers if the log on Base is exactly this one.
-    pub(crate) fn verify_log(&self, log: &EvmLog) -> (PromiseIndex, [u8; 32]) {
+    /// Asks MPC to verify Base logs of one transaction at `Safe` finality and returns the promise
+    /// and the payload hash we expect MPC to sign. MPC only answers if the logs on Base are
+    /// exactly these.
+    pub(crate) fn verify_logs(&self, logs: &[EvmLog]) -> (PromiseIndex, [u8; 32]) {
         let request = ForeignChainRpcRequest::Base(EvmRpcRequest {
-            tx_id: EvmTxId(log.transaction_hash.0),
-            extractors: UpperBoundedVec::from_vec(vec![EvmExtractor::Log {
-                log_index: log.log_index,
-            }])
-            .unwrap(),
+            tx_id: EvmTxId(logs[0].transaction_hash.0),
+            extractors: UpperBoundedVec::from_vec(
+                logs.iter()
+                    .map(|l| EvmExtractor::Log {
+                        log_index: l.log_index,
+                    })
+                    .collect(),
+            )
+            .unwrap_or_else(|_| env::panic_str("too many logs")),
             finality: EvmFinality::Safe,
         });
         let expected = ForeignTxSignPayload::new(
             ForeignTxPayloadVersion::V1,
             request.clone(),
-            vec![ExtractedValue::EvmExtractedValue(EvmExtractedValue::Log(
-                log.clone(),
-            ))],
+            logs.iter()
+                .map(|l| ExtractedValue::EvmExtractedValue(EvmExtractedValue::Log(l.clone())))
+                .collect(),
         )
         .compute_msg_hash()
         .unwrap_or_else(|_| env::panic_str("cannot hash the payload"));
