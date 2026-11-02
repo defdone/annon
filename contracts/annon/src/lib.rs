@@ -6,7 +6,7 @@
 //! - prepaid storage for callers that can't attach a deposit (`storage.rs`)
 use near_sdk::json_types::U128;
 use near_sdk::store::LookupMap;
-use near_sdk::{near, AccountId, PanicOnDefault};
+use near_sdk::{env, near, require, AccountId, PanicOnDefault};
 
 mod evm;
 mod mpc;
@@ -85,6 +85,12 @@ impl Annon {
         payaion_splitter: String,
         usdc: String,
     ) -> Self {
+        // Deploy and init in one transaction, signed by the contract account. Nobody else can pick
+        // the MPC account, domains or payment sources that a locked contract trusts forever.
+        require!(
+            env::predecessor_account_id() == env::current_account_id(),
+            "only the contract account can initialize it"
+        );
         Self {
             files: LookupMap::new(b"f"),
             mpc,
@@ -116,5 +122,18 @@ impl Annon {
                 moderator: f.moderator.clone(),
                 sales_stopped: f.sales_stopped,
             })
+    }
+}
+
+#[cfg(test)]
+mod init_tests {
+    use crate::tests::*;
+    use near_sdk::NearToken;
+
+    #[test]
+    #[should_panic(expected = "only the contract account can initialize it")]
+    fn nobody_else_can_initialize_the_contract() {
+        as_caller("attacker.near", NearToken::from_yoctonear(0));
+        init();
     }
 }

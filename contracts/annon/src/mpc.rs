@@ -9,11 +9,13 @@ use near_mpc_contract_interface::types::{
     VerifyForeignTransactionRequestArgs,
 };
 use near_sdk::serde_json::json;
-use near_sdk::{env, Gas, NearToken, PromiseIndex};
+use near_sdk::{env, Gas, GasWeight, NearToken, PromiseIndex};
 
 use crate::Annon;
 
-/// Gas for `request_app_private_key` and `verify_foreign_transaction` (MPC asks for 15).
+/// Minimum gas for `request_app_private_key` and `verify_foreign_transaction` (MPC asks for 15
+/// today). Each call also gets a share of the unused gas, so if MPC ever asks for more, callers
+/// attach more gas instead of the locked contract breaking.
 const CKD_GAS: Gas = Gas::from_tgas(30);
 const VERIFY_GAS: Gas = Gas::from_tgas(30);
 
@@ -28,12 +30,13 @@ impl Annon {
             "domain_id": self.ckd_domain,
         }});
         let p = env::promise_batch_create(&self.mpc);
-        env::promise_batch_action_function_call(
+        env::promise_batch_action_function_call_weight(
             p,
             "request_app_private_key",
             args.to_string().as_bytes(),
             NearToken::from_yoctonear(1),
             CKD_GAS,
+            GasWeight(1),
         );
         env::promise_return(p);
     }
@@ -70,12 +73,13 @@ impl Annon {
             expected_payload_hash: Some(expected.clone()),
         }});
         let p = env::promise_batch_create(&self.mpc);
-        env::promise_batch_action_function_call(
+        env::promise_batch_action_function_call_weight(
             p,
             "verify_foreign_transaction",
             verify.to_string().as_bytes(),
             NearToken::from_yoctonear(1),
             VERIFY_GAS,
+            GasWeight(1),
         );
         (p, expected.0)
     }
