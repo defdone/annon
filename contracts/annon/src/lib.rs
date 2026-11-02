@@ -8,6 +8,7 @@ use near_sdk::json_types::U128;
 use near_sdk::store::LookupMap;
 use near_sdk::{env, near, require, AccountId, PanicOnDefault};
 
+mod events;
 mod evm;
 mod mpc;
 mod register;

@@ -4,11 +4,13 @@ use near_sdk::json_types::U128;
 use near_sdk::serde_json::json;
 use near_sdk::{env, near, require, AccountId, Gas, GasWeight, NearToken};
 
+use crate::events::emit;
 use crate::evm::{bytes, hex0x};
 use crate::{Annon, AnnonExt, File, Source};
 
-/// The callback checks the answer and then asks for CKD; it also gets a share of the unused gas.
-const CALLBACK_GAS: Gas = Gas::from_tgas(50);
+/// The callback checks the answer, then asks for CKD (30) and its confirmation (10); it also gets
+/// a share of the unused gas.
+const CALLBACK_GAS: Gas = Gas::from_tgas(60);
 /// Below this the callback could run out of gas after the deposit was reserved.
 const MIN_UNLOCK_GAS: Gas = Gas::from_tgas(150);
 /// Attached to `unlock` for the buyer and payment records (about 0.002 NEAR); the rest comes back.
@@ -62,7 +64,7 @@ impl Annon {
             .files
             .get(&file_id)
             .unwrap_or_else(|| env::panic_str("unknown file"));
-        let (payer, payment) = self.check_payment(file, &file_id, &buyer_key, &args.logs);
+        let (payer, payment, amount) = self.check_payment(file, &file_id, &buyer_key, &args.logs);
         require!(!self.used.contains_key(&payment), "payment already used");
 
         if prepaid {
@@ -84,6 +86,8 @@ impl Annon {
                 "caller": caller,
                 "deposit": U128(deposit.as_yoctonear()),
                 "prepaid": prepaid,
+                "amount": U128(amount),
+                "block_number": args.logs[0].block_number,
             })
             .to_string()
             .as_bytes(),
@@ -110,20 +114,40 @@ impl Annon {
         caller: AccountId,
         deposit: U128,
         prepaid: bool,
+        amount: U128,
+        block_number: u64,
     ) {
         let file_id = bytes::<32>(&file_id, "file_id");
+        let payer = bytes::<20>(&payer, "payer");
+        let payment = bytes::<40>(&payment, "payment");
         let deposit = NearToken::from_yoctonear(deposit.0);
         let recorded = self.record_payment(
             &file_id,
-            &bytes::<20>(&payer, "payer"),
-            bytes::<40>(&payment, "payment"),
+            &payer,
+            payment,
             &bytes::<32>(&payload_hash, "payload_hash"),
         );
         match recorded {
             Ok(cost) => {
                 self.give_back(&caller, deposit.saturating_sub(cost), prepaid);
-                // ponytail: receipt commitment (plan 4.5) comes next
-                self.ckd(&file_id, &bytes::<48>(&buyer_key, "buyer_key"));
+                emit(
+                    "payment_verified",
+                    json!({
+                        "file_id": hex0x(&file_id),
+                        "payer": hex0x(&payer),
+                        "buyer_key": buyer_key,
+                        "base_tx": hex0x(&payment[..32]),
+                        "log_index": u64::from_be_bytes(payment[32..].try_into().unwrap()),
+                        "amount": amount,
+                        "block_number": block_number,
+                    }),
+                );
+                self.ckd(
+                    &file_id,
+                    &bytes::<48>(&buyer_key, "buyer_key"),
+                    "unlock",
+                    &payer,
+                );
             }
             Err(reason) => {
                 env::log_str(&format!("unlock failed: {reason}"));
@@ -144,7 +168,7 @@ impl Annon {
         file_id: &[u8; 32],
         buyer_key: &[u8; 48],
         logs: &[EvmLog],
-    ) -> ([u8; 20], [u8; 40]) {
+    ) -> ([u8; 20], [u8; 40], u128) {
         require!(logs.iter().all(|l| !l.removed), "log was removed");
         let (payer, amount, nonce) = match &file.source {
             Source::Partner => {
@@ -202,7 +226,7 @@ impl Annon {
         let mut payment = [0u8; 40];
         payment[..32].copy_from_slice(&logs[0].transaction_hash.0);
         payment[32..].copy_from_slice(&logs[0].log_index.to_be_bytes());
-        (payer, payment)
+        (payer, payment, amount)
     }
 
     /// Checks MPC's answer and records the buyer and the payment. Returns the storage it used.
@@ -570,6 +594,8 @@ mod tests {
             RELAYER.parse().unwrap(),
             U128(UNLOCK_DEPOSIT.as_yoctonear()),
             false,
+            U128(10_000),
+            0x3000000,
         );
         assert!(c.is_buyer(format!("0x{}", "11".repeat(32)), PAYER.into()));
     }
@@ -612,5 +638,30 @@ mod tests {
                 ("on_payment_verified".into(), 1)
             ]
         );
+    }
+
+    #[test]
+    fn a_verified_payment_is_a_receipt_event() {
+        let mut c = listed();
+        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        let before = get_created_receipts().len();
+        callback(&mut c);
+        let e = &events("payment_verified")[0];
+        assert_eq!(e["file_id"], format!("0x{}", "11".repeat(32)));
+        assert_eq!(e["payer"], PAYER);
+        assert_eq!(e["buyer_key"], format!("0x{}", "33".repeat(48)));
+        assert_eq!(e["base_tx"], format!("0x{}", "aa".repeat(32)));
+        assert_eq!(e["log_index"], 7);
+        assert_eq!(e["amount"], "10000");
+        assert_eq!(e["block_number"], 0x3000000);
+        assert_eq!(self_calls(before), vec!["on_key_released"]);
+    }
+
+    #[test]
+    fn a_refused_payment_is_no_receipt() {
+        let mut c = listed();
+        mpc_answered(PromiseResult::Failed);
+        callback(&mut c);
+        assert!(events("payment_verified").is_empty());
     }
 }

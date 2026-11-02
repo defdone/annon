@@ -278,6 +278,8 @@ pub(crate) fn callback(c: &mut Annon) {
         "relayer.annon.defdone.near".parse().unwrap(),
         U128(UNLOCK_DEPOSIT.as_yoctonear()),
         false,
+        U128(10_000),
+        0x3000000,
     );
 }
 
@@ -338,5 +340,43 @@ pub(crate) fn prepaid_callback(c: &mut Annon) {
         RELAYER.parse().unwrap(),
         U128(UNLOCK_DEPOSIT.as_yoctonear()),
         true,
+        U128(10_000),
+        0x3000000,
     );
 }
+
+/// NEP-297 events with this name logged so far, as their `data[0]`.
+pub(crate) fn events(name: &str) -> Vec<near_sdk::serde_json::Value> {
+    near_sdk::test_utils::get_logs()
+        .iter()
+        .filter_map(|l| l.strip_prefix("EVENT_JSON:"))
+        .map(|j| near_sdk::serde_json::from_str::<near_sdk::serde_json::Value>(j).unwrap())
+        .inspect(|e| {
+            assert_eq!(e["standard"], "annon");
+            assert_eq!(e["version"], "1.0.0");
+        })
+        .filter(|e| e["event"] == name)
+        .map(|e| e["data"][0].clone())
+        .collect()
+}
+
+/// Method names of calls this contract scheduled on itself since `before` receipts.
+pub(crate) fn self_calls(before: usize) -> Vec<String> {
+    get_created_receipts()[before..]
+        .iter()
+        .filter(|r| r.receiver_id.as_str() == CONTRACT)
+        .flat_map(|r| r.actions.clone())
+        .filter_map(|a| match a {
+            near_sdk::mock::MockAction::FunctionCallWeight { method_name, .. } => {
+                Some(String::from_utf8(method_name).unwrap())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn ckd_answered(result: PromiseResult) {
+    mpc_answered(result)
+}
+
+pub(crate) const CKD_ANSWER: &str = r#"{"big_y":"bls12381g1:Y","big_c":"bls12381g1:C"}"#;
