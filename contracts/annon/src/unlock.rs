@@ -1,0 +1,393 @@
+//! Unlocking: a payment on Base, verified by NEAR MPC, releases the file key to the buyer.
+use near_mpc_contract_interface::types::{EvmLog, VerifyForeignTransactionResponse};
+use near_sdk::json_types::U128;
+use near_sdk::serde_json::json;
+use near_sdk::{env, near, require, AccountId, Gas, NearToken};
+
+use crate::evm::{bytes, hex0x};
+use crate::{Annon, AnnonExt, Source};
+
+/// The callback checks the answer and then asks for CKD.
+const CALLBACK_GAS: Gas = Gas::from_tgas(50);
+/// Attached to `unlock` for the buyer and payment records (about 0.002 NEAR); the rest comes back.
+pub(crate) const UNLOCK_DEPOSIT: NearToken = NearToken::from_millinear(5);
+
+/// Partner's splitter event: `PaymentSplit(payer, creator, total, dev, creatorAmount, nonce)`,
+/// with `payer` and `creator` indexed.
+const PAYMENT_SPLIT: &[u8] = b"PaymentSplit(address,address,uint256,uint256,uint256,bytes32)";
+
+#[near(serializers = [json])]
+pub struct UnlockArgs {
+    pub file_id: String,
+    /// The buyer's one-time BLS12-381 G1 key; the payment nonce must commit to it.
+    pub buyer_key: String,
+    /// The payment log exactly as `eth_getTransactionReceipt` returned it. MPC checks it on Base.
+    pub log: EvmLog,
+}
+
+#[near]
+impl Annon {
+    /// Releases the file key to the buyer's one-time key once NEAR MPC has verified the payment on
+    /// Base. Anyone may call it (relayer, agent, buyer): the key is useless without the buyer's
+    /// secret, and the nonce binds the payment to this file and this key. The caller attaches
+    /// `UNLOCK_DEPOSIT` for storage, or attaches nothing and has it reserved from their prepaid
+    /// balance. What storage doesn't use comes back, and all of it if MPC fails.
+    #[payable]
+    pub fn unlock(&mut self, args: UnlockArgs) {
+        let caller = env::predecessor_account_id();
+        let attached = env::attached_deposit();
+        let prepaid = attached.is_zero()
+            && self.balances.get(&caller).copied().unwrap_or(0) >= UNLOCK_DEPOSIT.as_yoctonear();
+        require!(
+            prepaid || attached >= UNLOCK_DEPOSIT,
+            format!(
+                "attach at least {} yoctoNEAR for storage, or call storage_deposit first",
+                UNLOCK_DEPOSIT.as_yoctonear()
+            )
+        );
+        let file_id = bytes::<32>(&args.file_id, "file_id");
+        let buyer_key = bytes::<48>(&args.buyer_key, "buyer_key");
+        let file = self
+            .files
+            .get(&file_id)
+            .unwrap_or_else(|| env::panic_str("unknown file"));
+        let log = &args.log;
+        require!(!log.removed, "log was removed");
+        // ponytail: x402 (two logs, USDC Transfer to pay_to) is the next step
+        require!(
+            file.source == Source::Partner,
+            "x402 unlock is not built yet"
+        );
+        require!(
+            log.address.0 == self.partner_splitter,
+            "log is not from the payment source"
+        );
+        require!(
+            log.topics.len() == 3 && log.topics[0].0 == env::keccak256_array(PAYMENT_SPLIT),
+            "not a PaymentSplit event"
+        );
+        let payer: [u8; 20] = log.topics[1].0[12..].try_into().unwrap();
+        let creator = &log.topics[2].0[12..];
+        let data = hex::decode(log.data.trim_start_matches("0x"))
+            .ok()
+            .filter(|d| d.len() == 128)
+            .unwrap_or_else(|| env::panic_str("bad PaymentSplit data"));
+        require!(creator == file.seller, "payment went to another seller");
+        require!(
+            data[..16].iter().all(|b| *b == 0)
+                && u128::from_be_bytes(data[16..32].try_into().unwrap()) >= file.price,
+            "payment is below the price"
+        );
+        require!(
+            data[96..128] == self.nonce(&file_id, &buyer_key),
+            "payment was not made for this file and key"
+        );
+        let mut payment = [0u8; 40];
+        payment[..32].copy_from_slice(&log.transaction_hash.0);
+        payment[32..].copy_from_slice(&log.log_index.to_be_bytes());
+        require!(!self.used.contains_key(&payment), "payment already used");
+
+        if prepaid {
+            *self.balances.get_mut(&caller).unwrap() -= UNLOCK_DEPOSIT.as_yoctonear();
+        }
+        let deposit = if prepaid { UNLOCK_DEPOSIT } else { attached };
+
+        let (p, expected) = self.verify_log(&args.log);
+        let then = env::promise_then(
+            p,
+            env::current_account_id(),
+            "on_payment_verified",
+            json!({
+                "file_id": hex0x(&file_id),
+                "buyer_key": hex0x(&buyer_key),
+                "payer": hex0x(&payer),
+                "payment": hex0x(&payment),
+                "payload_hash": hex::encode(expected),
+                "caller": caller,
+                "deposit": U128(deposit.as_yoctonear()),
+                "prepaid": prepaid,
+            })
+            .to_string()
+            .as_bytes(),
+            NearToken::from_yoctonear(0),
+            CALLBACK_GAS,
+        );
+        env::promise_return(then);
+    }
+
+    /// MPC's answer to `unlock`. Nothing is recorded unless MPC verified exactly our payload, so a
+    /// timeout or failure leaves the payment unused and `unlock` can be retried. It never panics:
+    /// a failure refunds the whole deposit and returns `{"error": ...}`; success returns the CKD
+    /// answer and refunds what storage didn't use.
+    #[private]
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_payment_verified(
+        &mut self,
+        file_id: String,
+        buyer_key: String,
+        payer: String,
+        payment: String,
+        payload_hash: String,
+        caller: AccountId,
+        deposit: U128,
+        prepaid: bool,
+    ) {
+        let file_id = bytes::<32>(&file_id, "file_id");
+        let deposit = NearToken::from_yoctonear(deposit.0);
+        let recorded = self.record_payment(
+            &file_id,
+            &bytes::<20>(&payer, "payer"),
+            bytes::<40>(&payment, "payment"),
+            &bytes::<32>(&payload_hash, "payload_hash"),
+        );
+        match recorded {
+            Ok(cost) => {
+                self.give_back(&caller, deposit.saturating_sub(cost), prepaid);
+                // ponytail: receipt commitment (plan 4.5) comes next
+                self.ckd(&file_id, &bytes::<48>(&buyer_key, "buyer_key"));
+            }
+            Err(reason) => {
+                env::log_str(&format!("unlock failed: {reason}"));
+                self.give_back(&caller, deposit, prepaid);
+                env::value_return(json!({ "error": reason }).to_string().as_bytes());
+            }
+        }
+    }
+}
+
+impl Annon {
+    /// Checks MPC's answer and records the buyer and the payment. Returns the storage it used.
+    fn record_payment(
+        &mut self,
+        file_id: &[u8; 32],
+        payer: &[u8; 20],
+        payment: [u8; 40],
+        expected: &[u8; 32],
+    ) -> Result<NearToken, &'static str> {
+        // An answer is a hash and a signature; anything larger is refused unread.
+        let answer = env::promise_result_checked(0, 1024)
+            .map_err(|_| "MPC could not verify the payment; retry unlock")?;
+        let response: VerifyForeignTransactionResponse = near_sdk::serde_json::from_slice(&answer)
+            .map_err(|_| "MPC could not verify the payment; bad answer")?;
+        if &response.payload_hash.0 != expected {
+            return Err("MPC verified a different payload");
+        }
+        let before = env::storage_usage();
+        // Checked again here: two unlocks for one payment can both be in flight.
+        if self.used.insert(payment, ()).is_some() {
+            return Err("payment already used");
+        }
+        self.buyers.insert(buyer_entry(file_id, payer), ());
+        self.used.flush();
+        self.buyers.flush();
+        Ok(env::storage_byte_cost().saturating_mul((env::storage_usage() - before).into()))
+    }
+
+    /// The EIP-3009 nonce a buyer signs (plan 4.2): binds the payment to this contract, this file
+    /// and this one-time key. The contract id is our own, so the concatenation is unambiguous.
+    fn nonce(&self, file_id: &[u8; 32], buyer_key: &[u8; 48]) -> [u8; 32] {
+        let mut m = b"annon/v1".to_vec();
+        m.extend_from_slice(env::current_account_id().as_bytes());
+        m.extend_from_slice(file_id);
+        m.extend_from_slice(buyer_key);
+        env::keccak256_array(&m)
+    }
+}
+
+pub(crate) fn buyer_entry(file_id: &[u8; 32], wallet: &[u8; 20]) -> [u8; 52] {
+    let mut k = [0u8; 52];
+    k[..32].copy_from_slice(file_id);
+    k[32..].copy_from_slice(wallet);
+    k
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::*;
+    use near_mpc_contract_interface::types::Hash160;
+    use near_sdk::test_utils::get_created_receipts;
+    use near_sdk::{NearToken, PromiseResult};
+
+    #[test]
+    fn unlock_asks_mpc_to_verify_the_exact_log_on_base() {
+        let mut c = listed();
+        c.unlock(unlock_args(split_log()));
+        let req = &mpc_call()["request"];
+        assert_eq!(req["expected_payload_hash"], SPLIT_PAYLOAD_HASH);
+        assert_eq!(req["domain_id"], 3);
+        assert_eq!(req["request"]["Base"]["finality"], "Safe");
+        assert_eq!(
+            req["request"]["Base"]["extractors"][0]["Log"]["log_index"],
+            7
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "log is not from the payment source")]
+    fn unlock_rejects_a_log_from_another_contract() {
+        let mut c = listed();
+        let mut log = split_log();
+        log.address = Hash160([0x52; 20]);
+        c.unlock(unlock_args(log));
+    }
+
+    #[test]
+    #[should_panic(expected = "not a PaymentSplit event")]
+    fn unlock_rejects_another_event() {
+        let mut c = listed();
+        let mut log = split_log();
+        log.topics[0] = h256(&"cd".repeat(32));
+        c.unlock(unlock_args(log));
+    }
+
+    #[test]
+    #[should_panic(expected = "payment went to another seller")]
+    fn unlock_rejects_a_payment_to_someone_else() {
+        let mut c = listed();
+        let mut log = split_log();
+        log.topics[2] = topic_address(&Seller::new(2).address());
+        c.unlock(unlock_args(log));
+    }
+
+    #[test]
+    #[should_panic(expected = "payment is below the price")]
+    fn unlock_rejects_a_payment_below_the_price() {
+        let mut c = listed();
+        let mut log = split_log();
+        log.data = SPLIT_DATA.replacen("2710", "270f", 1); // 9999 instead of 10000
+        c.unlock(unlock_args(log));
+    }
+
+    #[test]
+    #[should_panic(expected = "payment was not made for this file and key")]
+    fn unlock_rejects_a_payment_bound_to_another_key() {
+        let mut c = listed();
+        let mut a = unlock_args(split_log());
+        a.buyer_key = format!("0x{}", "44".repeat(48));
+        c.unlock(a);
+    }
+
+    #[test]
+    #[should_panic(expected = "log was removed")]
+    fn unlock_rejects_a_removed_log() {
+        let mut c = listed();
+        let mut log = split_log();
+        log.removed = true;
+        c.unlock(unlock_args(log));
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown file")]
+    fn unlock_rejects_an_unknown_file() {
+        let mut c = listed();
+        let mut a = unlock_args(split_log());
+        a.file_id = format!("0x{}", "99".repeat(32));
+        c.unlock(a);
+    }
+
+    #[test]
+    fn a_verified_payment_releases_the_key_and_records_the_buyer() {
+        let mut c = listed();
+        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        let before = get_created_receipts().len();
+        callback(&mut c);
+        let ckd = get_created_receipts()[before..]
+            .iter()
+            .filter(|r| r.receiver_id.as_str() == "v1.signer")
+            .count();
+        assert_eq!(ckd, 1, "no CKD request after a verified payment");
+        assert!(c.is_buyer(format!("0x{}", "11".repeat(32)), PAYER.into()));
+    }
+
+    #[test]
+    fn a_different_payload_releases_nothing_and_refunds() {
+        let mut c = listed();
+        mpc_answered(verified(&"00".repeat(32)));
+        let before = get_created_receipts().len();
+        callback(&mut c);
+        assert_refused("MPC verified a different payload", before);
+        assert!(!c.is_buyer(format!("0x{}", "11".repeat(32)), PAYER.into()));
+    }
+
+    #[test]
+    fn a_failed_mpc_call_releases_nothing_and_refunds() {
+        let mut c = listed();
+        mpc_answered(PromiseResult::Failed);
+        let before = get_created_receipts().len();
+        callback(&mut c);
+        assert_refused("MPC could not verify the payment", before);
+    }
+
+    #[test]
+    fn a_failed_mpc_call_leaves_the_payment_unused() {
+        let mut c = listed();
+        mpc_answered(PromiseResult::Failed);
+        callback(&mut c);
+        context(UNLOCK_DEPOSIT);
+        c.unlock(unlock_args(split_log())); // retry is accepted
+    }
+
+    #[test]
+    fn a_verified_payment_refunds_what_storage_did_not_use() {
+        let mut c = listed();
+        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        let before = get_created_receipts().len();
+        callback(&mut c);
+        let back = refunded(before);
+        assert!(
+            back > 0 && back < UNLOCK_DEPOSIT.as_yoctonear(),
+            "refund {back}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "attach at least")]
+    fn unlock_needs_a_storage_deposit() {
+        let mut c = listed();
+        context(NearToken::from_yoctonear(0));
+        c.unlock(unlock_args(split_log()));
+    }
+
+    #[test]
+    #[should_panic(expected = "payment already used")]
+    fn one_payment_unlocks_once() {
+        let mut c = listed();
+        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        callback(&mut c);
+        context(UNLOCK_DEPOSIT);
+        c.unlock(unlock_args(split_log()));
+    }
+
+    #[test]
+    fn two_unlocks_in_flight_release_once() {
+        let mut c = listed();
+        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        callback(&mut c);
+        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        let before = get_created_receipts().len();
+        callback(&mut c);
+        assert_refused("payment already used", before);
+    }
+
+    #[test]
+    fn a_buyer_can_reopen_and_a_stranger_cannot() {
+        let mut c = listed();
+        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        callback(&mut c);
+        context(NearToken::from_yoctonear(0));
+        let file = format!("0x{}", "11".repeat(32));
+        let buyer = Seller::new(7);
+        assert_eq!(buyer.address(), PAYER);
+        let r = reopen_args(&file, &buyer);
+        let before = ckd_calls();
+        c.reopen(r.clone(), buyer.sign(&c.reopen_message(r)));
+        assert_eq!(ckd_calls(), before + 1);
+
+        let stranger = Seller::new(8);
+        let r = reopen_args(&file, &stranger);
+        let sig = stranger.sign(&c.reopen_message(r.clone()));
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.reopen(r, sig)));
+        assert!(refused.is_err());
+    }
+}
