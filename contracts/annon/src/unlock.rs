@@ -5,7 +5,7 @@ use near_sdk::serde_json::json;
 use near_sdk::{env, near, require, AccountId, Gas, NearToken};
 
 use crate::evm::{bytes, hex0x};
-use crate::{Annon, AnnonExt, Source};
+use crate::{Annon, AnnonExt, File, Source};
 
 /// The callback checks the answer and then asks for CKD.
 const CALLBACK_GAS: Gas = Gas::from_tgas(50);
@@ -15,14 +15,19 @@ pub(crate) const UNLOCK_DEPOSIT: NearToken = NearToken::from_millinear(5);
 /// Payaion's splitter event: `PaymentSplit(payer, creator, total, dev, creatorAmount, nonce)`,
 /// with `payer` and `creator` indexed.
 const PAYMENT_SPLIT: &[u8] = b"PaymentSplit(address,address,uint256,uint256,uint256,bytes32)";
+/// USDC (EIP-3009) emits these two back to back in `transferWithAuthorization`.
+const AUTHORIZATION_USED: &[u8] = b"AuthorizationUsed(address,bytes32)";
+const TRANSFER: &[u8] = b"Transfer(address,address,uint256)";
 
 #[near(serializers = [json])]
 pub struct UnlockArgs {
     pub file_id: String,
     /// The buyer's one-time BLS12-381 G1 key; the payment nonce must commit to it.
     pub buyer_key: String,
-    /// The payment log exactly as `eth_getTransactionReceipt` returned it. MPC checks it on Base.
-    pub log: EvmLog,
+    /// The payment logs exactly as `eth_getTransactionReceipt` returned them; MPC checks them on
+    /// Base. Payaion: the `PaymentSplit` log. x402: USDC `AuthorizationUsed` and the `Transfer`
+    /// right after it.
+    pub logs: Vec<EvmLog>,
 }
 
 #[near]
@@ -51,40 +56,7 @@ impl Annon {
             .files
             .get(&file_id)
             .unwrap_or_else(|| env::panic_str("unknown file"));
-        let log = &args.log;
-        require!(!log.removed, "log was removed");
-        // ponytail: x402 (two logs, USDC Transfer to pay_to) is the next step
-        require!(
-            file.source == Source::Payaion,
-            "x402 unlock is not built yet"
-        );
-        require!(
-            log.address.0 == self.payaion_splitter,
-            "log is not from the payment source"
-        );
-        require!(
-            log.topics.len() == 3 && log.topics[0].0 == env::keccak256_array(PAYMENT_SPLIT),
-            "not a PaymentSplit event"
-        );
-        let payer: [u8; 20] = log.topics[1].0[12..].try_into().unwrap();
-        let creator = &log.topics[2].0[12..];
-        let data = hex::decode(log.data.trim_start_matches("0x"))
-            .ok()
-            .filter(|d| d.len() == 128)
-            .unwrap_or_else(|| env::panic_str("bad PaymentSplit data"));
-        require!(creator == file.seller, "payment went to another seller");
-        require!(
-            data[..16].iter().all(|b| *b == 0)
-                && u128::from_be_bytes(data[16..32].try_into().unwrap()) >= file.price,
-            "payment is below the price"
-        );
-        require!(
-            data[96..128] == self.nonce(&file_id, &buyer_key),
-            "payment was not made for this file and key"
-        );
-        let mut payment = [0u8; 40];
-        payment[..32].copy_from_slice(&log.transaction_hash.0);
-        payment[32..].copy_from_slice(&log.log_index.to_be_bytes());
+        let (payer, payment) = self.check_payment(file, &file_id, &buyer_key, &args.logs);
         require!(!self.used.contains_key(&payment), "payment already used");
 
         if prepaid {
@@ -92,7 +64,7 @@ impl Annon {
         }
         let deposit = if prepaid { UNLOCK_DEPOSIT } else { attached };
 
-        let (p, expected) = self.verify_log(&args.log);
+        let (p, expected) = self.verify_logs(&args.logs);
         let then = env::promise_then(
             p,
             env::current_account_id(),
@@ -156,6 +128,76 @@ impl Annon {
 }
 
 impl Annon {
+    /// Checks, before asking MPC, that the logs are a payment of at least the price to this file's
+    /// seller, bound by its nonce to this file and buyer key. MPC then only has to confirm the
+    /// logs are real. Returns the payer and the key that marks the payment used.
+    fn check_payment(
+        &self,
+        file: &File,
+        file_id: &[u8; 32],
+        buyer_key: &[u8; 48],
+        logs: &[EvmLog],
+    ) -> ([u8; 20], [u8; 40]) {
+        require!(logs.iter().all(|l| !l.removed), "log was removed");
+        let (payer, amount, nonce) = match &file.source {
+            Source::Payaion => {
+                require!(logs.len() == 1, "a Payaion payment is one log");
+                let split = &logs[0];
+                require!(
+                    split.address.0 == self.payaion_splitter,
+                    "log is not from the payment source"
+                );
+                require!(is_event(split, PAYMENT_SPLIT), "not a PaymentSplit event");
+                let data = words(split, 4, "bad PaymentSplit data");
+                require!(
+                    indexed_address(split, 2) == file.seller,
+                    "payment went to another seller"
+                );
+                let nonce: [u8; 32] = data[96..128].try_into().unwrap();
+                (indexed_address(split, 1), amount(&data[..32]), nonce)
+            }
+            Source::X402 { pay_to } => {
+                require!(logs.len() == 2, "an x402 payment is two logs");
+                let (auth, transfer) = (&logs[0], &logs[1]);
+                require!(
+                    auth.address.0 == self.usdc && transfer.address.0 == self.usdc,
+                    "log is not from the payment source"
+                );
+                require!(
+                    is_event(auth, AUTHORIZATION_USED),
+                    "not an AuthorizationUsed event"
+                );
+                require!(is_event(transfer, TRANSFER), "not a Transfer event");
+                // Adjacent logs of one transaction are one `transferWithAuthorization` call, so
+                // one Transfer can't be counted for two authorizations.
+                require!(
+                    transfer.transaction_hash == auth.transaction_hash
+                        && transfer.log_index == auth.log_index + 1,
+                    "the Transfer must follow its authorization"
+                );
+                require!(
+                    indexed_address(transfer, 1) == indexed_address(auth, 1),
+                    "the Transfer is not from the authorizer"
+                );
+                require!(
+                    indexed_address(transfer, 2) == bytes::<20>(pay_to, "pay_to"),
+                    "payment went to another seller"
+                );
+                let data = words(transfer, 1, "bad Transfer data");
+                (indexed_address(auth, 1), amount(&data), auth.topics[2].0)
+            }
+        };
+        require!(amount >= file.price, "payment is below the price");
+        require!(
+            nonce == self.nonce(file_id, buyer_key),
+            "payment was not made for this file and key"
+        );
+        let mut payment = [0u8; 40];
+        payment[..32].copy_from_slice(&logs[0].transaction_hash.0);
+        payment[32..].copy_from_slice(&logs[0].log_index.to_be_bytes());
+        (payer, payment)
+    }
+
     /// Checks MPC's answer and records the buyer and the payment. Returns the storage it used.
     fn record_payment(
         &mut self,
@@ -192,6 +234,31 @@ impl Annon {
         m.extend_from_slice(buyer_key);
         env::keccak256_array(&m)
     }
+}
+
+fn is_event(log: &EvmLog, signature: &[u8]) -> bool {
+    log.topics.len() == 3 && log.topics[0].0 == env::keccak256_array(signature)
+}
+
+/// An address in an indexed topic (the last 20 of its 32 bytes).
+fn indexed_address(log: &EvmLog, i: usize) -> [u8; 20] {
+    log.topics[i].0[12..].try_into().unwrap()
+}
+
+/// The log's data as `n` 32-byte words.
+fn words(log: &EvmLog, n: usize, error: &str) -> Vec<u8> {
+    hex::decode(log.data.trim_start_matches("0x"))
+        .ok()
+        .filter(|d| d.len() == 32 * n)
+        .unwrap_or_else(|| env::panic_str(error))
+}
+
+/// A uint256 amount; anything above u128 can't be real USDC, so it counts as zero.
+fn amount(word: &[u8]) -> u128 {
+    if word[..16].iter().any(|b| *b != 0) {
+        return 0;
+    }
+    u128::from_be_bytes(word[16..32].try_into().unwrap())
 }
 
 pub(crate) fn buyer_entry(file_id: &[u8; 32], wallet: &[u8; 20]) -> [u8; 52] {
@@ -389,5 +456,114 @@ mod tests {
         let sig = stranger.sign(&c.reopen_message(r.clone()));
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.reopen(r, sig)));
         assert!(refused.is_err());
+    }
+
+    #[test]
+    fn x402_unlock_asks_mpc_to_verify_both_usdc_logs() {
+        let mut c = listed_x402();
+        c.unlock(unlock_logs(x402_logs()));
+        let req = &mpc_call()["request"];
+        assert_eq!(req["expected_payload_hash"], X402_PAYLOAD_HASH);
+        let ex = &req["request"]["Base"]["extractors"];
+        assert_eq!(
+            (
+                ex[0]["Log"]["log_index"].clone(),
+                ex[1]["Log"]["log_index"].clone()
+            ),
+            (7.into(), 8.into())
+        );
+    }
+
+    fn x402_refused(change: impl FnOnce(&mut Vec<EvmLog>)) {
+        let mut c = listed_x402();
+        let mut logs = x402_logs();
+        change(&mut logs);
+        c.unlock(unlock_logs(logs));
+    }
+
+    #[test]
+    #[should_panic(expected = "log is not from the payment source")]
+    fn x402_rejects_logs_not_from_usdc() {
+        x402_refused(|l| l[1].address = Hash160([0x53; 20]));
+    }
+
+    #[test]
+    #[should_panic(expected = "not an AuthorizationUsed event")]
+    fn x402_rejects_a_missing_authorization() {
+        x402_refused(|l| l[0].topics[0] = h256(TRANSFER_TOPIC));
+    }
+
+    #[test]
+    #[should_panic(expected = "not a Transfer event")]
+    fn x402_rejects_a_missing_transfer() {
+        x402_refused(|l| l[1].topics[0] = h256(AUTH_USED_TOPIC));
+    }
+
+    #[test]
+    #[should_panic(expected = "the Transfer must follow its authorization")]
+    fn x402_rejects_a_transfer_that_is_not_the_next_log() {
+        x402_refused(|l| l[1].log_index = 9);
+    }
+
+    #[test]
+    #[should_panic(expected = "the Transfer must follow its authorization")]
+    fn x402_rejects_logs_from_two_transactions() {
+        x402_refused(|l| l[1].transaction_hash = h256(&"dd".repeat(32)));
+    }
+
+    #[test]
+    #[should_panic(expected = "payment went to another seller")]
+    fn x402_rejects_a_transfer_to_someone_else() {
+        x402_refused(|l| l[1].topics[2] = topic_address(&Seller::new(2).address()));
+    }
+
+    #[test]
+    #[should_panic(expected = "the Transfer is not from the authorizer")]
+    fn x402_rejects_a_transfer_from_another_wallet() {
+        x402_refused(|l| l[1].topics[1] = topic_address(&Seller::new(2).address()));
+    }
+
+    #[test]
+    #[should_panic(expected = "payment is below the price")]
+    fn x402_rejects_a_payment_below_the_price() {
+        x402_refused(|l| l[1].data = format!("0x{:064x}", 9_999));
+    }
+
+    #[test]
+    #[should_panic(expected = "payment was not made for this file and key")]
+    fn x402_rejects_an_authorization_for_another_key() {
+        x402_refused(|l| l[0].topics[2] = h256(&"ee".repeat(32)));
+    }
+
+    #[test]
+    #[should_panic(expected = "an x402 payment is two logs")]
+    fn x402_needs_both_logs() {
+        x402_refused(|l| {
+            l.pop();
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "a Payaion payment is one log")]
+    fn payaion_takes_one_log() {
+        let mut c = listed();
+        c.unlock(unlock_logs(vec![split_log(), split_log()]));
+    }
+
+    #[test]
+    fn a_verified_x402_payment_records_the_authorizer_as_buyer() {
+        let mut c = listed_x402();
+        mpc_answered(verified(X402_PAYLOAD_HASH));
+        c.on_payment_verified(
+            format!("0x{}", "11".repeat(32)),
+            format!("0x{}", "33".repeat(48)),
+            PAYER.into(),
+            format!("0x{}{}", "cc".repeat(32), "0000000000000007"),
+            X402_PAYLOAD_HASH.into(),
+            RELAYER.parse().unwrap(),
+            U128(UNLOCK_DEPOSIT.as_yoctonear()),
+            false,
+        );
+        assert!(c.is_buyer(format!("0x{}", "11".repeat(32)), PAYER.into()));
     }
 }
