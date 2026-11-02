@@ -21,6 +21,7 @@ dependencies = [
 name = "annon"
 version = "0.1.0"
 dependencies = [
+ "bs58 0.5.1",
  "hex",
  "k256",
  "near-sdk",

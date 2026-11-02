@@ -1,7 +1,11 @@
 //! Annon: NEAR releases a file key once it has verified the buyer's payment on Base.
 use near_sdk::json_types::U128;
+use near_sdk::serde_json::json;
 use near_sdk::store::LookupMap;
-use near_sdk::{env, near, require, AccountId, NearToken, PanicOnDefault, Promise};
+use near_sdk::{env, near, require, AccountId, Gas, NearToken, PanicOnDefault, Promise};
+
+/// Gas for `request_app_private_key`, as in NEAR MPC's own test contract.
+const CKD_GAS: Gas = Gas::from_tgas(30);
 
 /// Where the payment for a file comes from (plan 4.7).
 #[near(serializers = [borsh, json])]
@@ -36,6 +40,18 @@ pub struct RegisterArgs {
 }
 
 #[near(serializers = [json])]
+#[derive(Clone)]
+pub struct ReopenArgs {
+    pub file_id: String,
+    /// The EVM address asking: the seller, or (with `unlock`) a recorded buyer.
+    pub wallet: String,
+    /// A fresh one-time BLS12-381 G1 key (48 bytes compressed, hex).
+    pub key: String,
+    /// Unix seconds after which the signature is void.
+    pub deadline: u64,
+}
+
+#[near(serializers = [json])]
 pub struct FileView {
     pub seller: String,
     pub price: U128,
@@ -59,25 +75,32 @@ struct File {
 #[derive(PanicOnDefault)]
 pub struct Annon {
     files: LookupMap<[u8; 32], File>,
+    /// The NEAR MPC contract (`v1.signer` on mainnet).
+    mpc: AccountId,
+    /// MPC domain for CKD (BLS12-381; 2 on mainnet).
+    ckd_domain: u64,
 }
 
 #[near]
 impl Annon {
     #[init]
-    pub fn new() -> Self {
+    pub fn new(mpc: AccountId, ckd_domain: u64) -> Self {
         Self {
             files: LookupMap::new(b"f"),
+            mpc,
+            ckd_domain,
         }
     }
 
     /// Lists a file. Anyone may submit it; only the seller's EIP-191 signature over
     /// `register_message(args)` makes it valid. The caller pays for storage; the rest is refunded.
+    /// Returns MPC's CKD answer (`big_y`, `big_c`): the file key encrypted to `seller_key`.
     #[payable]
-    pub fn register(&mut self, args: RegisterArgs, sig: String) {
+    pub fn register(&mut self, args: RegisterArgs, sig: String) -> Promise {
         let file_id = bytes::<32>(&args.file_id, "file_id");
         let seller = bytes::<20>(&args.seller, "seller");
         let cipher_hash = bytes::<32>(&args.cipher_hash, "cipher_hash");
-        bytes::<48>(&args.seller_key, "seller_key");
+        let seller_key = bytes::<48>(&args.seller_key, "seller_key");
         if let Source::X402 { pay_to } = &args.source {
             bytes::<20>(pay_to, "pay_to");
         }
@@ -109,7 +132,8 @@ impl Annon {
         );
         self.files.flush();
         pay_for_storage(env::storage_usage() - before);
-        // ponytail: the CKD request to `seller_key` lands with the MPC integration, next step
+        // If MPC fails here the listing stays; the seller gets the key again through `reopen`.
+        self.ckd(&file_id, &seller_key)
     }
 
     /// The exact text the seller signs. The SDK shows this to the wallet, so both sides agree.
@@ -142,6 +166,50 @@ impl Annon {
         )
     }
 
+    /// Releases the file key again, to a new one-time key, with no new payment. Needs an EIP-191
+    /// signature from `wallet` over `reopen_message(args)`. Replaying it gives nothing: the answer
+    /// is encrypted to `args.key`, and only the signer holds its secret.
+    pub fn reopen(&mut self, args: ReopenArgs, sig: String) -> Promise {
+        let file_id = bytes::<32>(&args.file_id, "file_id");
+        let wallet = bytes::<20>(&args.wallet, "wallet");
+        let key = bytes::<48>(&args.key, "key");
+        require!(
+            env::block_timestamp() / 1_000_000_000 <= args.deadline,
+            "signature expired"
+        );
+        let file = self
+            .files
+            .get(&file_id)
+            .unwrap_or_else(|| env::panic_str("unknown file"));
+        require!(
+            recover_eip191(&self.reopen_message(args.clone()), &sig) == Some(wallet),
+            "signature is not from the wallet"
+        );
+        // ponytail: seller only until `unlock` records buyers
+        require!(
+            file.seller == wallet,
+            "only the seller or a buyer can reopen"
+        );
+        self.ckd(&file_id, &key)
+    }
+
+    /// The exact text a wallet signs to open a file again.
+    pub fn reopen_message(&self, args: ReopenArgs) -> String {
+        format!(
+            "Annon: open a file again\n\
+             contract: {}\n\
+             file: {}\n\
+             wallet: {}\n\
+             one-time key: {}\n\
+             valid until: {}",
+            env::current_account_id(),
+            hex0x(&bytes::<32>(&args.file_id, "file_id")),
+            hex0x(&bytes::<20>(&args.wallet, "wallet")),
+            hex0x(&bytes::<48>(&args.key, "key")),
+            args.deadline,
+        )
+    }
+
     pub fn get_file(&self, file_id: String) -> Option<FileView> {
         self.files
             .get(&bytes::<32>(&file_id, "file_id"))
@@ -153,6 +221,24 @@ impl Annon {
                 moderator: f.moderator.clone(),
                 sales_stopped: f.sales_stopped,
             })
+    }
+}
+
+impl Annon {
+    /// Asks MPC for the key of `file/<file_id>`, encrypted to the one-time key `to`.
+    /// The key depends only on this contract's account and the path, never on `to`.
+    fn ckd(&self, file_id: &[u8; 32], to: &[u8; 48]) -> Promise {
+        let args = json!({ "request": {
+            "derivation_path": format!("file/{}", hex::encode(file_id)),
+            "app_public_key": { "AppPublicKey": format!("bls12381g1:{}", bs58::encode(to).into_string()) },
+            "domain_id": self.ckd_domain,
+        }});
+        Promise::new(self.mpc.clone()).function_call(
+            "request_app_private_key",
+            args.to_string().into_bytes(),
+            NearToken::from_yoctonear(1),
+            CKD_GAS,
+        )
     }
 }
 
