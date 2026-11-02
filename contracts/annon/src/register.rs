@@ -3,10 +3,12 @@
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, require, AccountId};
 
+use crate::events::emit;
 use crate::evm::{bytes, hex0x, recover_eip191};
 use crate::storage::pay_for_storage;
 use crate::unlock::buyer_entry;
 use crate::{Annon, AnnonExt, File, Source};
+use near_sdk::serde_json::json;
 
 #[near(serializers = [json])]
 #[derive(Clone)]
@@ -69,6 +71,14 @@ impl Annon {
             "file already registered"
         );
 
+        let event = json!({
+            "file_id": hex0x(&file_id),
+            "seller": hex0x(&seller),
+            "price": args.price,
+            "source": args.source,
+            "cipher_hash": hex0x(&cipher_hash),
+            "moderator": args.moderator,
+        });
         let before = env::storage_usage();
         self.files.insert(
             file_id,
@@ -83,8 +93,9 @@ impl Annon {
         );
         self.files.flush();
         pay_for_storage(env::storage_usage() - before);
+        emit("register", event);
         // If MPC fails here the listing stays; the seller gets the key again through `reopen`.
-        self.ckd(&file_id, &seller_key)
+        self.ckd(&file_id, &seller_key, "register", &seller)
     }
 
     /// The exact text the seller signs. The SDK shows this to the wallet, so both sides agree.
@@ -140,7 +151,7 @@ impl Annon {
             file.seller == wallet || self.buyers.contains_key(&buyer_entry(&file_id, &wallet)),
             "only the seller or a buyer can reopen"
         );
-        self.ckd(&file_id, &key)
+        self.ckd(&file_id, &key, "reopen", &wallet)
     }
 
     /// The exact text a wallet signs to open a file again.
@@ -446,5 +457,80 @@ mod tests {
         let m = c.reopen_message(reopen_args(&args(&seller).file_id, &seller));
         assert!(m.starts_with("Annon: open a file again\n"), "{m}");
         assert!(m.contains(CONTRACT));
+    }
+
+    #[test]
+    fn register_emits_an_event_and_confirms_the_key_release() {
+        let mut c = contract();
+        let seller = Seller::new(1);
+        let a = args(&seller);
+        let sig = signed(&c, &seller, &a);
+        let before = get_created_receipts().len();
+        c.register(a.clone(), sig);
+        let e = &events("register")[0];
+        assert_eq!(e["file_id"], a.file_id);
+        assert_eq!(e["seller"], seller.address());
+        assert_eq!(e["price"], "10000");
+        assert_eq!(e["source"]["kind"], "payaion");
+        assert_eq!(e["cipher_hash"], a.cipher_hash);
+        assert_eq!(e["moderator"], "payaion-mod.sputnik-dao.near");
+        assert_eq!(self_calls(before), vec!["on_key_released"]);
+    }
+
+    #[test]
+    fn reopen_confirms_the_key_release_too() {
+        let mut c = contract();
+        let seller = Seller::new(1);
+        let a = registered(&mut c, &seller);
+        let r = reopen_args(&a.file_id, &seller);
+        let sig = seller.sign(&c.reopen_message(r.clone()));
+        let before = get_created_receipts().len();
+        c.reopen(r, sig);
+        assert_eq!(self_calls(before), vec!["on_key_released"]);
+    }
+
+    #[test]
+    fn a_released_key_is_a_receipt_event() {
+        let mut c = contract();
+        ckd_answered(near_sdk::PromiseResult::Successful(
+            CKD_ANSWER.as_bytes().to_vec(),
+        ));
+        c.on_key_released(
+            format!("0x{}", "11".repeat(32)),
+            format!("0x{}", "44".repeat(48)),
+            "reopen".into(),
+            PAYER.into(),
+        );
+        let e = &events("key_released")[0];
+        assert_eq!(e["file_id"], format!("0x{}", "11".repeat(32)));
+        assert_eq!(e["key"], format!("0x{}", "44".repeat(48)));
+        assert_eq!(e["reason"], "reopen");
+        assert_eq!(e["wallet"], PAYER);
+    }
+
+    #[test]
+    fn a_failed_key_release_is_no_receipt() {
+        let mut c = contract();
+        ckd_answered(near_sdk::PromiseResult::Failed);
+        c.on_key_released(
+            format!("0x{}", "11".repeat(32)),
+            format!("0x{}", "44".repeat(48)),
+            "unlock".into(),
+            PAYER.into(),
+        );
+        assert!(events("key_released").is_empty());
+        assert!(near_sdk::test_utils::get_logs()
+            .iter()
+            .any(|l| l.contains("call reopen")));
+    }
+
+    #[test]
+    fn the_mpc_answer_is_passed_back_unchanged() {
+        assert_eq!(
+            crate::mpc::release_output(Ok(CKD_ANSWER.as_bytes().to_vec())),
+            CKD_ANSWER.as_bytes()
+        );
+        let failed = String::from_utf8(crate::mpc::release_output(Err(()))).unwrap();
+        assert!(failed.contains("\"error\""), "{failed}");
     }
 }
