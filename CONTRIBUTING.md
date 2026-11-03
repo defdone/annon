@@ -2,7 +2,7 @@
 
 ## Setup
 
-- Node 22 or newer (CI runs 26), pnpm 10 (`corepack enable`)
+- Node 22 or newer (CI runs 26), pnpm 12 (`npm i -g pnpm@12`; the exact version is pinned in `package.json`)
 - Rust from `rust-toolchain.toml`, for the contract
 
 ```sh

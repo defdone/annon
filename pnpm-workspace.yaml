@@ -2,3 +2,7 @@ packages:
   - packages/*
   - apps/*
   - examples/*
+
+saveExact: true
+# Don't resolve packages published less than 14 days ago (in minutes).
+minimumReleaseAge: 20160
