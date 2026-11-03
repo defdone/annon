@@ -28,6 +28,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Explicit install from rust-toolchain.toml; the action alone relies on rustup's deprecated
+      # auto-install and warns about it.
+      - run: rustup toolchain install
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
