@@ -16,6 +16,7 @@ mod register;
 mod storage;
 #[cfg(test)]
 mod tests;
+mod text;
 mod unlock;
 
 use evm::{bytes, hex0x};
@@ -119,6 +120,15 @@ impl Annon {
             &bytes::<32>(&file_id, "file_id"),
             &bytes::<20>(&wallet, "wallet"),
         ))
+    }
+
+    /// Whether a Base payment has already unlocked a file: its transaction and the index of its
+    /// first log (`PaymentSplit`, or `AuthorizationUsed` for x402), as in `payment_verified`.
+    pub fn is_payment_used(&self, base_tx: String, log_index: u64) -> bool {
+        let mut payment = [0u8; 40];
+        payment[..32].copy_from_slice(&bytes::<32>(&base_tx, "base_tx"));
+        payment[32..].copy_from_slice(&log_index.to_be_bytes());
+        self.used.contains_key(&payment)
     }
 
     pub fn get_file(&self, file_id: String) -> Option<FileView> {

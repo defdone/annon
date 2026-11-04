@@ -5,6 +5,7 @@ use near_sdk::{env, near, require, NearToken};
 
 use crate::events::emit;
 use crate::evm::{bytes, hex0x, recover_eip191};
+use crate::text::utc;
 use crate::{Annon, AnnonExt, File};
 
 /// Base produces one block every 2 seconds from its genesis, so a verified block number gives the
@@ -61,12 +62,13 @@ impl Annon {
     pub fn stop_sales_message(&self, args: StopSalesArgs) -> String {
         format!(
             "Annon: stop selling a file\n\
+             Signing this is final: the file can't be sold again. Past buyers keep access.\n\
              contract: {}\n\
              file: {}\n\
              valid until: {}",
             env::current_account_id(),
             hex0x(&bytes::<32>(&args.file_id, "file_id")),
-            args.deadline,
+            utc(args.deadline),
         )
     }
 
@@ -207,6 +209,14 @@ mod tests {
             Some(NOW_S)
         );
         assert_eq!(events("sales_stopped")[0]["file_id"], FILE);
+    }
+
+    #[test]
+    fn the_stop_message_says_it_is_final_and_reads_in_utc() {
+        let c = listed();
+        let m = c.stop_sales_message(stop_args());
+        assert!(m.contains("this is final"), "{m}");
+        assert!(m.ends_with("\nvalid until: 2026-10-26 07:43:20 UTC"), "{m}");
     }
 
     #[test]

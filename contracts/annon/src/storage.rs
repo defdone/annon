@@ -1,5 +1,5 @@
 //! Storage money. Callers pay for what they store; a prepaid balance (NEP-145 style) lets a
-//! function-call key `unlock` without attaching a deposit.
+//! function-call key `register` and `unlock` without attaching a deposit.
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, require, AccountId, NearToken};
 
@@ -65,22 +65,32 @@ impl Annon {
             transfer(to, amount);
         }
     }
-}
 
-pub(crate) fn pay_for_storage(bytes_used: u64) {
-    let cost = env::storage_byte_cost().saturating_mul(bytes_used.into());
-    let attached = env::attached_deposit();
-    require!(
-        attached >= cost,
-        format!(
-            "attach at least {} yoctoNEAR for storage",
-            cost.as_yoctonear()
-        )
-    );
-    transfer(
-        &env::predecessor_account_id(),
-        attached.saturating_sub(cost),
-    );
+    /// Takes the storage a call used: from the attached deposit (the rest is refunded) or, when
+    /// nothing is attached, from the caller's prepaid balance, so a function-call key can pay.
+    pub(crate) fn pay_for_storage(&mut self, bytes_used: u64) {
+        let cost = env::storage_byte_cost().saturating_mul(bytes_used.into());
+        let caller = env::predecessor_account_id();
+        let attached = env::attached_deposit();
+        if attached.is_zero() {
+            if let Some(balance) = self
+                .balances
+                .get_mut(&caller)
+                .filter(|b| **b >= cost.as_yoctonear())
+            {
+                *balance -= cost.as_yoctonear();
+                return;
+            }
+        }
+        require!(
+            attached >= cost,
+            format!(
+                "attach at least {} yoctoNEAR for storage, or call storage_deposit first",
+                cost.as_yoctonear()
+            )
+        );
+        transfer(&caller, attached.saturating_sub(cost));
+    }
 }
 
 pub(crate) fn transfer(to: &AccountId, amount: NearToken) {

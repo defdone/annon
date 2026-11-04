@@ -116,6 +116,17 @@ impl World {
     }
 
     async fn register(&self, file: &str, source: Value) -> anyhow::Result<ExecutionFinalResult> {
+        self.register_by(&self.relayer, file, source, NearToken::from_millinear(10))
+            .await
+    }
+
+    async fn register_by(
+        &self,
+        by: &Account,
+        file: &str,
+        source: Value,
+        deposit: NearToken,
+    ) -> anyhow::Result<ExecutionFinalResult> {
         let args = json!({ "file_id": file, "seller": self.seller.address(), "price": PRICE.to_string(),
             "source": source, "cipher_hash": hex0x(&[0x22; 32]), "moderator": self.relayer.id(),
             "seller_key": hex0x(&[0x33; 48]), "deadline": 4_000_000_000u64 });
@@ -125,11 +136,10 @@ impl World {
             .args_json(json!({ "args": args }))
             .await?
             .json()?;
-        Ok(self
-            .relayer
+        Ok(by
             .call(self.annon.id(), "register")
             .args_json(json!({ "args": args, "sig": self.seller.sign(&message) }))
-            .deposit(NearToken::from_millinear(10))
+            .deposit(deposit)
             .gas(Gas::from_tgas(100))
             .transact()
             .await?)
@@ -321,6 +331,13 @@ async fn a_payaion_purchase_releases_the_key_with_the_minimum_gas() -> anyhow::R
     assert_eq!(paid["amount"], PRICE.to_string());
     assert_eq!(events(&out, "key_released")[0]["reason"], "unlock");
     assert!(w.is_buyer(&file).await?);
+    let used: bool = w
+        .annon
+        .view("is_payment_used")
+        .args_json(json!({ "base_tx": paid["base_tx"], "log_index": paid["log_index"] }))
+        .await?
+        .json()?;
+    assert!(used, "the payment must show as used after unlock");
     println!(
         "unlock (Payaion): {} Tgas burnt of 150 attached",
         tgas(&out)
@@ -468,7 +485,7 @@ async fn a_failed_key_release_keeps_the_purchase_and_reopen_gets_the_key() -> an
 }
 
 #[tokio::test]
-async fn a_function_call_key_unlocks_from_a_prepaid_balance_but_cannot_withdraw(
+async fn a_function_call_key_registers_and_unlocks_from_a_prepaid_balance_but_cannot_withdraw(
 ) -> anyhow::Result<()> {
     let w = world().await?;
     let file = w.file(6);
@@ -484,18 +501,41 @@ async fn a_function_call_key_unlocks_from_a_prepaid_balance_but_cannot_withdraw(
         .await?
         .into_result()?;
 
-    // The relayer's hot key: function-call only, limited to unlock and reopen on Annon.
+    // The relayer's hot key: function-call only, limited to Annon's relayed methods.
     let hot = SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
     w.relayer
         .batch(w.relayer.id())
         .add_key(
             hot.public_key(),
-            AccessKey::function_call_access(w.annon.id(), &["unlock", "reopen"], None),
+            AccessKey::function_call_access(
+                w.annon.id(),
+                &["register", "unlock", "reopen", "stop_sales"],
+                None,
+            ),
         )
         .transact()
         .await?
         .into_result()?;
     let agent = Account::from_secret_key(w.relayer.id().clone(), hot, &w.worker);
+
+    // A listing paid from the balance: the hot key can't attach a deposit.
+    let before = w.balance(&w.relayer).await?;
+    let listed = w.file(7);
+    let out = w
+        .register_by(
+            &agent,
+            &listed,
+            json!({ "kind": "payaion" }),
+            NearToken::from_yoctonear(0),
+        )
+        .await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    let used = before - w.balance(&w.relayer).await?;
+    assert!(
+        used > 0 && used < NearToken::from_millinear(5).as_yoctonear(),
+        "register took {used} yocto from the balance"
+    );
+    println!("register from the prepaid balance: {used} yoctoNEAR of storage");
 
     let out = w
         .unlock(
