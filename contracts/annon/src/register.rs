@@ -5,7 +5,7 @@ use near_sdk::{env, near, require, AccountId};
 
 use crate::events::emit;
 use crate::evm::{bytes, hex0x, recover_eip191};
-use crate::storage::pay_for_storage;
+use crate::text::{usdc, utc};
 use crate::unlock::buyer_entry;
 use crate::{Annon, AnnonExt, File, Source};
 use near_sdk::serde_json::json;
@@ -20,7 +20,7 @@ pub struct RegisterArgs {
     /// USDC base units (6 decimals).
     pub price: U128,
     pub source: Source,
-    /// sha256 of the PAY2 bytes, hex.
+    /// sha256 of the PAY2 body (the encrypted chunks, without the header), hex.
     pub cipher_hash: String,
     /// The only account that can take the file down. The contract can't tell whether the seller
     /// controls it, so the buyer's client shows it and refuses unknown moderators by default.
@@ -46,7 +46,8 @@ pub struct ReopenArgs {
 #[near]
 impl Annon {
     /// Lists a file. Anyone may submit it; only the seller's EIP-191 signature over
-    /// `register_message(args)` makes it valid. The caller pays for storage; the rest is refunded.
+    /// `register_message(args)` makes it valid. The caller pays for storage with an attached
+    /// deposit (the rest is refunded) or, attaching nothing, from its prepaid balance.
     /// Returns MPC's CKD answer (`big_y`, `big_c`): the file key encrypted to `seller_key`.
     #[payable]
     pub fn register(&mut self, args: RegisterArgs, sig: String) {
@@ -93,7 +94,7 @@ impl Annon {
             },
         );
         self.files.flush();
-        pay_for_storage(env::storage_usage() - before);
+        self.pay_for_storage(env::storage_usage() - before);
         emit("register", event);
         // If MPC fails here the listing stays; the seller gets the key again through `reopen`.
         self.ckd(&file_id, &seller_key, "register", &seller)
@@ -110,10 +111,11 @@ impl Annon {
         let moderator = args.moderator.as_ref().map_or("(none)", |m| m.as_str()); // "(" never appears in an account id
         format!(
             "Annon: list a file for sale\n\
+             Signing this lets whoever holds the seller key below open the file.\n\
              contract: {}\n\
              file: {}\n\
              seller: {}\n\
-             price: {} USDC base units (6 decimals)\n\
+             price: {} USDC\n\
              source: {source}\n\
              cipher: {}\n\
              moderator: {moderator}\n\
@@ -122,16 +124,18 @@ impl Annon {
             env::current_account_id(),
             hex0x(&bytes::<32>(&args.file_id, "file_id")),
             hex0x(&bytes::<20>(&args.seller, "seller")),
-            args.price.0,
+            usdc(args.price.0),
             hex0x(&bytes::<32>(&args.cipher_hash, "cipher_hash")),
             hex0x(&bytes::<48>(&args.seller_key, "seller_key")),
-            args.deadline,
+            utc(args.deadline),
         )
     }
 
     /// Releases the file key again, to a new one-time key, with no new payment. Needs an EIP-191
-    /// signature from `wallet` over `reopen_message(args)`. Replaying it gives nothing: the answer
-    /// is encrypted to `args.key`, and only the signer holds its secret.
+    /// signature from `wallet` over `reopen_message(args)`. The answer is encrypted to `args.key`,
+    /// so replaying the signature only helps whoever holds that key's secret. The signature
+    /// itself can't prove who made the key: the client must make it and build the text itself,
+    /// never accept them from a page or a server.
     pub fn reopen(&mut self, args: ReopenArgs, sig: String) {
         let file_id = bytes::<32>(&args.file_id, "file_id");
         let wallet = bytes::<20>(&args.wallet, "wallet");
@@ -160,6 +164,7 @@ impl Annon {
     pub fn reopen_message(&self, args: ReopenArgs) -> String {
         format!(
             "Annon: open a file again\n\
+             Signing this lets whoever holds the one-time key below open the file.\n\
              contract: {}\n\
              file: {}\n\
              wallet: {}\n\
@@ -169,7 +174,7 @@ impl Annon {
             hex0x(&bytes::<32>(&args.file_id, "file_id")),
             hex0x(&bytes::<20>(&args.wallet, "wallet")),
             hex0x(&bytes::<48>(&args.key, "key")),
-            args.deadline,
+            utc(args.deadline),
         )
     }
 }
@@ -221,12 +226,54 @@ mod tests {
         for part in [
             CONTRACT,
             &seller.address(),
-            "10000",
+            "\nprice: 0.01 USDC\n",
             "partner",
             "moderator.sputnik-dao.near",
+            "\nvalid until: 2026-10-26 07:43:20 UTC",
+            "lets whoever holds the seller key below open the file",
         ] {
             assert!(m.contains(part), "message is missing {part}:\n{m}");
         }
+    }
+
+    #[test]
+    fn reopen_message_says_it_gives_access_and_reads_in_utc() {
+        let c = contract();
+        let seller = Seller::new(1);
+        let m = c.reopen_message(reopen_args(&args(&seller).file_id, &seller));
+        assert!(
+            m.contains("lets whoever holds the one-time key below open the file"),
+            "{m}"
+        );
+        assert!(m.ends_with("\nvalid until: 2026-10-26 07:43:20 UTC"), "{m}");
+    }
+
+    #[test]
+    fn register_takes_storage_from_a_prepaid_balance_when_nothing_is_attached() {
+        let mut c = contract();
+        as_caller(RELAYER, NearToken::from_millinear(100));
+        c.storage_deposit(None);
+        let before = balance(&c, RELAYER);
+        as_caller(RELAYER, NearToken::from_yoctonear(0)); // a function-call key attaches nothing
+        let receipts = get_created_receipts().len();
+        registered(&mut c, &Seller::new(1));
+        let used = before - balance(&c, RELAYER);
+        assert!(
+            used > 0 && used < NearToken::from_millinear(5).as_yoctonear(),
+            "used {used}"
+        );
+        assert_eq!(refunded(receipts), 0, "nothing to refund from a balance");
+    }
+
+    #[test]
+    fn an_attached_deposit_pays_before_the_balance() {
+        let mut c = contract();
+        as_caller(RELAYER, NearToken::from_millinear(100));
+        c.storage_deposit(None);
+        let before = balance(&c, RELAYER);
+        as_caller(RELAYER, NearToken::from_millinear(10));
+        registered(&mut c, &Seller::new(1));
+        assert_eq!(balance(&c, RELAYER), before);
     }
 
     #[test]
@@ -316,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "attach at least")]
+    #[should_panic(expected = "for storage, or call storage_deposit first")]
     fn rejects_a_call_that_does_not_pay_for_storage() {
         let mut c = contract();
         let seller = Seller::new(1);

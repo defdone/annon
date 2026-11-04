@@ -332,6 +332,21 @@ mod tests {
     }
 
     #[test]
+    fn a_recorded_payment_shows_as_used() {
+        let mut c = listed();
+        let tx = format!("0x{}", "aa".repeat(32)); // the payment `callback` records
+        assert!(!c.is_payment_used(tx.clone(), 7));
+        c.unlock(unlock_args(split_log()));
+        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        callback(&mut c);
+        assert!(c.is_payment_used(tx.clone(), 7));
+        assert!(
+            !c.is_payment_used(tx, 8),
+            "another log of the same tx is another payment"
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "log is not from the payment source")]
     fn unlock_rejects_a_log_from_another_contract() {
         let mut c = listed();
