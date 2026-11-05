@@ -1,0 +1,20 @@
+{
+  "name": "@defdone/annon",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Files only the buyer can open: encrypted on the client, the key released by NEAR once the payment is verified.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "vitest": "5.0.5"
+  },
+  "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0"
+  }
+}
