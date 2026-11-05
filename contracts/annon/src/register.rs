@@ -237,6 +237,157 @@ mod tests {
         }
     }
 
+    /// specs/vectors/texts.json: the exact texts the contract asks wallets to sign, for clients to
+    /// reproduce byte for byte. `ANNON_WRITE_VECTORS=1 cargo test` rewrites the file; otherwise the
+    /// committed file must equal what the contract produces now.
+    #[test]
+    fn texts_match_the_shared_vectors() {
+        use crate::moderation::StopSalesArgs;
+        use near_sdk::serde_json::{to_value, Value};
+        use near_sdk::test_utils::VMContextBuilder;
+        use near_sdk::testing_env;
+
+        let at = |id: &str| {
+            testing_env!(VMContextBuilder::new()
+                .current_account_id(id.parse().unwrap())
+                .predecessor_account_id(id.parse().unwrap())
+                .build());
+            init()
+        };
+        let seller = Seller::new(1).address();
+        let register =
+            |price: u128, source: Source, moderator: Option<&str>, deadline: u64| RegisterArgs {
+                file_id: format!("0x{}", "11".repeat(32)),
+                seller: seller.clone(),
+                price: U128(price),
+                source,
+                cipher_hash: format!("0x{}", "22".repeat(32)),
+                moderator: moderator.map(|m| m.parse().unwrap()),
+                seller_key: format!("0x{}", "33".repeat(48)),
+                deadline,
+            };
+        let mixed_case = RegisterArgs {
+            file_id: "AbCdEf".repeat(10) + "0123",
+            seller: seller.to_uppercase().replace("0X", "0x"),
+            cipher_hash: "0x".to_string() + &"Ee".repeat(32),
+            ..register(
+                1,
+                Source::X402 {
+                    pay_to: "58DA990A8F4A3A6CA7CB6315D68A140105917352".into(),
+                },
+                None,
+                951_782_400,
+            )
+        };
+        let mut cases: Vec<Value> = vec![];
+        let mut add = |id: &str, contract: &str, kind: &str, args: Value, text: String| {
+            cases.push(near_sdk::serde_json::json!({ "id": id, "contractId": contract, "kind": kind, "args": args, "text": text }));
+        };
+        let main = "v1.annon.defdone.near";
+        let dev = "annon-dev.synthetic.near";
+        for (id, contract, a) in [
+            (
+                "register-partner",
+                main,
+                register(
+                    10_000,
+                    Source::Partner,
+                    Some("moderator.sputnik-dao.near"),
+                    1_793_000_600,
+                ),
+            ),
+            ("register-x402-mixed-case-hex", main, mixed_case),
+            (
+                "register-whole-usdc-epoch",
+                dev,
+                register(1_000_000, Source::Partner, None, 0),
+            ),
+            (
+                "register-fraction-2100",
+                main,
+                register(123_456_789, Source::Partner, None, 4_107_542_400),
+            ),
+            (
+                "register-1.5-end-of-2099",
+                main,
+                register(1_500_000, Source::Partner, None, 4_102_444_799),
+            ),
+            (
+                "register-max-price",
+                main,
+                register(u128::MAX, Source::Partner, None, 1_793_800_706),
+            ),
+        ] {
+            let text = at(contract).register_message(a.clone());
+            add(id, contract, "register", to_value(&a).unwrap(), text);
+        }
+        for (id, contract, a) in [
+            (
+                "reopen",
+                main,
+                ReopenArgs {
+                    file_id: format!("0x{}", "11".repeat(32)),
+                    wallet: seller.clone(),
+                    key: format!("0x{}", "44".repeat(48)),
+                    deadline: 1_793_000_600,
+                },
+            ),
+            (
+                "reopen-dev-no-prefix",
+                dev,
+                ReopenArgs {
+                    file_id: "ab".repeat(32),
+                    wallet: seller[2..].to_uppercase(),
+                    key: "Cd".repeat(48),
+                    deadline: 951_868_799,
+                },
+            ),
+        ] {
+            let text = at(contract).reopen_message(a.clone());
+            add(id, contract, "reopen", to_value(&a).unwrap(), text);
+        }
+        for (id, contract, a) in [
+            (
+                "stop-sales",
+                main,
+                StopSalesArgs {
+                    file_id: format!("0x{}", "11".repeat(32)),
+                    deadline: 1_793_000_600,
+                },
+            ),
+            (
+                "stop-sales-dev",
+                dev,
+                StopSalesArgs {
+                    file_id: "FF".repeat(32),
+                    deadline: 4_102_444_799,
+                },
+            ),
+        ] {
+            let text = at(contract).stop_sales_message(a.clone());
+            add(id, contract, "stop_sales", to_value(&a).unwrap(), text);
+        }
+
+        let file = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../specs/vectors/texts.json"
+        );
+        let json = near_sdk::serde_json::to_string_pretty(&near_sdk::serde_json::json!({
+            "source": "written by contracts/annon/src/register.rs texts_match_the_shared_vectors",
+            "cases": cases,
+        }))
+        .unwrap()
+            + "\n";
+        if std::env::var("ANNON_WRITE_VECTORS").is_ok() {
+            std::fs::write(file, &json).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap_or_default(),
+            json,
+            "specs/vectors/texts.json is stale: run ANNON_WRITE_VECTORS=1 cargo test"
+        );
+    }
+
     #[test]
     fn reopen_message_says_it_gives_access_and_reads_in_utc() {
         let c = contract();
