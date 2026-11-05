@@ -31,11 +31,10 @@ export type Pay2ErrorCode =
   | 'preview_invalid';
 
 export class Pay2Error extends Error {
-  constructor(
-    readonly code: Pay2ErrorCode,
-    message: string = code,
-  ) {
+  readonly code: Pay2ErrorCode;
+  constructor(code: Pay2ErrorCode, message: string = code) {
     super(message);
+    this.code = code;
     this.name = 'Pay2Error';
   }
 }
