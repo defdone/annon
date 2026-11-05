@@ -104,13 +104,15 @@ pub(crate) fn ckd_calls() -> usize {
         .count()
 }
 
-// A PaymentSplit log for args(Seller::new(1)) paid with buyer key 0x33..33. Its payload hash
-// (fff5f9d0...) was computed by the R2 spike code, which matched NEAR MPC byte for byte on mainnet.
+// A PaymentSplit log for args(Seller::new(1)) paid with buyer key 0x33..33. Its nonce is the
+// creator-bound one from specs/vectors/nonce.json ("unit-test-fixture", f01651c9...). The payload
+// hash was computed by the R2 spike code, which matched NEAR MPC byte for byte on mainnet (it gives
+// fff5f9d0... for the same log with the plain Annon nonce, the value before the creator binding).
 pub(crate) const SPLIT_TOPIC: &str =
     "1d53deaef03137ccd2fa5503b6c280dacfce2e7ae1483128fb0ebfc6fa050e8c";
-pub(crate) const SPLIT_DATA: &str = "0x000000000000000000000000000000000000000000000000000000000000271000000000000000000000000000000000000000000000000000000000000001f4000000000000000000000000000000000000000000000000000000000000251c52112c22da1c1cb9865e7e136a5162eca47f68141120192b9b448b228fc7c059";
+pub(crate) const SPLIT_DATA: &str = "0x000000000000000000000000000000000000000000000000000000000000271000000000000000000000000000000000000000000000000000000000000001f4000000000000000000000000000000000000000000000000000000000000251cf01651c947fc627fc5b67502b9918ad510ddb54771203306ec5ca7a178daad93";
 pub(crate) const SPLIT_PAYLOAD_HASH: &str =
-    "fff5f9d04947a46e1cd2ce279446e48cd6827d1e9faa3784638ae88b5ce7f9d0";
+    "be111d7b88c141e67b6db560274210d3728dd665aefa524c85fd83aca349ca31";
 
 pub(crate) fn h256(s: &str) -> Hash256 {
     Hash256(
