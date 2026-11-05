@@ -21,6 +21,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --prod
       - run: pnpm check
+      # The spec vectors are generated; fail if a generator and its committed file differ.
+      - run: node specs/vectors/pay2.mjs && node specs/vectors/nonce.mjs > /dev/null && git diff --exit-code specs/vectors
       - run: pnpm build
       - run: pnpm test
 

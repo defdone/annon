@@ -1,0 +1,23 @@
+{
+ "spec": "specs/nonce.md",
+ "cases": [
+  {
+   "id": "unit-test-fixture",
+   "contractId": "v1.annon.defdone.near",
+   "fileId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+   "buyerKey": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
+   "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
+   "annonNonce": "0x52112c22da1c1cb9865e7e136a5162eca47f68141120192b9b448b228fc7c059",
+   "partnerNonce": "0xf01651c947fc627fc5b67502b9918ad510ddb54771203306ec5ca7a178daad93"
+  },
+  {
+   "id": "mixed-bytes",
+   "contractId": "annon-dev.synthetic.near",
+   "fileId": "0x6a603067aa0b7d8d62a19310c0c00b6f48bb0247ca55bbff66604db1b5508efa",
+   "buyerKey": "0x3ac225168df54212a25c1c01fd35bebfea408fdac2e31ddd6f80a4bbf9a5f1cbb5553de315e0edf504d9150af82dafa5",
+   "seller": "0x00000000000000000000000000000000000000ff",
+   "annonNonce": "0xf3d33cab98ac2a2c6660ffd7289af0b9d162478de79a198879df1d74c1165915",
+   "partnerNonce": "0x64adbaa13445c82a64ee7c4618f62731224606c5413a48f3de0e6cbae880ef9b"
+  }
+ ]
+}
