@@ -224,8 +224,15 @@ impl Annon {
             }
         };
         require!(amount >= file.price, "payment is below the price");
+        let expected = match &file.source {
+            // The splitter refuses to settle unless the nonce also commits to `creator`, so a
+            // relayer can't send the money to anyone but the seller the buyer signed for.
+            Source::Partner => creator_bound(&file.seller, &self.nonce(file_id, buyer_key)),
+            // A direct x402 payment signs the recipient itself (`to`).
+            Source::X402 { .. } => self.nonce(file_id, buyer_key),
+        };
         require!(
-            nonce == self.nonce(file_id, buyer_key),
+            nonce == expected,
             "payment was not made for this file and key"
         );
         let mut payment = [0u8; 40];
@@ -277,6 +284,14 @@ impl Annon {
     }
 }
 
+/// `keccak256(abi.encodePacked(creator, commitment))`: the nonce of a Partner payment
+/// (`specs/nonce.md`), checked the same way by the splitter.
+fn creator_bound(creator: &[u8; 20], commitment: &[u8; 32]) -> [u8; 32] {
+    let mut m = creator.to_vec();
+    m.extend_from_slice(commitment);
+    env::keccak256_array(&m)
+}
+
 fn is_event(log: &EvmLog, signature: &[u8]) -> bool {
     log.topics.len() == 3 && log.topics[0].0 == env::keccak256_array(signature)
 }
@@ -315,7 +330,8 @@ mod tests {
     use crate::tests::*;
     use near_mpc_contract_interface::types::Hash160;
     use near_sdk::test_utils::get_created_receipts;
-    use near_sdk::{NearToken, PromiseResult};
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::{testing_env, NearToken, PromiseResult};
 
     #[test]
     fn unlock_asks_mpc_to_verify_the_exact_log_on_base() {
@@ -371,6 +387,62 @@ mod tests {
         let mut log = split_log();
         log.topics[2] = topic_address(&Seller::new(2).address());
         c.unlock(unlock_args(log));
+    }
+
+    #[test]
+    #[should_panic(expected = "payment was not made for this file and key")]
+    fn unlock_rejects_a_partner_payment_with_the_plain_annon_nonce() {
+        // What a client that skips the creator binding signs: the splitter's receive path would
+        // refuse it, and so does the contract.
+        let mut c = listed();
+        let mut log = split_log();
+        log.data = SPLIT_DATA.replace(
+            "f01651c947fc627fc5b67502b9918ad510ddb54771203306ec5ca7a178daad93",
+            X402_NONCE,
+        );
+        c.unlock(unlock_args(log));
+    }
+
+    #[test]
+    #[should_panic(expected = "payment was not made for this file and key")]
+    fn unlock_rejects_a_partner_nonce_bound_to_another_creator() {
+        let mut c = listed();
+        let mut log = split_log();
+        let other = super::creator_bound(&[0x22; 20], &h256(X402_NONCE).0);
+        log.data = SPLIT_DATA.replace(
+            "f01651c947fc627fc5b67502b9918ad510ddb54771203306ec5ca7a178daad93",
+            &hex::encode(other),
+        );
+        c.unlock(unlock_args(log));
+    }
+
+    /// specs/vectors/nonce.json is written by a JS script on @noble; this checks the contract's
+    /// own keccak against it, so the contract, the SDK and the splitter can't drift apart.
+    #[test]
+    fn the_nonces_match_the_shared_vectors() {
+        let vectors: near_sdk::serde_json::Value =
+            near_sdk::serde_json::from_str(include_str!("../../../specs/vectors/nonce.json"))
+                .unwrap();
+        for v in vectors["cases"].as_array().unwrap() {
+            let s = |k: &str| v[k].as_str().unwrap().trim_start_matches("0x").to_string();
+            let id: near_sdk::AccountId = v["contractId"].as_str().unwrap().parse().unwrap();
+            testing_env!(VMContextBuilder::new()
+                .current_account_id(id.clone())
+                .predecessor_account_id(id)
+                .build());
+            let c = init();
+            let file: [u8; 32] = hex::decode(s("fileId")).unwrap().try_into().unwrap();
+            let key: [u8; 48] = hex::decode(s("buyerKey")).unwrap().try_into().unwrap();
+            let seller: [u8; 20] = hex::decode(s("seller")).unwrap().try_into().unwrap();
+            let annon = c.nonce(&file, &key);
+            assert_eq!(hex::encode(annon), s("annonNonce"), "{}", v["id"]);
+            assert_eq!(
+                hex::encode(super::creator_bound(&seller, &annon)),
+                s("partnerNonce"),
+                "{}",
+                v["id"]
+            );
+        }
     }
 
     #[test]

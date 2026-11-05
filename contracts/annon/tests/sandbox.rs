@@ -145,13 +145,20 @@ impl World {
             .await?)
     }
 
+    /// What the buyer signs for a Partner file (specs/nonce.md): the Annon nonce bound to the seller.
+    fn partner_nonce(&self, file: &str, key: &str) -> [u8; 32] {
+        let mut m = hex::decode(&self.seller.address()[2..]).unwrap();
+        m.extend_from_slice(&self.nonce(file, key));
+        keccak(&m)
+    }
+
     fn split_logs(&self, file: &str, key: &str) -> Value {
         let data = format!(
             "0x{:064x}{:064x}{:064x}{}",
             PRICE,
             PRICE / 20,
             PRICE - PRICE / 20,
-            h(&self.nonce(file, key))
+            h(&self.partner_nonce(file, key))
         );
         json!([log(
             SPLITTER,

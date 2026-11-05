@@ -20,7 +20,8 @@ pub struct RegisterArgs {
     /// USDC base units (6 decimals).
     pub price: U128,
     pub source: Source,
-    /// sha256 of the PAY2 body (the encrypted chunks, without the header), hex.
+    /// The PAY2 `cipherHash` (`specs/pay2.md`, section 3), hex. The contract only stores it;
+    /// clients check the file against it.
     pub cipher_hash: String,
     /// The only account that can take the file down. The contract can't tell whether the seller
     /// controls it, so the buyer's client shows it and refuses unknown moderators by default.
