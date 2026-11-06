@@ -49,6 +49,17 @@ pub struct FileView {
     pub taken_down: Option<TakedownReason>,
 }
 
+/// What the contract was initialized with: the payment sources it trusts and the MPC it asks. A
+/// client checks a payment request against these before the buyer signs.
+#[near(serializers = [json])]
+pub struct ConfigView {
+    pub mpc: AccountId,
+    pub ckd_domain: u64,
+    pub foreign_tx_domain: u64,
+    pub payaion_splitter: String,
+    pub usdc: String,
+}
+
 #[near(serializers = [borsh])]
 struct File {
     seller: [u8; 20],
@@ -144,6 +155,16 @@ impl Annon {
                 taken_down: moderation::reason(f.taken_down),
             })
     }
+
+    pub fn get_config(&self) -> ConfigView {
+        ConfigView {
+            mpc: self.mpc.clone(),
+            ckd_domain: self.ckd_domain,
+            foreign_tx_domain: self.foreign_tx_domain,
+            payaion_splitter: hex0x(&self.payaion_splitter),
+            usdc: hex0x(&self.usdc),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +177,15 @@ mod init_tests {
     fn nobody_else_can_initialize_the_contract() {
         as_caller("attacker.near", NearToken::from_yoctonear(0));
         init();
+    }
+
+    #[test]
+    fn get_config_shows_what_init_was_given() {
+        as_caller(CONTRACT, NearToken::from_yoctonear(0));
+        let c = init().get_config();
+        assert_eq!(c.mpc.as_str(), "v1.signer");
+        assert_eq!((c.ckd_domain, c.foreign_tx_domain), (2, 3));
+        assert_eq!(c.payaion_splitter, SPLITTER.to_lowercase());
+        assert_eq!(c.usdc, USDC.to_lowercase());
     }
 }

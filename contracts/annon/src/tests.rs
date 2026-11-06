@@ -158,7 +158,37 @@ pub(crate) fn unlock_logs(logs: Vec<EvmLog>) -> UnlockArgs {
         file_id: format!("0x{}", "11".repeat(32)),
         buyer_key: format!("0x{}", "33".repeat(48)),
         logs,
+        header: None,
     }
+}
+
+/// An RLP block header for `log`'s block at Base time `time`, and the log with its `block_hash`
+/// set to the header's hash, as on Base. Fields other than number (8) and time (11) are zeros.
+pub(crate) fn with_header(mut log: EvmLog, time: u64) -> (EvmLog, String) {
+    let int = |n: u64| {
+        let b: Vec<u8> = n
+            .to_be_bytes()
+            .into_iter()
+            .skip_while(|x| *x == 0)
+            .collect();
+        match b.as_slice() {
+            [x] if *x < 0x80 => b,
+            _ => [vec![0x80 + b.len() as u8], b].concat(),
+        }
+    };
+    let mut fields = Vec::new();
+    for i in 0..15 {
+        fields.extend(match i {
+            8 => int(log.block_number),
+            11 => int(time),
+            _ => vec![0xa0].into_iter().chain([0u8; 32]).collect(),
+        });
+    }
+    let mut rlp = vec![0xf9, (fields.len() >> 8) as u8, fields.len() as u8];
+    rlp.extend(fields);
+    // sha3's Keccak, not the contract's env::keccak256: an independent hash.
+    log.block_hash = Hash256(Keccak256::digest(&rlp).into());
+    (log, format!("0x{}", hex::encode(rlp)))
 }
 
 pub(crate) const USDC: &str = "0x5252525252525252525252525252525252525252";
@@ -282,6 +312,7 @@ pub(crate) fn callback(c: &mut Annon) {
         false,
         U128(10_000),
         0x3000000,
+        None,
     );
 }
 
@@ -344,6 +375,7 @@ pub(crate) fn prepaid_callback(c: &mut Annon) {
         true,
         U128(10_000),
         0x3000000,
+        None,
     );
 }
 
