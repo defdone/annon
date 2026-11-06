@@ -287,7 +287,7 @@ describe('PAY2 against every single-bit change', () => {
         if (got !== 'refused') wrong.push(`bit ${bit}: ${got}`);
       }
       expect(wrong).toEqual([]);
-    });
+    }, 120_000); // thousands of opens; CI runners are slower than a laptop
   }
 
   it('refuses every flipped bit of the preview package', async () => {
