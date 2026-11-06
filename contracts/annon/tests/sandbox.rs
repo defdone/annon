@@ -13,9 +13,7 @@ const WASM_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../target/wasm32-unknown-unknown/release"
 );
-const SPLITTER: &str = "0x5151515151515151515151515151515151515151";
 const USDC: &str = "0x5252525252525252525252525252525252525252";
-const SPLIT: &str = "PaymentSplit(address,address,uint256,uint256,uint256,bytes32)";
 const AUTH_USED: &str = "AuthorizationUsed(address,bytes32)";
 const TRANSFER: &str = "Transfer(address,address,uint256)";
 const PRICE: u128 = 10_000;
@@ -72,7 +70,7 @@ async fn world() -> anyhow::Result<World> {
         .call("new")
         .args_json(
             json!({ "mpc": mpc.id(), "ckd_domain": 2, "foreign_tx_domain": 3,
-            "payaion_splitter": SPLITTER, "usdc": USDC }),
+            "usdc": USDC }),
         )
         .transact()
         .await?
@@ -115,8 +113,13 @@ impl World {
         keccak(&m)
     }
 
-    async fn register(&self, file: &str, source: Value) -> anyhow::Result<ExecutionFinalResult> {
-        self.register_by(&self.relayer, file, source, NearToken::from_millinear(10))
+    /// The address buyers pay for every test file (Wallet 9).
+    fn pay_to(&self) -> String {
+        Wallet::new(9).address()
+    }
+
+    async fn register(&self, file: &str) -> anyhow::Result<ExecutionFinalResult> {
+        self.register_by(&self.relayer, file, NearToken::from_millinear(10))
             .await
     }
 
@@ -124,11 +127,10 @@ impl World {
         &self,
         by: &Account,
         file: &str,
-        source: Value,
         deposit: NearToken,
     ) -> anyhow::Result<ExecutionFinalResult> {
         let args = json!({ "file_id": file, "seller": self.seller.address(), "price": PRICE.to_string(),
-            "source": source, "cipher_hash": hex0x(&[0x22; 32]), "moderator": self.relayer.id(),
+            "pay_to": self.pay_to(), "cipher_hash": hex0x(&[0x22; 32]), "moderator": self.relayer.id(),
             "seller_key": hex0x(&[0x33; 48]), "deadline": 4_000_000_000u64 });
         let message: String = self
             .annon
@@ -145,34 +147,9 @@ impl World {
             .await?)
     }
 
-    /// What the buyer signs for a Payaion file (specs/nonce.md): the Annon nonce bound to the seller.
-    fn payaion_nonce(&self, file: &str, key: &str) -> [u8; 32] {
-        let mut m = hex::decode(&self.seller.address()[2..]).unwrap();
-        m.extend_from_slice(&self.nonce(file, key));
-        keccak(&m)
-    }
-
-    fn split_logs(&self, file: &str, key: &str) -> Value {
-        let data = format!(
-            "0x{:064x}{:064x}{:064x}{}",
-            PRICE,
-            PRICE / 20,
-            PRICE - PRICE / 20,
-            h(&self.payaion_nonce(file, key))
-        );
-        json!([log(
-            SPLITTER,
-            7,
-            vec![
-                h(&keccak(SPLIT.as_bytes())),
-                topic_address(&self.buyer.address()),
-                topic_address(&self.seller.address())
-            ],
-            data
-        )])
-    }
-
-    fn x402_logs(&self, file: &str, key: &str, pay_to: &str) -> Value {
+    /// The USDC `AuthorizationUsed` and `Transfer` of one payment for `file` with buyer `key`.
+    fn payment_logs(&self, file: &str, key: &str) -> Value {
+        let pay_to = &self.pay_to();
         json!([
             log(
                 USDC,
@@ -274,7 +251,7 @@ async fn nobody_but_the_contract_account_can_initialize_it() -> anyhow::Result<(
         .call(annon.id(), "new")
         .args_json(
             json!({ "mpc": attacker.id(), "ckd_domain": 2, "foreign_tx_domain": 3,
-            "payaion_splitter": SPLITTER, "usdc": USDC }),
+            "usdc": USDC }),
         )
         .transact()
         .await?;
@@ -295,7 +272,7 @@ async fn callbacks_are_private() -> anyhow::Result<()> {
 #[tokio::test]
 async fn register_returns_the_key_answer_and_logs_receipts() -> anyhow::Result<()> {
     let w = world().await?;
-    let out = w.register(&w.file(1), json!({ "kind": "payaion" })).await?;
+    let out = w.register(&w.file(1)).await?;
     assert!(out.is_success(), "{:?}", out.failures());
     let answer = answer(&out);
     assert_eq!(answer["big_y"], "bls12381g1:mockY");
@@ -310,19 +287,17 @@ async fn register_returns_the_key_answer_and_logs_receipts() -> anyhow::Result<(
 }
 
 #[tokio::test]
-async fn a_payaion_purchase_releases_the_key_with_the_minimum_gas() -> anyhow::Result<()> {
+async fn a_purchase_releases_the_key_with_the_minimum_gas() -> anyhow::Result<()> {
     let w = world().await?;
     let file = w.file(2);
     let key = hex0x(&[0x33; 48]);
-    w.register(&file, json!({ "kind": "payaion" }))
-        .await?
-        .into_result()?;
+    w.register(&file).await?.into_result()?;
     let out = w
         .unlock(
             &w.relayer,
             &file,
             &key,
-            w.split_logs(&file, &key),
+            w.payment_logs(&file, &key),
             NearToken::from_millinear(5),
             150,
         )
@@ -345,36 +320,8 @@ async fn a_payaion_purchase_releases_the_key_with_the_minimum_gas() -> anyhow::R
         .await?
         .json()?;
     assert!(used, "the payment must show as used after unlock");
-    println!(
-        "unlock (Payaion): {} Tgas burnt of 150 attached",
-        tgas(&out)
-    );
+    println!("unlock: {} Tgas burnt of 150 attached", tgas(&out));
     assert!(tgas(&out) < 120, "unlock burnt {} Tgas", tgas(&out));
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_direct_x402_purchase_releases_the_key() -> anyhow::Result<()> {
-    let w = world().await?;
-    let file = w.file(3);
-    let key = hex0x(&[0x33; 48]);
-    let pay_to = Wallet::new(9).address();
-    w.register(&file, json!({ "kind": "x402", "pay_to": pay_to }))
-        .await?
-        .into_result()?;
-    let out = w
-        .unlock(
-            &w.relayer,
-            &file,
-            &key,
-            w.x402_logs(&file, &key, &pay_to),
-            NearToken::from_millinear(5),
-            150,
-        )
-        .await?;
-    assert!(out.is_success(), "{:?}", out.failures());
-    assert_eq!(events(&out, "key_released").len(), 1);
-    println!("unlock (x402, two logs): {} Tgas burnt", tgas(&out));
     Ok(())
 }
 
@@ -384,9 +331,7 @@ async fn a_failed_check_refunds_the_reservation_and_the_payment_can_be_retried(
     let w = world().await?;
     let file = w.file(4);
     let key = hex0x(&[0x33; 48]);
-    w.register(&file, json!({ "kind": "payaion" }))
-        .await?
-        .into_result()?;
+    w.register(&file).await?.into_result()?;
     w.relayer
         .call(w.annon.id(), "storage_deposit")
         .args_json(json!({}))
@@ -403,7 +348,7 @@ async fn a_failed_check_refunds_the_reservation_and_the_payment_can_be_retried(
                 &w.relayer,
                 &file,
                 &key,
-                w.split_logs(&file, &key),
+                w.payment_logs(&file, &key),
                 NearToken::from_yoctonear(0),
                 150,
             )
@@ -428,7 +373,7 @@ async fn a_failed_check_refunds_the_reservation_and_the_payment_can_be_retried(
             &w.relayer,
             &file,
             &key,
-            w.split_logs(&file, &key),
+            w.payment_logs(&file, &key),
             NearToken::from_yoctonear(0),
             150,
         )
@@ -449,16 +394,14 @@ async fn a_failed_key_release_keeps_the_purchase_and_reopen_gets_the_key() -> an
     let w = world().await?;
     let file = w.file(5);
     let key = hex0x(&[0x33; 48]);
-    w.register(&file, json!({ "kind": "payaion" }))
-        .await?
-        .into_result()?;
+    w.register(&file).await?.into_result()?;
     w.mode("ok", "fail").await?;
     let out = w
         .unlock(
             &w.relayer,
             &file,
             &key,
-            w.split_logs(&file, &key),
+            w.payment_logs(&file, &key),
             NearToken::from_millinear(5),
             150,
         )
@@ -497,9 +440,7 @@ async fn a_function_call_key_registers_and_unlocks_from_a_prepaid_balance_but_ca
     let w = world().await?;
     let file = w.file(6);
     let key = hex0x(&[0x33; 48]);
-    w.register(&file, json!({ "kind": "payaion" }))
-        .await?
-        .into_result()?;
+    w.register(&file).await?.into_result()?;
     w.relayer
         .call(w.annon.id(), "storage_deposit")
         .args_json(json!({}))
@@ -529,12 +470,7 @@ async fn a_function_call_key_registers_and_unlocks_from_a_prepaid_balance_but_ca
     let before = w.balance(&w.relayer).await?;
     let listed = w.file(7);
     let out = w
-        .register_by(
-            &agent,
-            &listed,
-            json!({ "kind": "payaion" }),
-            NearToken::from_yoctonear(0),
-        )
+        .register_by(&agent, &listed, NearToken::from_yoctonear(0))
         .await?;
     assert!(out.is_success(), "{:?}", out.failures());
     let used = before - w.balance(&w.relayer).await?;
@@ -549,7 +485,7 @@ async fn a_function_call_key_registers_and_unlocks_from_a_prepaid_balance_but_ca
             &agent,
             &file,
             &key,
-            w.split_logs(&file, &key),
+            w.payment_logs(&file, &key),
             NearToken::from_yoctonear(0),
             150,
         )
@@ -575,9 +511,7 @@ async fn a_takedown_blocks_unlock_until_restore() -> anyhow::Result<()> {
     let w = world().await?;
     let file = w.file(7);
     let key = hex0x(&[0x33; 48]);
-    w.register(&file, json!({ "kind": "payaion" }))
-        .await?
-        .into_result()?; // moderator: the relayer account
+    w.register(&file).await?.into_result()?; // moderator: the relayer account
     w.relayer
         .call(w.annon.id(), "takedown")
         .args_json(json!({ "file_id": file, "reason": "court_order" }))
@@ -590,7 +524,7 @@ async fn a_takedown_blocks_unlock_until_restore() -> anyhow::Result<()> {
             &w.relayer,
             &file,
             &key,
-            w.split_logs(&file, &key),
+            w.payment_logs(&file, &key),
             NearToken::from_millinear(5),
             150,
         )
@@ -608,7 +542,7 @@ async fn a_takedown_blocks_unlock_until_restore() -> anyhow::Result<()> {
             &w.relayer,
             &file,
             &key,
-            w.split_logs(&file, &key),
+            w.payment_logs(&file, &key),
             NearToken::from_millinear(5),
             150,
         )
@@ -635,9 +569,7 @@ async fn after_a_stop_unlock_reads_the_payment_time_from_the_real_block_header(
     let w = world().await?;
     let file = w.file(9);
     let key = hex0x(&[0x33; 48]);
-    w.register(&file, json!({ "kind": "payaion" }))
-        .await?
-        .into_result()?;
+    w.register(&file).await?.into_result()?;
     let stop = json!({ "file_id": file, "deadline": 4_000_000_000u64 });
     let message: String = w
         .annon
@@ -654,9 +586,11 @@ async fn after_a_stop_unlock_reads_the_payment_time_from_the_real_block_header(
 
     // The payment sits in a real Base block from before the stop (3 Nov 2026).
     let (header, hash, number) = real_header(0);
-    let mut logs = w.split_logs(&file, &key);
-    logs[0]["block_hash"] = json!(hash);
-    logs[0]["block_number"] = json!(number);
+    let mut logs = w.payment_logs(&file, &key);
+    for i in 0..2 {
+        logs[i]["block_hash"] = json!(hash);
+        logs[i]["block_number"] = json!(number);
+    }
     let send = |header: Option<String>| {
         w.relayer
             .call(w.annon.id(), "unlock")
