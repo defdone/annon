@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getFile, isBuyer, isPaymentUsed, NearError, readOutcome, view } from './rpc.js';
+import { getConfig, getFile, isBuyer, isPaymentUsed, NearError, readOutcome, view } from './rpc.js';
 import {
   hex0x,
   type RegisterArgs,
@@ -222,6 +222,36 @@ describe('views', () => {
     ]) {
       respond({ result: { result: bytes(bad) } });
       expect(await codeOf(getFile('https://rpc', CONTRACT, '0x11'))).toBe('transport');
+    }
+  });
+
+  it('reads get_config and refuses an answer that is not what the contract returns', async () => {
+    const config = {
+      mpc: 'v1.signer',
+      ckd_domain: 2,
+      foreign_tx_domain: 3,
+      payaion_splitter: `0x${'51'.repeat(20)}`,
+      usdc: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
+    };
+    respond({ result: { result: bytes(config) } });
+    expect(await getConfig('https://rpc', CONTRACT)).toEqual({
+      mpc: 'v1.signer',
+      ckdDomain: 2,
+      foreignTxDomain: 3,
+      payaionSplitter: config.payaion_splitter,
+      usdc: config.usdc,
+    });
+    for (const bad of [
+      { ...config, mpc: 'Not An Account' },
+      { ...config, ckd_domain: '2' },
+      { ...config, foreign_tx_domain: 1.5 },
+      { ...config, payaion_splitter: '0x833589FCD6EDB6E08F4C7C32D4F71B54BDA02913' },
+      { ...config, payaion_splitter: `0x${'51'.repeat(19)}` },
+      { ...config, usdc: undefined },
+      null,
+    ]) {
+      respond({ result: { result: bytes(bad) } });
+      expect(await codeOf(getConfig('https://rpc', CONTRACT))).toBe('transport');
     }
   });
 
