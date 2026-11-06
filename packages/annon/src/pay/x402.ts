@@ -1,0 +1,151 @@
+/**
+ * The x402 v2 envelope of an Annon purchase (`specs/x402-annon.md`): reading the `PAYMENT-REQUIRED`
+ * header, finding the file it sells, and building the `PAYMENT-SIGNATURE` header. Nothing read here
+ * is trusted: `preflight` compares it with the contract.
+ */
+import { fail } from './base.js';
+import type { Authorization } from './eip3009.js';
+
+/** CAIP-2 id of Base mainnet. */
+export const BASE_NETWORK = 'eip155:8453';
+/**
+ * The scheme of a splitter (Partner) offer: EIP-3009 `ReceiveWithAuthorization`, which only the
+ * splitter can settle. Its own scheme, not `exact`, so a client without Annon has no handler for
+ * it and signs nothing (checked against the official x402 client).
+ */
+export const ANNON_RECEIVE = 'annon-receive';
+/**
+ * The scheme of a direct offer: plain EIP-3009 `TransferWithAuthorization` to the seller, under its
+ * own name for the same reason. The seller settles it through any standard facilitator as `exact`
+ * (`forFacilitator`): the scheme label is not part of what the buyer signs.
+ */
+export const ANNON_EXACT = 'annon-exact';
+/** Contracts the SDK trusts without being told: the one Annon deployment on NEAR mainnet. */
+export const TRUSTED_CONTRACTS: readonly string[] = ['v1.annon.defdone.near'];
+
+export interface Offer {
+  scheme: string;
+  network: string;
+  amount: string;
+  asset: string;
+  payTo: string;
+  maxTimeoutSeconds: number;
+  extra?: Record<string, unknown>;
+}
+
+/** `extensions.annon` as a server advertises it. */
+export interface AnnonExtension {
+  info: {
+    version?: unknown;
+    network?: unknown;
+    contract?: unknown;
+    fileId?: unknown;
+    header?: unknown;
+    download?: unknown;
+    public?: unknown;
+  };
+  schema?: unknown;
+}
+
+export interface PaymentRequired {
+  x402Version: 2;
+  resource?: unknown;
+  accepts: Offer[];
+  extensions?: { annon?: AnnonExtension } & Record<string, unknown>;
+}
+
+const utf8 = new TextEncoder();
+const b64encode = (s: string) => {
+  let bin = '';
+  for (const b of utf8.encode(s)) bin += String.fromCharCode(b);
+  return btoa(bin);
+};
+const b64decode = (s: string) =>
+  new TextDecoder('utf-8', { fatal: true }).decode(
+    Uint8Array.from(atob(s), (c) => c.charCodeAt(0)),
+  );
+
+/** The `PAYMENT-REQUIRED` header (base64 JSON), with only its shape checked. */
+export function readPaymentRequired(header: string): PaymentRequired {
+  let v: { x402Version?: unknown; accepts?: unknown };
+  try {
+    v = JSON.parse(b64decode(header.trim()));
+  } catch {
+    return fail('bad_requirements', 'PAYMENT-REQUIRED is not base64 JSON');
+  }
+  if (v?.x402Version !== 2 || !Array.isArray(v.accepts)) {
+    return fail('bad_requirements', 'not an x402 v2 payment request');
+  }
+  return v as PaymentRequired;
+}
+
+/**
+ * The Annon contract and file a payment request sells, from its `annon` extension. Only a
+ * contract in `trusted` (by default `TRUSTED_CONTRACTS`) is ever returned.
+ */
+export function discover(
+  pr: PaymentRequired,
+  trusted: readonly string[] = TRUSTED_CONTRACTS,
+): { contractId: string; fileId: string } {
+  const info = pr.extensions?.annon?.info;
+  if (!info) return fail('file_mismatch', 'the payment request names no Annon file');
+  if (info.version !== 1 || info.network !== 'near:mainnet') {
+    fail('file_mismatch', 'the Annon extension is not version 1 on NEAR mainnet');
+  }
+  if (typeof info.contract !== 'string' || !trusted.includes(info.contract)) {
+    fail(
+      'untrusted_contract',
+      `the Annon contract ${String(info.contract)} is not one this client trusts`,
+    );
+  }
+  if (typeof info.fileId !== 'string' || !/^0x[0-9a-f]{64}$/.test(info.fileId)) {
+    fail('file_mismatch', 'the Annon extension has no valid fileId');
+  }
+  return { contractId: info.contract as string, fileId: info.fileId as string };
+}
+
+/**
+ * The `PAYMENT-SIGNATURE` header: the chosen offer echoed, the EIP-3009 authorization, and the
+ * `annon` extension echoed with the buyer's one-time key, from which the server recomputes the
+ * nonce before it settles.
+ */
+export function paymentSignature(
+  pr: PaymentRequired,
+  offer: Offer,
+  a: Authorization,
+  signature: string,
+  annon: { contractId: string; fileId: string; buyerKey: string },
+): string {
+  const advertised = pr.extensions?.annon;
+  const info = {
+    ...(advertised?.info ?? {
+      version: 1,
+      network: 'near:mainnet',
+      contract: annon.contractId,
+      fileId: annon.fileId,
+    }),
+    buyerKey: annon.buyerKey,
+  };
+  return b64encode(
+    JSON.stringify({
+      x402Version: 2,
+      ...(pr.resource === undefined ? {} : { resource: pr.resource }),
+      accepted: offer,
+      payload: {
+        signature,
+        authorization: {
+          from: a.from,
+          to: a.to,
+          value: a.value.toString(),
+          validAfter: a.validAfter.toString(),
+          validBefore: a.validBefore.toString(),
+          nonce: a.nonce,
+        },
+      },
+      extensions: {
+        ...(pr.extensions ?? {}),
+        annon: { ...(advertised ?? {}), info },
+      },
+    }),
+  );
+}

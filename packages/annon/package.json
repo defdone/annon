@@ -11,6 +11,9 @@
   },
   "devDependencies": {
     "@types/node": "26.6.5",
+    "@x402/core": "2.28.0",
+    "@x402/evm": "2.28.0",
+    "viem": "2.57.10",
     "vitest": "5.0.5"
   },
   "dependencies": {

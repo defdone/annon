@@ -153,6 +153,35 @@ export async function getFile(
   };
 }
 
+/** The contract's `get_config`: the payment sources it trusts on Base. */
+export interface Config {
+  mpc: string;
+  ckdDomain: number;
+  foreignTxDomain: number;
+  partnerSplitter: string;
+  usdc: string;
+}
+
+export async function getConfig(url: string, contractId: string): Promise<Config> {
+  const c = (await view(url, contractId, 'get_config', {})) as Record<string, unknown> | null;
+  if (
+    !isAccount(c?.mpc) ||
+    !Number.isSafeInteger(c?.ckd_domain) ||
+    !Number.isSafeInteger(c?.foreign_tx_domain) ||
+    !isHex(c?.partner_splitter, 20) ||
+    !isHex(c?.usdc, 20)
+  ) {
+    return malformed('get_config');
+  }
+  return {
+    mpc: c?.mpc as string,
+    ckdDomain: c?.ckd_domain as number,
+    foreignTxDomain: c?.foreign_tx_domain as number,
+    partnerSplitter: c?.partner_splitter as string,
+    usdc: c?.usdc as string,
+  };
+}
+
 async function flag(url: string, contractId: string, method: string, args: object) {
   const v = await view(url, contractId, method, args);
   return typeof v === 'boolean' ? v : malformed(method);
