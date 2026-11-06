@@ -1,4 +1,4 @@
-//! EVM helpers: hex fields and EIP-191 signature recovery.
+//! EVM helpers: hex fields, EIP-191 signature recovery and block headers.
 use near_sdk::env;
 
 pub(crate) fn bytes<const N: usize>(s: &str, name: &str) -> [u8; N] {
@@ -32,6 +32,57 @@ pub(crate) fn recover_eip191(message: &str, sig: &str) -> Option<[u8; 20]> {
         true,
     )?;
     env::keccak256_array(pubkey)[12..].try_into().ok()
+}
+
+/// The block number and timestamp (fields 8 and 11) of an RLP block header, if `rlp` is exactly
+/// one RLP list whose first twelve items are well formed. Later fields are not read, so a header
+/// that grows new fields keeps working; whether the bytes are the real header is the caller's
+/// check (their keccak256 must be the verified block hash).
+pub(crate) fn header_number_and_time(rlp: &[u8]) -> Option<(u64, u64)> {
+    let (mut fields, rest) = rlp_item(rlp, true)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    let (mut number, mut time) = (0, 0);
+    for i in 0..12 {
+        let (field, rest) = rlp_item(fields, false)?;
+        fields = rest;
+        match i {
+            8 => number = uint(field)?,
+            11 => time = uint(field)?,
+            _ => {}
+        }
+    }
+    Some((number, time))
+}
+
+/// The first RLP item of `b` (a list if `list`, else a string): its payload and what follows.
+fn rlp_item(b: &[u8], list: bool) -> Option<(&[u8], &[u8])> {
+    let prefix = *b.first()?;
+    let (start, len) = match (prefix, list) {
+        (0x00..=0x7f, false) => (0, 1),
+        (0x80..=0xb7, false) => (1, usize::from(prefix - 0x80)),
+        (0xb8..=0xbf, false) => long_length(b, prefix - 0xb7)?,
+        (0xc0..=0xf7, true) => (1, usize::from(prefix - 0xc0)),
+        (0xf8..=0xff, true) => long_length(b, prefix - 0xf7)?,
+        _ => return None,
+    };
+    let end = start.checked_add(len)?;
+    (end <= b.len()).then(|| (&b[start..end], &b[end..]))
+}
+
+/// A long RLP length in the `n` bytes after the prefix. Checked arithmetic: `usize` is 32 bits on
+/// wasm, so a shift would silently drop high bytes of a five-byte length.
+fn long_length(b: &[u8], n: u8) -> Option<(usize, usize)> {
+    let n = usize::from(n);
+    let len = b.get(1..1 + n)?.iter().try_fold(0usize, |a, x| {
+        a.checked_mul(256)?.checked_add(usize::from(*x))
+    })?;
+    Some((1 + n, len))
+}
+
+fn uint(b: &[u8]) -> Option<u64> {
+    (b.len() <= 8).then(|| b.iter().fold(0, |a, x| (a << 8) | u64::from(*x)))
 }
 
 #[cfg(test)]
@@ -126,5 +177,108 @@ mod tests {
         let other =
             recover_eip191("Annon: list a file for sale\ncontract: y", VIEM_SIG).map(|a| hex0x(&a));
         assert_ne!(other.as_deref(), Some(SIGNER));
+    }
+
+    /// Real Base mainnet headers (`specs/vectors/base-headers.json`), before and after Denim.
+    fn base_headers() -> Vec<(Vec<u8>, u64, u64, [u8; 32])> {
+        let v: near_sdk::serde_json::Value = near_sdk::serde_json::from_str(include_str!(
+            "../../../specs/vectors/base-headers.json"
+        ))
+        .unwrap();
+        v["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                let h = |k: &str| hex::decode(&c[k].as_str().unwrap()[2..]).unwrap();
+                (
+                    h("rlp"),
+                    c["number"].as_u64().unwrap(),
+                    c["timestamp"].as_u64().unwrap(),
+                    h("hash").try_into().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reads_real_base_headers_that_hash_to_their_block() {
+        context(NearToken::from_yoctonear(0));
+        let headers = base_headers();
+        assert_eq!(headers.len(), 5);
+        for (rlp, number, time, hash) in headers {
+            assert_eq!(env::keccak256_array(&rlp), hash, "block {number}");
+            assert_eq!(header_number_and_time(&rlp), Some((number, time)));
+        }
+    }
+
+    #[test]
+    fn keeps_reading_a_header_that_grows_a_field() {
+        let (rlp, number, time, _) = base_headers().remove(4);
+        // Re-wrap the same items with one more 32-byte field at the end.
+        let (body, _) = rlp_item(&rlp, true).unwrap();
+        let mut grown = body.to_vec();
+        grown.push(0xa0);
+        grown.extend([0x77; 32]);
+        let mut out = vec![0xf9, (grown.len() >> 8) as u8, grown.len() as u8];
+        out.extend(grown);
+        assert_eq!(header_number_and_time(&out), Some((number, time)));
+    }
+
+    #[test]
+    fn refuses_what_is_not_one_header_without_panicking() {
+        let (rlp, ..) = base_headers().remove(2);
+        for cut in 0..rlp.len() {
+            assert_eq!(header_number_and_time(&rlp[..cut]), None, "cut at {cut}");
+        }
+        assert_eq!(
+            header_number_and_time(&[rlp.clone(), vec![0]].concat()),
+            None
+        );
+        assert_eq!(header_number_and_time(&[0xc1, 0x80]), None, "one field");
+        assert_eq!(
+            header_number_and_time(&[0x80]),
+            None,
+            "a string, not a list"
+        );
+        assert_eq!(header_number_and_time(&[0x05]), None, "a byte, not a list");
+        // A list whose length takes eight bytes: no input is that long, and the length must not
+        // wrap around a 32-bit usize to something that fits.
+        let mut huge = vec![0xff, 1, 0, 0, 0, 0, 0, 0, 0x10];
+        huge.extend([0x80; 16]);
+        assert_eq!(header_number_and_time(&huge), None, "an eight-byte length");
+        assert_eq!(
+            long_length(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], 8)
+                .filter(|_| usize::BITS == 64),
+            Some((9, usize::MAX))
+        );
+        // Twelve fields, but the block number (8) is a list.
+        let mut fields = vec![0x80; 8];
+        fields.push(0xc0);
+        fields.extend([0x80; 3]);
+        let mut nested = vec![0xc0 + fields.len() as u8];
+        nested.extend(fields);
+        assert_eq!(
+            header_number_and_time(&nested),
+            None,
+            "a list where a number belongs"
+        );
+        // A number of nine bytes does not fit a u64.
+        let mut fields = vec![0x80; 8];
+        fields.extend([0x89, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        fields.extend([0x80; 3]);
+        let mut big = vec![0xc0 + fields.len() as u8];
+        big.extend(fields);
+        assert_eq!(header_number_and_time(&big), None);
+    }
+
+    #[test]
+    fn a_changed_header_never_panics() {
+        let (rlp, ..) = base_headers().remove(1);
+        for bit in 0..rlp.len() * 8 {
+            let mut f = rlp.clone();
+            f[bit / 8] ^= 1 << (bit % 8);
+            let _ = header_number_and_time(&f);
+        }
     }
 }

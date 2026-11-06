@@ -1,5 +1,7 @@
 //! Stopping sales (by the seller) and takedowns (by the file's moderator), plan 4.9.
 //! A seller alone can never take a paid key away: payments made before a stop always unlock.
+//! The payment's time comes from its Base block header, never from the block number: Base's block
+//! time changed (2 s to 200 ms on 5 Nov 2026, Denim) and may change again.
 use near_sdk::serde_json::json;
 use near_sdk::{env, near, require, NearToken};
 
@@ -8,13 +10,10 @@ use crate::evm::{bytes, hex0x, recover_eip191};
 use crate::text::utc;
 use crate::{Annon, AnnonExt, File};
 
-/// Base produces one block every 2 seconds from its genesis, so a verified block number gives the
-/// exact time of a payment (checked against blocks 1, 33554432 and 53247902 on 2 Nov 2026).
-const BASE_GENESIS: u64 = 1_686_789_347;
-const BASE_BLOCK_SECONDS: u64 = 2;
-/// After a stop every payment still unlocks for a week. That covers buyers if Base ever changes
-/// its block time and the formula above starts dating payments too late.
-const STOP_GRACE_SECONDS: u64 = 7 * 24 * 60 * 60;
+/// A payment that lands on Base this long after a stop still counts, so an authorization signed
+/// before the stop (the SDK signs for at most 300 s) can't be settled into a payment without a key,
+/// by a slow facilitator or a seller who stops on purpose.
+pub(crate) const STOP_SETTLEMENT_SECONDS: u64 = 300;
 
 /// Public reason codes for a takedown.
 #[near(serializers = [borsh, json])]
@@ -114,20 +113,25 @@ impl Annon {
     }
 }
 
-/// Whether a payment in Base block `block_number` may release this file's key now. Checked before
-/// asking MPC and again in its callback, since a stop or takedown can land in between.
-pub(crate) fn payment_allowed(file: &File, block_number: u64) -> Result<(), &'static str> {
+/// Whether a payment made at Base time `paid_at` (from its block header) may release this file's
+/// key. Checked before asking MPC and again in its callback, since a stop or takedown can land in
+/// between. The answer never depends on when `unlock` runs: a payment from before the stop unlocks
+/// years later, one from after it never does. While sales are open the time isn't needed.
+pub(crate) fn payment_allowed(file: &File, paid_at: Option<u64>) -> Result<(), &'static str> {
     if file.taken_down != 0 {
         return Err("file taken down");
     }
     let stopped = file.sales_stopped_at;
-    if stopped != 0 {
-        let paid = BASE_GENESIS.saturating_add(BASE_BLOCK_SECONDS.saturating_mul(block_number));
-        if paid > stopped && now() > stopped.saturating_add(STOP_GRACE_SECONDS) {
-            return Err("sales stopped before this payment");
-        }
+    if stopped == 0 {
+        return Ok(());
     }
-    Ok(())
+    match paid_at {
+        None => Err("sales were stopped: send the payment's block header"),
+        Some(t) if t > stopped.saturating_add(STOP_SETTLEMENT_SECONDS) => {
+            Err("sales stopped before this payment")
+        }
+        Some(_) => Ok(()),
+    }
 }
 
 fn code(reason: &TakedownReason) -> u8 {
@@ -153,6 +157,7 @@ fn now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::moderation::STOP_SETTLEMENT_SECONDS;
     use crate::tests::*;
     use crate::unlock::UNLOCK_DEPOSIT;
     use crate::*;
@@ -161,7 +166,7 @@ mod tests {
 
     const MODERATOR: &str = "moderator.sputnik-dao.near";
     const FILE: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
-    const WEEK: u64 = 7 * 24 * 60 * 60;
+    const YEAR: u64 = 365 * 24 * 60 * 60;
 
     fn stop_args() -> StopSalesArgs {
         StopSalesArgs {
@@ -176,15 +181,13 @@ mod tests {
         c.stop_sales(a, sig);
     }
 
-    /// The Base block whose time is `at` (Base: genesis 1686789347, one block every 2 s).
-    fn base_block(at: u64) -> u64 {
-        (at - 1_686_789_347) / 2
-    }
-
+    /// A Partner payment that landed on Base at `at`, with its block header.
     fn paid_at(at: u64) -> UnlockArgs {
-        let mut log = split_log();
-        log.block_number = base_block(at);
-        unlock_args(log)
+        let (log, header) = with_header(split_log(), at);
+        UnlockArgs {
+            header: Some(header),
+            ..unlock_args(log)
+        }
     }
 
     fn now(t: u64) {
@@ -247,26 +250,95 @@ mod tests {
     #[test]
     fn a_payment_made_before_the_stop_always_unlocks() {
         let mut c = listed();
+        now(NOW_S);
         stop(&mut c, &Seller::new(1));
-        now(NOW_S + 365 * 24 * 60 * 60);
+        now(NOW_S + YEAR);
         c.unlock(paid_at(NOW_S - 60)); // reaches MPC
     }
 
     #[test]
-    fn any_payment_unlocks_in_the_week_after_a_stop() {
+    fn the_settlement_window_is_five_minutes() {
+        assert_eq!(STOP_SETTLEMENT_SECONDS, 300);
+    }
+
+    #[test]
+    fn a_payment_settled_within_the_window_after_the_stop_counts_forever() {
         let mut c = listed();
+        now(NOW_S);
         stop(&mut c, &Seller::new(1));
-        now(NOW_S + WEEK - 1);
-        c.unlock(paid_at(NOW_S + 60));
+        now(NOW_S + YEAR);
+        c.unlock(paid_at(NOW_S + 300));
     }
 
     #[test]
     #[should_panic(expected = "sales stopped before this payment")]
-    fn a_payment_after_the_stop_is_refused_once_the_week_is_over() {
+    fn a_payment_after_the_window_never_unlocks_right_away() {
         let mut c = listed();
+        now(NOW_S);
         stop(&mut c, &Seller::new(1));
-        now(NOW_S + WEEK + 1);
-        c.unlock(paid_at(NOW_S + 60));
+        now(NOW_S + 302);
+        c.unlock(paid_at(NOW_S + 301));
+    }
+
+    #[test]
+    #[should_panic(expected = "sales stopped before this payment")]
+    fn a_payment_after_the_window_never_unlocks_years_later() {
+        let mut c = listed();
+        now(NOW_S);
+        stop(&mut c, &Seller::new(1));
+        now(NOW_S + YEAR);
+        c.unlock(paid_at(NOW_S + 301));
+    }
+
+    #[test]
+    #[should_panic(expected = "sales were stopped: send the payment's block header")]
+    fn after_a_stop_the_header_is_required() {
+        let mut c = listed();
+        now(NOW_S);
+        stop(&mut c, &Seller::new(1));
+        c.unlock(unlock_args(split_log()));
+    }
+
+    #[test]
+    fn while_sales_are_open_no_header_is_needed() {
+        let mut c = listed();
+        now(NOW_S);
+        c.unlock(unlock_args(split_log())); // reaches MPC
+    }
+
+    #[test]
+    #[should_panic(expected = "the header is not the payment's block")]
+    fn a_header_of_another_block_is_refused() {
+        let mut c = listed();
+        now(NOW_S);
+        stop(&mut c, &Seller::new(1));
+        // A real, earlier header, but the log is in another block.
+        let (_, early) = with_header(split_log(), NOW_S - 60);
+        let (log, _) = with_header(split_log(), NOW_S + YEAR);
+        c.unlock(UnlockArgs {
+            header: Some(early),
+            ..unlock_args(log)
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "the header is not the payment's block")]
+    fn a_header_whose_number_is_not_the_log_block_is_refused() {
+        let mut c = listed();
+        now(NOW_S);
+        stop(&mut c, &Seller::new(1));
+        // The header hashes to the log's block hash, but is for the next block number.
+        let mut next = split_log();
+        next.block_number += 1;
+        let (hashed, header) = with_header(next, NOW_S - 60);
+        let log = near_mpc_contract_interface::types::EvmLog {
+            block_hash: hashed.block_hash,
+            ..split_log()
+        };
+        c.unlock(UnlockArgs {
+            header: Some(header),
+            ..unlock_args(log)
+        });
     }
 
     #[test]
@@ -368,37 +440,97 @@ mod tests {
         c.unlock(unlock_args(split_log())); // the same payment works after restore
     }
 
-    #[test]
-    fn a_stop_during_verification_is_checked_in_the_callback_too() {
-        let mut c = listed();
-        now(NOW_S);
-        c.unlock(paid_at(NOW_S + 60));
-        stop(&mut c, &Seller::new(1));
-        // the callback runs more than a week later and the payment came after the stop
+    /// Runs the callback that the last `unlock` scheduled, with exactly the arguments it
+    /// scheduled, as MPC's answer (confirming that payload) arrives at `at`.
+    fn run_scheduled_callback(c: &mut Annon, at: u64) {
+        let a: near_sdk::serde_json::Value = get_created_receipts()
+            .into_iter()
+            .flat_map(|r| r.actions)
+            .filter_map(|action| match action {
+                near_sdk::mock::MockAction::FunctionCallWeight {
+                    method_name, args, ..
+                } if method_name == b"on_payment_verified" => {
+                    Some(near_sdk::serde_json::from_slice(&args).unwrap())
+                }
+                _ => None,
+            })
+            .next_back()
+            .expect("unlock scheduled no callback");
+        let s = |k: &str| a[k].as_str().unwrap().to_string();
+        let n = |k: &str| near_sdk::json_types::U128(s(k).parse().unwrap());
         near_sdk::testing_env!(
             near_sdk::test_utils::VMContextBuilder::new()
                 .current_account_id(CONTRACT.parse().unwrap())
                 .predecessor_account_id(CONTRACT.parse().unwrap())
-                .block_timestamp((NOW_S + WEEK + 1) * 1_000_000_000)
+                .block_timestamp(at * 1_000_000_000)
                 .build(),
             near_sdk::test_vm_config(),
             near_sdk::RuntimeFeesConfig::test(),
             Default::default(),
-            vec![verified(SPLIT_PAYLOAD_HASH)],
+            vec![verified(&s("payload_hash"))],
         );
         c.on_payment_verified(
-            FILE.into(),
-            format!("0x{}", "33".repeat(48)),
-            PAYER.into(),
-            format!("0x{}{}", "aa".repeat(32), "0000000000000007"),
-            SPLIT_PAYLOAD_HASH.into(),
-            RELAYER.parse().unwrap(),
-            near_sdk::json_types::U128(UNLOCK_DEPOSIT.as_yoctonear()),
-            false,
-            near_sdk::json_types::U128(10_000),
-            base_block(NOW_S + 60),
+            s("file_id"),
+            s("buyer_key"),
+            s("payer"),
+            s("payment"),
+            s("payload_hash"),
+            s("caller").parse().unwrap(),
+            n("deposit"),
+            a["prepaid"].as_bool().unwrap(),
+            n("amount"),
+            a["block_number"].as_u64().unwrap(),
+            a["paid_at"].as_u64(),
         );
+    }
+
+    /// `unlock` while sales are open; the stop lands while MPC verifies.
+    fn unlock_then_stop(c: &mut Annon, args: UnlockArgs) {
+        now(NOW_S);
+        c.unlock(args);
+        stop(c, &Seller::new(1));
+    }
+
+    #[test]
+    fn a_stop_during_verification_refuses_a_later_payment_and_refunds_the_deposit() {
+        let mut c = listed();
+        unlock_then_stop(&mut c, paid_at(NOW_S + 301));
+        // The callback runs in a fresh context: its receipts start at 0.
+        run_scheduled_callback(&mut c, NOW_S + 10);
         assert!(!c.is_buyer(FILE.into(), PAYER.into()));
+        assert_eq!(refunded(0), UNLOCK_DEPOSIT.as_yoctonear());
+        assert!(!get_created_receipts()
+            .iter()
+            .any(|r| r.receiver_id.as_str() == "v1.signer"));
+    }
+
+    #[test]
+    fn a_stop_during_verification_keeps_a_payment_inside_the_window() {
+        let mut c = listed();
+        unlock_then_stop(&mut c, paid_at(NOW_S + 300));
+        run_scheduled_callback(&mut c, NOW_S + YEAR);
+        assert!(c.is_buyer(FILE.into(), PAYER.into()));
+    }
+
+    #[test]
+    fn a_stop_during_verification_without_a_header_keeps_the_payment_for_a_retry() {
+        let mut c = listed();
+        unlock_then_stop(&mut c, unlock_args(split_log()));
+        run_scheduled_callback(&mut c, NOW_S + 10);
+        assert!(!c.is_buyer(FILE.into(), PAYER.into()));
+        assert!(near_sdk::test_utils::get_logs()
+            .iter()
+            .any(|l| l.contains("send the payment's block header")));
+        // The same payment sent again through unlock, now with its header, is recorded.
+        let retry = paid_at(NOW_S - 30);
+        assert!(!c.is_payment_used(
+            format!("0x{}", hex::encode(retry.logs[0].transaction_hash.0)),
+            retry.logs[0].log_index
+        ));
+        now(NOW_S + 20);
+        c.unlock(retry);
+        run_scheduled_callback(&mut c, NOW_S + 30);
+        assert!(c.is_buyer(FILE.into(), PAYER.into()));
     }
 
     #[test]

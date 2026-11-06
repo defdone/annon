@@ -5,7 +5,7 @@ use near_sdk::serde_json::json;
 use near_sdk::{env, near, require, AccountId, Gas, GasWeight, NearToken};
 
 use crate::events::emit;
-use crate::evm::{bytes, hex0x};
+use crate::evm::{bytes, header_number_and_time, hex0x};
 use crate::moderation::payment_allowed;
 use crate::{Annon, AnnonExt, File, Source};
 
@@ -33,6 +33,10 @@ pub struct UnlockArgs {
     /// Base. Partner: the `PaymentSplit` log. x402: USDC `AuthorizationUsed` and the `Transfer`
     /// right after it.
     pub logs: Vec<EvmLog>,
+    /// The RLP header of the payment's Base block, `0x` hex. Needed only once the seller has
+    /// stopped sales: the payment's time comes from it (`moderation::payment_allowed`).
+    #[serde(default)]
+    pub header: Option<String>,
 }
 
 #[near]
@@ -66,7 +70,8 @@ impl Annon {
             .get(&file_id)
             .unwrap_or_else(|| env::panic_str("unknown file"));
         let (payer, payment, amount) = self.check_payment(file, &file_id, &buyer_key, &args.logs);
-        if let Err(reason) = payment_allowed(file, args.logs[0].block_number) {
+        let paid_at = args.header.as_deref().map(|h| paid_at(h, &args.logs[0]));
+        if let Err(reason) = payment_allowed(file, paid_at) {
             env::panic_str(reason);
         }
         require!(!self.used.contains_key(&payment), "payment already used");
@@ -92,6 +97,7 @@ impl Annon {
                 "prepaid": prepaid,
                 "amount": U128(amount),
                 "block_number": args.logs[0].block_number,
+                "paid_at": paid_at,
             })
             .to_string()
             .as_bytes(),
@@ -120,6 +126,7 @@ impl Annon {
         prepaid: bool,
         amount: U128,
         block_number: u64,
+        paid_at: Option<u64>,
     ) {
         let file_id = bytes::<32>(&file_id, "file_id");
         let payer = bytes::<20>(&payer, "payer");
@@ -130,7 +137,7 @@ impl Annon {
             &payer,
             payment,
             &bytes::<32>(&payload_hash, "payload_hash"),
-            block_number,
+            paid_at,
         );
         match recorded {
             Ok(cost) => {
@@ -249,7 +256,7 @@ impl Annon {
         payer: &[u8; 20],
         payment: [u8; 40],
         expected: &[u8; 32],
-        block_number: u64,
+        paid_at: Option<u64>,
     ) -> Result<NearToken, &'static str> {
         // An answer is a hash and a signature; anything larger is refused unread.
         let answer = env::promise_result_checked(0, 1024)
@@ -261,7 +268,7 @@ impl Annon {
         }
         // A stop or takedown may have landed while MPC was checking; the payment stays unused.
         let file = self.files.get(file_id).ok_or("unknown file")?;
-        payment_allowed(file, block_number)?;
+        payment_allowed(file, paid_at)?;
         let before = env::storage_usage();
         // Checked again here: two unlocks for one payment can both be in flight.
         if self.used.insert(payment, ()).is_some() {
@@ -281,6 +288,21 @@ impl Annon {
         m.extend_from_slice(file_id);
         m.extend_from_slice(buyer_key);
         env::keccak256_array(&m)
+    }
+}
+
+/// The Base time of the payment, from its block header: only bytes that hash to the block hash in
+/// the payment log count, and MPC verifies that log, hash included, before anything is recorded.
+fn paid_at(header: &str, log: &EvmLog) -> u64 {
+    let rlp = hex::decode(header.strip_prefix("0x").unwrap_or(header))
+        .unwrap_or_else(|_| env::panic_str("header must be hex"));
+    match header_number_and_time(&rlp) {
+        Some((number, time))
+            if env::keccak256_array(&rlp) == log.block_hash.0 && number == log.block_number =>
+        {
+            time
+        }
+        _ => env::panic_str("the header is not the payment's block"),
     }
 }
 
@@ -693,6 +715,7 @@ mod tests {
             false,
             U128(10_000),
             0x3000000,
+            None,
         );
         assert!(c.is_buyer(format!("0x{}", "11".repeat(32)), PAYER.into()));
     }

@@ -616,3 +616,73 @@ async fn a_takedown_blocks_unlock_until_restore() -> anyhow::Result<()> {
     assert_eq!(events(&out, "key_released").len(), 1);
     Ok(())
 }
+
+/// A real Base header (specs/vectors/base-headers.json) and the log fields that name its block.
+fn real_header(i: usize) -> (String, String, u64) {
+    let v: Value =
+        serde_json::from_str(include_str!("../../../specs/vectors/base-headers.json")).unwrap();
+    let c = &v["cases"][i];
+    (
+        c["rlp"].as_str().unwrap().into(),
+        c["hash"].as_str().unwrap()[2..].into(),
+        c["number"].as_u64().unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn after_a_stop_unlock_reads_the_payment_time_from_the_real_block_header(
+) -> anyhow::Result<()> {
+    let w = world().await?;
+    let file = w.file(9);
+    let key = hex0x(&[0x33; 48]);
+    w.register(&file, json!({ "kind": "partner" }))
+        .await?
+        .into_result()?;
+    let stop = json!({ "file_id": file, "deadline": 4_000_000_000u64 });
+    let message: String = w
+        .annon
+        .view("stop_sales_message")
+        .args_json(json!({ "args": stop }))
+        .await?
+        .json()?;
+    w.relayer
+        .call(w.annon.id(), "stop_sales")
+        .args_json(json!({ "args": stop, "sig": w.seller.sign(&message) }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    // The payment sits in a real Base block from before the stop (3 Nov 2026).
+    let (header, hash, number) = real_header(0);
+    let mut logs = w.split_logs(&file, &key);
+    logs[0]["block_hash"] = json!(hash);
+    logs[0]["block_number"] = json!(number);
+    let send = |header: Option<String>| {
+        w.relayer
+            .call(w.annon.id(), "unlock")
+            .args_json(json!({ "args": { "file_id": file, "buyer_key": key, "logs": logs, "header": header } }))
+            .deposit(NearToken::from_millinear(5))
+            .gas(Gas::from_tgas(150))
+            .transact()
+    };
+
+    let without = send(None).await?;
+    assert!(format!("{:?}", without.failures()).contains("send the payment's block header"));
+    let (other, ..) = real_header(4);
+    let wrong = send(Some(other)).await?;
+    assert!(format!("{:?}", wrong.failures()).contains("the header is not the payment's block"));
+    assert!(
+        !w.is_buyer(&file).await?,
+        "a refused unlock records nothing"
+    );
+
+    let out = send(Some(header)).await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    assert!(w.is_buyer(&file).await?);
+    println!(
+        "unlock with a header after a stop: {} Tgas burnt",
+        tgas(&out)
+    );
+    assert!(tgas(&out) < 120, "unlock burnt {} Tgas", tgas(&out));
+    Ok(())
+}
