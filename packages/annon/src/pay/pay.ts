@@ -22,8 +22,6 @@ import {
   type Authorization,
   annonNonce,
   digest,
-  type Kind,
-  partnerNonce,
   signer as recover,
   type TypedData,
   toHex,
@@ -31,7 +29,6 @@ import {
 } from './eip3009.js';
 import {
   ANNON_EXACT,
-  ANNON_RECEIVE,
   BASE_NETWORK,
   type Offer,
   type PaymentRequired,
@@ -70,10 +67,9 @@ export interface Quote {
   baseRpc: string;
   contractId: string;
   fileId: string;
-  kind: Kind;
   buyer: string;
   seller: string;
-  /** Partner: the splitter. x402: the registered `pay_to`. */
+  /** The registered `pay_to`. */
   to: string;
   usdc: string;
   price: bigint;
@@ -106,15 +102,13 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
   // The payment request: only its own shape here; its values are compared with the contract below.
   const pr = o.paymentRequired;
   const offers = (Array.isArray(pr?.accepts) ? pr.accepts : []).filter(
-    (a) =>
-      (a?.scheme === ANNON_EXACT || a?.scheme === ANNON_RECEIVE) && a?.network === BASE_NETWORK,
+    (a) => a?.scheme === ANNON_EXACT && a?.network === BASE_NETWORK,
   );
   const [req] = offers;
   if (offers.length !== 1 || !req) return fail('network_mismatch', 'no single Annon offer on Base');
   const extra = (req.extra ?? {}) as {
     name?: unknown;
     version?: unknown;
-    creator?: unknown;
     assetTransferMethod?: unknown;
     paymentFlow?: unknown;
   };
@@ -138,35 +132,21 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
   }
   const config = await getConfig(o.nearRpc, o.contractId);
 
-  const kind: Kind =
-    file.source.kind === 'partner' ? 'ReceiveWithAuthorization' : 'TransferWithAuthorization';
-  const to = file.source.kind === 'partner' ? config.partnerSplitter : file.source.pay_to;
-  // Only the splitter can settle a Partner file; a direct transfer to it would never unlock. A
-  // registration that says so is a lying NEAR RPC or a broken listing.
-  if (kind === 'TransferWithAuthorization' && to === config.partnerSplitter) {
-    fail('recipient_mismatch', 'a direct x402 file cannot be paid to the Partner splitter');
-  }
+  const to = file.payTo;
   // Facilitators take the EIP-712 domain from the offer, so it must be there and be USDC's.
   if (lower(req.asset) !== config.usdc || extra.name !== 'USD Coin' || extra.version !== '2') {
     fail('token_mismatch', 'the payment request is not for USDC on Base');
   }
   const method = extra.assetTransferMethod;
-  if (
-    kind === 'ReceiveWithAuthorization'
-      ? req.scheme !== ANNON_RECEIVE || method !== undefined
-      : req.scheme !== ANNON_EXACT || (method !== undefined && method !== 'eip3009')
-  ) {
-    fail('method_mismatch', `the offer's transfer method does not fit this file's registration`);
+  if (method !== undefined && method !== 'eip3009') {
+    fail('method_mismatch', `the offer is not a plain Annon transfer`);
   }
   // x402 v2 section 6.1: never sign for a payment flow the client doesn't know.
   if (extra.paymentFlow !== undefined && extra.paymentFlow !== 'authorization') {
     fail('method_mismatch', `unsupported payment flow ${String(extra.paymentFlow)}`);
   }
   if (lower(req.payTo) !== to) {
-    fail('recipient_mismatch', 'the payment request pays someone the Annon contract does not');
-  }
-  if (kind === 'ReceiveWithAuthorization' && lower(extra.creator) !== file.seller) {
-    fail('seller_mismatch', 'the payment request names another seller');
+    fail('recipient_mismatch', 'the payment request pays an address the registration does not');
   }
   if (BigInt(req.amount) !== file.price) {
     fail('price_mismatch', 'the payment request asks a different price than the registration');
@@ -193,7 +173,6 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
     baseRpc: o.baseRpc,
     contractId: o.contractId,
     fileId: o.fileId,
-    kind,
     buyer,
     seller: file.seller,
     to,
@@ -213,16 +192,15 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
 export interface PaymentJob {
   contractId: string;
   fileId: string;
-  kind: Kind;
   buyer: string;
   seller: string;
+  /** The registered `pay_to`. */
   to: string;
   usdc: string;
   price: string;
   /** The one-time key the nonce commits to, 0x and 48 bytes. */
   buyerKey: string;
-  annonNonce: string;
-  /** The nonce signed: `partnerNonce` for Partner files, else `annonNonce`. */
+  /** The nonce signed: `annonNonce(contractId, fileId, buyerKey)`. */
   nonce: string;
   validBefore: string;
   /** The Base head when it was signed. */
@@ -274,38 +252,39 @@ export async function authorize(
   if (!point || point.is0()) {
     throw new TypeError('buyerKey must be a one-time G1 key, 48 bytes compressed');
   }
-  // The quote may be old: the file must still be for sale on the same terms.
-  const now = await forSale(q.nearRpc, q.contractId, q.fileId);
-  if (
-    now.seller !== q.seller ||
-    now.price !== q.price ||
-    JSON.stringify(now.source) !== JSON.stringify(q.file.source) ||
-    now.moderator !== q.file.moderator
-  ) {
-    fail('price_mismatch', 'the registration changed since the quote; check it again');
-  }
-  const annon = annonNonce(q.contractId, q.fileId, o.buyerKey);
+  // Both clocks are read, and checked against each other, before the registration: however long the
+  // reads below stall, and even if a clock is corrected meanwhile, the deadline stays within 180 s
+  // of a moment the file was still on sale (the contract allows 300 after a stop).
   const h = await head(q.baseRpc);
   const local = Math.floor(Date.now() / 1000);
   if (Math.abs(h.timestamp - local) > MAX_CLOCK_SKEW_SECONDS) {
     fail('transport', 'the Base RPC is not at the current time; its deadline would be wrong');
   }
+  // The quote may be old: the file must still be for sale on the same terms.
+  const now = await forSale(q.nearRpc, q.contractId, q.fileId);
+  if (
+    now.seller !== q.seller ||
+    now.price !== q.price ||
+    now.payTo !== q.file.payTo ||
+    now.moderator !== q.file.moderator
+  ) {
+    fail('price_mismatch', 'the registration changed since the quote; check it again');
+  }
+  const annon = annonNonce(q.contractId, q.fileId, o.buyerKey);
   // The search for the payment starts at the finalized block: a reorg or a lying RPC can't put the
   // payment below it.
   const final = await block(q.baseRpc, 'finalized');
   const job: PaymentJob = {
     contractId: q.contractId,
     fileId: q.fileId,
-    kind: q.kind,
     buyer: q.buyer,
     seller: q.seller,
     to: q.to,
     usdc: q.usdc,
     price: q.price.toString(),
     buyerKey: toHex(o.buyerKey),
-    annonNonce: annon,
-    nonce: q.kind === 'ReceiveWithAuthorization' ? partnerNonce(q.seller, annon) : annon,
-    // The earlier of the two clocks: neither can stretch the window.
+    nonce: annon,
+    // The earliest reading: no clock and no stall can stretch the window.
     validBefore: (Math.min(h.timestamp, local) + q.validity).toString(),
     block: Math.min(final.number, h.number),
     signedAt: Math.min(h.timestamp, local),
@@ -313,12 +292,12 @@ export async function authorize(
   await o.persist(job);
 
   const a = authorizationOf(job);
-  const signature = await o.wallet.signTypedData(typedData(q.kind, q.usdc, a));
-  if (typeof signature !== 'string' || recover(digest(q.kind, q.usdc, a), signature) !== q.buyer) {
+  const signature = await o.wallet.signTypedData(typedData(q.usdc, a));
+  if (typeof signature !== 'string' || recover(digest(q.usdc, a), signature) !== q.buyer) {
     fail('bad_signature', 'the wallet did not return a plain signature from the buyer');
   }
   try {
-    await dryRun(q.baseRpc, q.usdc, q.kind, a, signature);
+    await dryRun(q.baseRpc, q.usdc, a, signature);
   } catch (e) {
     // The RPC has seen a valid authorization: it can still land, so the caller keeps the job.
     if (e instanceof PayError) e.job = job;

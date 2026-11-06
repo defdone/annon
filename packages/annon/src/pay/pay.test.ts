@@ -22,15 +22,7 @@ import {
 import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { blockHeader, type Expected, PayError, paymentLogs } from './base.js';
-import {
-  type Authorization,
-  annonNonce,
-  digest,
-  type Kind,
-  partnerNonce,
-  signer,
-  typedData,
-} from './eip3009.js';
+import { type Authorization, annonNonce, digest, signer, typedData } from './eip3009.js';
 import {
   authorize,
   MAX_CLOCK_SKEW_SECONDS,
@@ -45,16 +37,13 @@ import { discover, type PaymentRequired, paymentSignature, readPaymentRequired }
 const USDC_ABI = parseAbi([
   'function balanceOf(address) view returns (uint256)',
   'function authorizationState(address,bytes32) view returns (bool)',
-  'function receiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce,uint8 v,bytes32 r,bytes32 s)',
   'function transferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce,uint8 v,bytes32 r,bytes32 s)',
   'event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)',
   'event AuthorizationCanceled(address indexed authorizer, bytes32 indexed nonce)',
   'event Transfer(address indexed from, address indexed to, uint256 value)',
-  'event PaymentSplit(address indexed payer, address indexed creator, uint256 total, uint256 dev, uint256 creatorAmount, bytes32 nonce)',
 ]);
 
 const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
-const kinds: Kind[] = ['ReceiveWithAuthorization', 'TransferWithAuthorization'];
 const buyerAccount = privateKeyToAccount(`0x${'42'.repeat(32)}`);
 const otherAccount = privateKeyToAccount(`0x${'43'.repeat(32)}`);
 const BUYER = buyerAccount.address.toLowerCase();
@@ -71,38 +60,32 @@ const asViem = (t: ReturnType<typeof typedData>) =>
   t as unknown as Parameters<typeof hashTypedData>[0];
 
 describe('EIP-3009 typed data against viem', () => {
-  it('hashes exactly as viem does, for both kinds', () => {
-    for (const kind of kinds) {
-      for (let i = 0; i < 20; i++) {
-        const a = randomAuth(i);
-        expect(hex(digest(kind, USDC, a))).toBe(hashTypedData(asViem(typedData(kind, USDC, a))));
-      }
+  it('hashes exactly as viem does', () => {
+    for (let i = 0; i < 20; i++) {
+      const a = randomAuth(i);
+      expect(hex(digest(USDC, a))).toBe(hashTypedData(asViem(typedData(USDC, a))));
     }
   });
 
   it('recovers the viem signer, and nobody else after any single-bit change', async () => {
     const a = randomAuth(3);
-    for (const kind of kinds) {
-      const d = digest(kind, USDC, a);
-      const sig = await buyerAccount.signTypedData(asViem(typedData(kind, USDC, a)));
-      expect(signer(d, sig)).toBe(BUYER);
-      const bytes = Buffer.from(sig.slice(2), 'hex');
-      const wrong: number[] = [];
-      for (let bit = 0; bit < 65 * 8; bit++) {
-        const f = Buffer.from(bytes);
-        f[bit >> 3] = (f[bit >> 3] ?? 0) ^ (1 << (bit & 7));
-        if (signer(d, `0x${f.toString('hex')}`) === BUYER) wrong.push(bit);
-      }
-      expect(wrong).toEqual([]);
+    const d = digest(USDC, a);
+    const sig = await buyerAccount.signTypedData(asViem(typedData(USDC, a)));
+    expect(signer(d, sig)).toBe(BUYER);
+    const bytes = Buffer.from(sig.slice(2), 'hex');
+    const wrong: number[] = [];
+    for (let bit = 0; bit < 65 * 8; bit++) {
+      const f = Buffer.from(bytes);
+      f[bit >> 3] = (f[bit >> 3] ?? 0) ^ (1 << (bit & 7));
+      if (signer(d, `0x${f.toString('hex')}`) === BUYER) wrong.push(bit);
     }
+    expect(wrong).toEqual([]);
   });
 
   it('refuses what USDC refuses: high s, v other than 27 or 28, wrong length', async () => {
     const a = randomAuth(4);
-    const d = digest('TransferWithAuthorization', USDC, a);
-    const sig = await buyerAccount.signTypedData(
-      asViem(typedData('TransferWithAuthorization', USDC, a)),
-    );
+    const d = digest(USDC, a);
+    const sig = await buyerAccount.signTypedData(asViem(typedData(USDC, a)));
     const r = sig.slice(2, 66);
     const s = BigInt(`0x${sig.slice(66, 130)}`);
     const v = Number.parseInt(sig.slice(130), 16);
@@ -111,7 +94,7 @@ describe('EIP-3009 typed data against viem', () => {
     // The same signature in its high-s form still recovers the buyer in plain ECDSA.
     expect(
       await recoverTypedDataAddress({
-        ...asViem(typedData('TransferWithAuthorization', USDC, a)),
+        ...asViem(typedData(USDC, a)),
         signature: `0x${r}${highS}${flipped}`,
       }),
     ).toBe(buyerAccount.address);
@@ -131,25 +114,23 @@ const nonces = JSON.parse(
     contractId: string;
     fileId: string;
     buyerKey: string;
-    seller: string;
     annonNonce: string;
-    partnerNonce: string;
   }[];
 };
 
 describe('nonces against the shared vectors', () => {
-  it('derives annonNonce and partnerNonce as the contract and the splitter do', () => {
+  it('derives annonNonce as the contract does, and as viem computes it independently', () => {
     for (const c of nonces.cases) {
       const key = Uint8Array.from(Buffer.from(c.buyerKey.slice(2), 'hex'));
-      const annon = annonNonce(c.contractId, c.fileId, key);
-      expect(annon).toBe(c.annonNonce);
-      expect(partnerNonce(c.seller, annon)).toBe(c.partnerNonce);
-      // The facilitator's own check (Partner apps/facilitator/src/commitment.ts).
+      expect(annonNonce(c.contractId, c.fileId, key)).toBe(c.annonNonce);
       expect(
         keccak256(
-          encodePacked(['address', 'bytes32'], [getAddress(c.seller), annon as `0x${string}`]),
+          encodePacked(
+            ['string', 'string', 'bytes32', 'bytes'],
+            ['annon/v1', c.contractId, c.fileId as `0x${string}`, c.buyerKey as `0x${string}`],
+          ),
         ),
-      ).toBe(c.partnerNonce);
+      ).toBe(c.annonNonce);
     }
   });
 });
@@ -161,7 +142,6 @@ const BASE = 'https://base.rpc';
 const CONTRACT = 'v1.annon.defdone.near';
 const FILE = `0x${'11'.repeat(32)}`;
 const SELLER = `0x${'ab'.repeat(20)}`;
-const SPLITTER = `0x${'51'.repeat(20)}`;
 const PAY_TO = `0x${'5e'.repeat(20)}`;
 const NOW = 1_800_000_000;
 const SIGNED = 0x3000000;
@@ -187,38 +167,32 @@ type World = {
   getLogs: unknown[];
   receipt: unknown;
   calls: { method: string; data?: string; from?: string }[];
+  /** Runs on every NEAR view, e.g. to let time pass while one stalls. */
+  onNear?: () => void;
 };
 let w: World;
 
 const file = (over: Record<string, unknown> = {}) => ({
   seller: SELLER,
   price: '10000',
-  source: { kind: 'partner' },
+  pay_to: PAY_TO,
   cipher_hash: `0x${'22'.repeat(32)}`,
   moderator: null,
   sales_stopped_at: null,
   taken_down: null,
   ...over,
 });
-const x402File = () => file({ source: { kind: 'x402', pay_to: PAY_TO.slice(2).toUpperCase() } });
+/** The offer a server makes for the test file: plain EIP-3009 to the registered pay_to. */
 const offer = (over: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => ({
-  scheme: 'annon-receive',
+  scheme: 'annon-exact',
   network: 'eip155:8453',
   amount: '10000',
-  payTo: getAddress(SPLITTER),
+  payTo: getAddress(PAY_TO),
   maxTimeoutSeconds: 300,
   asset: getAddress(USDC),
-  extra: {
-    name: 'USD Coin',
-    version: '2',
-    creator: getAddress(SELLER),
-    ...extra,
-  },
+  extra: { name: 'USD Coin', version: '2', ...extra },
   ...over,
 });
-/** A direct x402 offer: plain EIP-3009 to the registered pay_to. */
-const x402Offer = (over: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) =>
-  offer({ scheme: 'annon-exact', payTo: PAY_TO, ...over }, { creator: undefined, ...extra });
 const annonInfo = (over: Record<string, unknown> = {}) => ({
   version: 1,
   network: 'near:mainnet',
@@ -262,6 +236,7 @@ async function respond(
     // Only the trusted contract, at final state, about this file, gets an answer.
     const args = JSON.parse(Buffer.from(p.args_base64, 'base64').toString());
     w.calls.push({ method: `near:${p.method_name}` });
+    w.onNear?.();
     if (p.account_id !== (w.contract ?? CONTRACT) || p.finality !== 'final') {
       return { id: body.id, error: { cause: { name: 'UNKNOWN_ACCOUNT' } } };
     }
@@ -322,7 +297,7 @@ async function respond(
         return reply(encodeAbiParameters([{ type: 'uint256' }], [forBuyer ? w.balance : 0n]));
       }
       if (functionName === 'authorizationState') {
-        const set = w.authorizationState && forBuyer && args?.[1] === PARTNER;
+        const set = w.authorizationState && forBuyer && args?.[1] === ANNON;
         return reply(encodeAbiParameters([{ type: 'bool' }], [set]));
       }
       if (w.dryRun.error) return { id: body.id, error: w.dryRun.error };
@@ -338,19 +313,7 @@ async function respond(
         `0x${string}`,
         `0x${string}`,
       ];
-      const primaryType =
-        functionName === 'receiveWithAuthorization'
-          ? 'ReceiveWithAuthorization'
-          : 'TransferWithAuthorization';
-      if (
-        functionName === 'receiveWithAuthorization' &&
-        p0.from?.toLowerCase() !== to.toLowerCase()
-      ) {
-        return {
-          id: body.id,
-          error: { code: 3, message: 'execution reverted: caller must be the payee' },
-        };
-      }
+      const primaryType = 'TransferWithAuthorization';
       const ok = await verifyTypedData({
         address: from,
         domain: {
@@ -382,7 +345,6 @@ beforeEach(() => {
       mpc: 'v1.signer',
       ckd_domain: 2,
       foreign_tx_domain: 3,
-      partner_splitter: SPLITTER,
       usdc: USDC,
     },
     isBuyer: false,
@@ -429,23 +391,16 @@ const codeOf = (p: Promise<unknown>) =>
   );
 
 describe('preflight', () => {
-  it('quotes a Partner file: ReceiveWithAuthorization to the splitter the contract trusts', async () => {
+  it('quotes a file: a transfer to the registered pay_to, at the registered price', async () => {
     const q = await preflight(opts());
     expect(q).toMatchObject({
-      kind: 'ReceiveWithAuthorization',
-      to: SPLITTER,
+      to: PAY_TO,
       seller: SELLER,
       buyer: BUYER,
       usdc: USDC,
       price: 10_000n,
       validity: 180,
     });
-  });
-
-  it('quotes a direct x402 file: TransferWithAuthorization to the registered pay_to', async () => {
-    w.file = x402File();
-    const q = await preflight(opts({ paymentRequired: required(x402Offer()) }));
-    expect(q).toMatchObject({ kind: 'TransferWithAuthorization', to: PAY_TO });
   });
 
   // Each row breaks one thing; the purchase must stop with that code before anything is signed.
@@ -476,30 +431,20 @@ describe('preflight', () => {
       () => opts({ paymentRequired: withInfo(annonInfo({ fileId: `0x${'12'.repeat(32)}` })) }),
     ],
     [
-      'Partner file offered as annon-exact',
-      'method_mismatch',
-      () => opts({ paymentRequired: required(offer({ scheme: 'annon-exact' })) }),
-    ],
-    [
-      'Partner offer with a transfer method',
-      'method_mismatch',
-      () => opts({ paymentRequired: required(offer({}, { assetTransferMethod: 'eip3009' })) }),
-    ],
-    [
-      'x402 offer with the receive method',
-      'method_mismatch',
+      'an offer under another scheme',
+      'network_mismatch',
       () => {
-        w.file = x402File();
-        return opts({ paymentRequired: required(x402Offer({ scheme: 'annon-receive' })) });
+        w.file = file();
+        return opts({ paymentRequired: required(offer({ scheme: 'annon-receive' })) });
       },
     ],
     [
       'x402 offer through Permit2',
       'method_mismatch',
       () => {
-        w.file = x402File();
+        w.file = file();
         return opts({
-          paymentRequired: required(x402Offer({}, { assetTransferMethod: 'permit2' })),
+          paymentRequired: required(offer({}, { assetTransferMethod: 'permit2' })),
         });
       },
     ],
@@ -570,25 +515,11 @@ describe('preflight', () => {
       () => opts({ paymentRequired: required(offer({ payTo: SELLER })) }),
     ],
     [
-      'Partner pays another splitter',
-      'recipient_mismatch',
-      () => {
-        w.config = { ...w.config, partner_splitter: `0x${'50'.repeat(20)}` };
-      },
-    ],
-    [
       'x402 pays someone else',
       'recipient_mismatch',
       () => {
-        w.file = x402File();
-        return opts({ paymentRequired: required(x402Offer({ payTo: `0x${'99'.repeat(20)}` })) });
-      },
-    ],
-    [
-      'x402 registration paying the splitter (a lying NEAR RPC)',
-      'recipient_mismatch',
-      () => {
-        w.file = file({ source: { kind: 'x402', pay_to: SPLITTER } });
+        w.file = file();
+        return opts({ paymentRequired: required(offer({ payTo: `0x${'99'.repeat(20)}` })) });
       },
     ],
     [
@@ -605,16 +536,6 @@ describe('preflight', () => {
       'an unknown payment flow',
       'method_mismatch',
       () => opts({ paymentRequired: required(offer({}, { paymentFlow: 'escrow' })) }),
-    ],
-    [
-      'another creator',
-      'seller_mismatch',
-      () => opts({ paymentRequired: required(offer({}, { creator: `0x${'ac'.repeat(20)}` })) }),
-    ],
-    [
-      'no creator',
-      'seller_mismatch',
-      () => opts({ paymentRequired: required(offer({}, { creator: undefined })) }),
     ],
     [
       'higher price asked',
@@ -693,18 +614,13 @@ describe('preflight', () => {
     ).toBe(60);
   });
 
-  it('takes the price and the seller from the contract, whatever case the request uses', async () => {
+  it('takes the price and the recipient from the contract, whatever case the request uses', async () => {
     const q = await preflight(
       opts({
-        paymentRequired: required(
-          offer(
-            { payTo: SPLITTER.toUpperCase().replace('0X', '0x') },
-            { creator: SELLER.toUpperCase().replace('0X', '0x') },
-          ),
-        ),
+        paymentRequired: required(offer({ payTo: PAY_TO.toUpperCase().replace('0X', '0x') })),
       }),
     );
-    expect(q.seller).toBe(SELLER);
+    expect(q).toMatchObject({ seller: SELLER, to: PAY_TO });
   });
 });
 
@@ -728,15 +644,9 @@ async function serverVerify(header: string, pr: PaymentRequired) {
       ['annon/v1', info.contract, info.fileId, info.buyerKey],
     ),
   );
-  const receive = req.scheme === 'annon-receive';
-  const nonce = receive
-    ? keccak256(
-        encodePacked(['address', 'bytes32'], [getAddress(req.extra.creator as string), annon]),
-      )
-    : annon;
   const a = p.payload.authorization;
-  if (a.nonce !== nonce) return 'nonce_not_annon';
-  const primaryType = receive ? 'ReceiveWithAuthorization' : 'TransferWithAuthorization';
+  if (a.nonce !== annon) return 'nonce_not_annon';
+  const primaryType = 'TransferWithAuthorization';
   const recovered = await recoverTypedDataAddress({
     domain: {
       name: req.extra.name,
@@ -775,7 +685,7 @@ describe('authorize', () => {
     signTypedData: vi.fn((t: ReturnType<typeof typedData>) => account.signTypedData(asViem(t))),
   });
 
-  it('signs a Partner payment a profile server accepts, bound to the seller and the buyer key', async () => {
+  it('signs a payment a profile server accepts, bound to the file and the buyer key', async () => {
     const q = await preflight(opts());
     const wallet = sign();
     const { header, job } = await authorize(q, {
@@ -796,25 +706,19 @@ describe('authorize', () => {
     expect(p.extensions.annon.info).toEqual({ ...annonInfo(), buyerKey: hex(buyerKey) });
     expect(p.payload.authorization).toMatchObject({
       from: BUYER,
-      to: SPLITTER,
+      to: PAY_TO,
       value: '10000',
       validAfter: '0',
       validBefore: String(NOW + 180),
-      nonce: partnerNonce(SELLER, annonNonce(CONTRACT, FILE, buyerKey)),
+      nonce: annonNonce(CONTRACT, FILE, buyerKey),
     });
     // The search starts at the finalized block, not the head.
     expect(job).toMatchObject({ block: SIGNED - 5000, signedAt: NOW, buyerKey: hex(buyerKey) });
-    // The dry run went to USDC as receiveWithAuthorization, called from the splitter.
-    const dry = w.calls.filter((c) => c.method === 'eth_call').at(-1);
-    expect(dry?.from).toBe(SPLITTER);
-    expect(
-      decodeFunctionData({ abi: USDC_ABI, data: dry?.data as `0x${string}` }).functionName,
-    ).toBe('receiveWithAuthorization');
   });
 
-  it('signs a direct x402 payment with the plain Annon nonce', async () => {
-    w.file = x402File();
-    const req = x402Offer();
+  it('dry-runs exactly the signed transferWithAuthorization against USDC', async () => {
+    w.file = file();
+    const req = offer();
     const q = await preflight(opts({ paymentRequired: required(req) }));
     const { header } = await authorize(q, {
       buyerKey,
@@ -858,10 +762,7 @@ describe('authorize', () => {
         order.push(`persist ${job.nonce}`);
       },
     });
-    expect(order).toEqual([
-      `persist ${partnerNonce(SELLER, annonNonce(CONTRACT, FILE, buyerKey))}`,
-      'sign',
-    ]);
+    expect(order).toEqual([`persist ${annonNonce(CONTRACT, FILE, buyerKey)}`, 'sign']);
 
     const never = sign();
     const failed = authorize(q, {
@@ -941,7 +842,7 @@ describe('authorize', () => {
     ).toBe('price_mismatch');
     expect(
       await run(() => {
-        w.file = x402File();
+        w.file = file({ pay_to: `0x${'5f'.repeat(20)}` });
       }),
     ).toBe('price_mismatch');
     expect(
@@ -967,6 +868,33 @@ describe('authorize', () => {
     w.head = { ...at(SIGNED), timestamp: NOW + 60 };
     const { job } = await authorize(q, { buyerKey, wallet: sign(), persist: async () => {} });
     expect(job.validBefore).toBe(String(NOW + 180));
+    // And a fast local clock: Base is 60 s behind it.
+    w.head = { ...at(SIGNED), timestamp: NOW - 60 };
+    const slow = await authorize(q, { buyerKey, wallet: sign(), persist: async () => {} });
+    expect(slow.job.validBefore).toBe(String(NOW - 60 + 180));
+    expect(slow.job.signedAt).toBe(NOW - 60);
+  });
+
+  it('takes the deadline from before the registration is read, however long the reads stall', async () => {
+    const q = await preflight(opts());
+    // The registration read stalls 400 s; afterwards both clocks agree on NOW + 400. A sales stop
+    // in that time must still see the payment land within 300 s.
+    w.onNear = () => {
+      w.head = { ...at(SIGNED), timestamp: NOW + 400 };
+      vi.mocked(Date.now).mockReturnValue((NOW + 400) * 1000);
+    };
+    const { job } = await authorize(q, { buyerKey, wallet: sign(), persist: async () => {} });
+    expect(job.validBefore).toBe(String(NOW + 180));
+    expect(job.signedAt).toBe(NOW);
+  });
+
+  it('refuses a local clock that is off before the registration read, even if it is corrected during it', async () => {
+    const q = await preflight(opts());
+    vi.mocked(Date.now).mockReturnValue((NOW + 400) * 1000);
+    w.onNear = () => vi.mocked(Date.now).mockReturnValue(NOW * 1000);
+    expect(await codeOf(authorize(q, { buyerKey, wallet: sign(), persist: async () => {} }))).toBe(
+      'transport',
+    );
   });
 
   it('hands back the job when a signed authorization fails afterwards', async () => {
@@ -1083,105 +1011,72 @@ const transfer = (from: string, to: string, value: bigint, i: number) =>
     encodeAbiParameters([{ type: 'uint256' }], [value]),
     i,
   );
-const split = (
-  nonce: string,
-  creator = SELLER,
-  total = 10_000n,
-  payer = BUYER,
-  emitter = SPLITTER,
-) =>
-  rpcLog(
-    emitter,
-    encodeEventTopics({
-      abi: USDC_ABI,
-      eventName: 'PaymentSplit',
-      args: { payer: payer as `0x${string}`, creator: creator as `0x${string}` },
-    }) as string[],
-    encodeAbiParameters(
-      [{ type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'bytes32' }],
-      [total, total / 10n, total - total / 10n, nonce as `0x${string}`],
-    ),
-    9,
-  );
 const receipt = (logs: RpcLog[], s = '0x1') => ({ status: s, transactionHash: TX, logs });
 
 const ANNON = annonNonce(CONTRACT, FILE, buyerKey);
-const PARTNER = partnerNonce(SELLER, ANNON);
-const partnerExpect: Expected = {
-  kind: 'ReceiveWithAuthorization',
-  usdc: USDC,
-  to: SPLITTER,
-  from: BUYER,
-  nonce: PARTNER,
-  seller: SELLER,
-  price: 10_000n,
-};
-const x402Expect: Expected = {
-  kind: 'TransferWithAuthorization',
-  usdc: USDC,
-  to: PAY_TO,
-  from: BUYER,
-  nonce: ANNON,
-  seller: SELLER,
-  price: 10_000n,
-};
-const partnerReceipt = () => [
-  used(PARTNER),
-  transfer(BUYER, SPLITTER, 10_000n, 4),
-  transfer(SPLITTER, SELLER, 9_000n, 5),
-  transfer(SPLITTER, PAY_TO, 1_000n, 6),
-  split(PARTNER),
+const x402Expect: Expected = { usdc: USDC, to: PAY_TO, from: BUYER, nonce: ANNON, price: 10_000n };
+/** A receipt with unrelated logs around the payment, as a real one has. */
+const x402Receipt = () => [
+  transfer(`0x${'77'.repeat(20)}`, `0x${'78'.repeat(20)}`, 5n, 2),
+  used(ANNON),
+  transfer(BUYER, PAY_TO, 10_000n, 4),
+  transfer(PAY_TO, `0x${'79'.repeat(20)}`, 1n, 5),
 ];
-const x402Receipt = () => [used(ANNON), transfer(BUYER, PAY_TO, 10_000n, 4)];
 
 describe('paymentLogs', () => {
-  it('picks the PaymentSplit of a Partner purchase, in the form unlock takes', () => {
-    const logs = paymentLogs(receipt(partnerReceipt()), partnerExpect);
-    expect(logs).toHaveLength(1);
-    expect(logs?.[0]).toEqual({
-      address: SPLITTER.slice(2),
+  it('picks AuthorizationUsed and its Transfer, in the form unlock takes', () => {
+    const logs = paymentLogs(receipt(x402Receipt()), x402Expect);
+    expect(logs).toHaveLength(2);
+    expect(logs?.[1]).toEqual({
+      address: USDC.slice(2),
       block_hash: 'bb'.repeat(32),
       block_number: 0x3000005,
-      data: split(PARTNER).data,
-      log_index: 9,
+      data: transfer(BUYER, PAY_TO, 10_000n, 4).data,
+      log_index: 4,
       removed: false,
-      topics: split(PARTNER).topics.map((t) => t.slice(2)),
+      topics: transfer(BUYER, PAY_TO, 10_000n, 4).topics.map((t) => t.slice(2)),
       transaction_hash: 'cc'.repeat(32),
       transaction_index: 5,
     });
   });
 
-  it('picks AuthorizationUsed and its Transfer for a direct x402 purchase', () => {
-    expect(paymentLogs(receipt(x402Receipt()), x402Expect)?.map((l) => l.log_index)).toEqual([
-      3, 4,
-    ]);
+  it("is not misled by another payer's authorization with the same nonce in the same transaction", () => {
+    // EIP-3009 nonces are per authorizer: a facilitator can put its own zero-value use of the
+    // buyer's nonce first, in the same batch.
+    const other = `0x${'66'.repeat(20)}`;
+    const logs = [
+      used(ANNON, other, 1),
+      transfer(other, PAY_TO, 0n, 2),
+      used(ANNON, BUYER, 3),
+      transfer(BUYER, PAY_TO, 10_000n, 4),
+    ];
+    expect(paymentLogs(receipt(logs), x402Expect)?.map((l) => l.log_index)).toEqual([3, 4]);
   });
 
   // Each row is a receipt the contract would refuse; the SDK must not hand it to unlock.
   const refused: [string, Expected, RpcLog[], string?][] = [
-    ['reverted transaction', partnerExpect, partnerReceipt(), '0x0'],
+    ['reverted transaction', x402Expect, x402Receipt(), '0x0'],
     [
-      'split from another contract',
-      partnerExpect,
-      [split(PARTNER, SELLER, 10_000n, BUYER, `0x${'50'.repeat(20)}`)],
+      'removed authorization',
+      x402Expect,
+      [{ ...used(ANNON), removed: true }, transfer(BUYER, PAY_TO, 10_000n, 4)],
     ],
-    ['split with another nonce', partnerExpect, [split(ANNON)]],
-    ['split to another creator', partnerExpect, [split(PARTNER, `0x${'ac'.repeat(20)}`)]],
     [
-      'split from another payer',
-      partnerExpect,
-      [split(PARTNER, SELLER, 10_000n, `0x${'ad'.repeat(20)}`)],
+      'removed transfer',
+      x402Expect,
+      [used(ANNON), { ...transfer(BUYER, PAY_TO, 10_000n, 4), removed: true }],
     ],
-    ['split below the price', partnerExpect, [split(PARTNER, SELLER, 9_999n)]],
     [
-      'two splits for one nonce',
-      partnerExpect,
-      [split(PARTNER), { ...split(PARTNER), logIndex: '0xa' }],
+      'x402 to another address',
+      x402Expect,
+      [used(ANNON), transfer(BUYER, `0x${'99'.repeat(20)}`, 10_000n, 4)],
     ],
-    ['removed split', partnerExpect, [{ ...split(PARTNER), removed: true }]],
-    ['x402 to another address', x402Expect, [used(ANNON), transfer(BUYER, SPLITTER, 10_000n, 4)]],
     ['x402 below the price', x402Expect, [used(ANNON), transfer(BUYER, PAY_TO, 9_999n, 4)]],
-    ['x402 with another nonce', x402Expect, [used(PARTNER), transfer(BUYER, PAY_TO, 10_000n, 4)]],
+    [
+      'x402 with another nonce',
+      x402Expect,
+      [used(`0x${'ee'.repeat(32)}`), transfer(BUYER, PAY_TO, 10_000n, 4)],
+    ],
     ['x402 transfer not adjacent', x402Expect, [used(ANNON), transfer(BUYER, PAY_TO, 10_000n, 5)]],
     [
       'x402 transfer from someone else',
@@ -1225,22 +1120,12 @@ describe('paymentLogs', () => {
       ],
     ],
     [
-      'split from another transaction',
-      partnerExpect,
-      [{ ...split(PARTNER), transactionHash: `0x${'dd'.repeat(32)}` }],
-    ],
-    [
       'x402 Transfer from another transaction',
       x402Expect,
       [
         used(ANNON),
         { ...transfer(BUYER, PAY_TO, 10_000n, 4), transactionHash: `0x${'dd'.repeat(32)}` },
       ],
-    ],
-    [
-      'split with extra data',
-      partnerExpect,
-      [{ ...split(PARTNER), data: `${split(PARTNER).data}00` }],
     ],
     [
       'x402 transfer with extra data',
@@ -1265,15 +1150,13 @@ describe('status', () => {
   const job = (over: Partial<PaymentJob> = {}): PaymentJob => ({
     contractId: CONTRACT,
     fileId: FILE,
-    kind: 'ReceiveWithAuthorization',
     buyer: BUYER,
     seller: SELLER,
-    to: SPLITTER,
+    to: PAY_TO,
     usdc: USDC,
     price: '10000',
     buyerKey: hex(buyerKey),
-    annonNonce: ANNON,
-    nonce: PARTNER,
+    nonce: ANNON,
     validBefore: String(NOW + 300),
     block: SIGNED,
     signedAt: NOW,
@@ -1290,16 +1173,16 @@ describe('status', () => {
 
   it('finds the payment by its nonce alone, without the transaction hash', async () => {
     w.head = at(SIGNED + 50);
-    w.getLogs = [atBlock(used(PARTNER), SIGNED + 20)];
-    w.receipt = receipt(partnerReceipt());
-    expect(await status(BASE, job())).toMatchObject({ state: 'paid', txHash: TX, logIndex: 9 });
+    w.getLogs = [atBlock(used(ANNON), SIGNED + 20)];
+    w.receipt = receipt(x402Receipt());
+    expect(await status(BASE, job())).toMatchObject({ state: 'paid', txHash: TX, logIndex: 3 });
   });
 
   it('finds a payment that lands at the end of its window at five blocks a second', async () => {
     // 299 s after signing is block SIGNED + 1495; the old one-block-a-second bound missed it.
     w.head = at(SIGNED + 100_000);
-    w.getLogs = [atBlock(used(PARTNER), SIGNED + 1495)];
-    w.receipt = receipt(partnerReceipt());
+    w.getLogs = [atBlock(used(ANNON), SIGNED + 1495)];
+    w.receipt = receipt(x402Receipt());
     expect(await status(BASE, job())).toMatchObject({ state: 'paid' });
     const q = getLogsQuery();
     expect(q).toMatchObject({
@@ -1308,7 +1191,7 @@ describe('status', () => {
       topics: [
         [expect.any(String), expect.any(String)],
         encodeAbiParameters([{ type: 'address' }], [BUYER as `0x${string}`]),
-        PARTNER,
+        ANNON,
       ],
     });
     // It stops at the first block at or past validBefore, not at the head.
@@ -1338,8 +1221,8 @@ describe('status', () => {
       }
       return (respondFast as typeof fetch)(url, init);
     });
-    w.getLogs = [atBlock(used(PARTNER), SIGNED + 5990)];
-    w.receipt = receipt(partnerReceipt());
+    w.getLogs = [atBlock(used(ANNON), SIGNED + 5990)];
+    w.receipt = receipt(x402Receipt());
     expect(await status(BASE, job())).toMatchObject({ state: 'paid' });
   });
 
@@ -1356,7 +1239,7 @@ describe('status', () => {
     expect(await status(BASE, job())).toEqual({ state: 'expired' });
   });
 
-  const canceledLog = (from = BUYER, nonce = PARTNER) =>
+  const canceledLog = (from = BUYER, nonce = ANNON) =>
     rpcLog(
       USDC,
       encodeEventTopics({
@@ -1386,16 +1269,16 @@ describe('status', () => {
 
   it('refuses a used authorization whose transaction is not this purchase', async () => {
     w.head = at(SIGNED + 50);
-    w.getLogs = [atBlock(used(PARTNER), SIGNED + 20)];
-    w.receipt = receipt([used(PARTNER), transfer(BUYER, SPLITTER, 10_000n, 4)]);
+    w.getLogs = [atBlock(used(ANNON), SIGNED + 20)];
+    w.receipt = receipt([used(ANNON), transfer(BUYER, `0x${'99'.repeat(20)}`, 10_000n, 4)]);
     expect(await codeOf(status(BASE, job()))).toBe('transport');
     // The right logs, but in a receipt for another transaction.
-    w.receipt = { ...receipt(partnerReceipt()), transactionHash: `0x${'dd'.repeat(32)}` };
+    w.receipt = { ...receipt(x402Receipt()), transactionHash: `0x${'dd'.repeat(32)}` };
     expect(await codeOf(status(BASE, job()))).toBe('transport');
     // A whole, consistent receipt, but of another transaction than the log points at.
     const other = `0x${'dd'.repeat(32)}`;
     w.receipt = {
-      ...receipt(partnerReceipt().map((l) => ({ ...l, transactionHash: other }))),
+      ...receipt(x402Receipt().map((l) => ({ ...l, transactionHash: other }))),
       transactionHash: other,
     };
     expect(await codeOf(status(BASE, job()))).toBe('transport');
@@ -1406,10 +1289,10 @@ describe('status', () => {
     w.head = at(SIGNED + 2000);
     w.finalized = at(SIGNED + 2000);
     for (const l of [
-      atBlock({ ...used(PARTNER), address: getAddress(`0x${'99'.repeat(20)}`) }, SIGNED + 10),
+      atBlock({ ...used(ANNON), address: getAddress(`0x${'99'.repeat(20)}`) }, SIGNED + 10),
       atBlock(canceledLog(`0x${'ad'.repeat(20)}`), SIGNED + 10),
-      atBlock(canceledLog(BUYER, ANNON), SIGNED + 10),
-      atBlock(transfer(BUYER, SPLITTER, 10_000n, 4), SIGNED + 10),
+      atBlock(canceledLog(BUYER, `0x${'ee'.repeat(32)}`), SIGNED + 10),
+      atBlock(transfer(BUYER, PAY_TO, 10_000n, 4), SIGNED + 10),
       atBlock({ ...canceledLog(), address: getAddress(`0x${'99'.repeat(20)}`) }, SIGNED + 10),
       atBlock(
         { ...canceledLog(), topics: [...canceledLog().topics, `0x${'00'.repeat(32)}`] },
@@ -1520,18 +1403,18 @@ describe('x402 v2 envelope', () => {
 
   it('buys from a server that sends no annon extension when the caller names the file', async () => {
     expect(await preflight(opts({ paymentRequired: withInfo(undefined) }))).toMatchObject({
-      kind: 'ReceiveWithAuthorization',
+      to: PAY_TO,
     });
   });
 
   it('echoes every advertised extension and adds the buyer key, or names the file itself', () => {
     const a = {
       from: BUYER,
-      to: SPLITTER,
+      to: PAY_TO,
       value: 1n,
       validAfter: 0n,
       validBefore: 2n,
-      nonce: PARTNER,
+      nonce: ANNON,
     };
     const pr = {
       ...required(),
@@ -1644,8 +1527,8 @@ describe('the official x402 library accepts what the SDK sends', () => {
   };
 
   it('parses our PAYMENT-REQUIRED and PAYMENT-SIGNATURE with its own decoders and schemas', async () => {
-    w.file = x402File();
-    const pr = required(x402Offer());
+    w.file = file();
+    const pr = required(offer());
     // Their encoder, our reader; our header, their decoder.
     expect(readPaymentRequired(encodePaymentRequiredHeader(pr as never))).toEqual(pr);
     const q = await preflight(opts({ paymentRequired: pr }));
@@ -1663,8 +1546,8 @@ describe('the official x402 library accepts what the SDK sends', () => {
   });
 
   it('verifies our direct x402 payment with its exact EVM facilitator', async () => {
-    w.file = x402File();
-    const pr = required(x402Offer());
+    w.file = file();
+    const pr = required(offer());
     const q = await preflight(opts({ paymentRequired: pr }));
     const { header } = await authorize(q, {
       buyerKey,
@@ -1683,7 +1566,7 @@ describe('the official x402 library accepts what the SDK sends', () => {
     expect(calls).toContain('simulate:true');
   });
 
-  it('refuses our Partner (annon-receive) payment, so no plain facilitator can settle it', async () => {
+  it('is refused by a plain facilitator as long as the offer says annon-exact (forFacilitator renames it)', async () => {
     const pr = required();
     const q = await preflight(opts({ paymentRequired: pr }));
     const { header } = await authorize(q, {
@@ -1725,7 +1608,7 @@ describe('offerFor and checkPayment', () => {
   };
 
   it('builds a 402 from the registration that the official schema and the SDK buyer both accept', async () => {
-    for (const f of [file(), x402File()]) {
+    for (const f of [file(), file()]) {
       w.file = f;
       const pr = await offerFor(offerOpts);
       expect(parsePaymentRequired(pr).success).toBe(true);
@@ -1736,7 +1619,7 @@ describe('offerFor and checkPayment', () => {
   });
 
   it('names the public header and the buyers-only download in the extension', async () => {
-    w.file = x402File();
+    w.file = file();
     const pr = await offerFor({
       ...offerOpts,
       header: 'https://seller.example/f/1/header',
@@ -1767,22 +1650,19 @@ describe('offerFor and checkPayment', () => {
     expect(await code(offerFor(offerOpts))).toBe('unknown_file');
   });
 
-  it('accepts what the SDK buyer sends, for both sources, and returns what settlement needs', async () => {
-    for (const f of [file(), x402File()]) {
-      w.file = f;
-      const pr = await offerFor(offerOpts);
-      const q = await preflight(opts({ paymentRequired: pr }));
-      const { header } = await authorize(q, {
-        buyerKey,
-        wallet: wallet(),
-        persist: async () => {},
-      });
-      expect(checkPayment(header, pr)).toMatchObject({
-        payer: BUYER,
-        buyerKey: hex(buyerKey),
-        commitment: annonNonce(CONTRACT, FILE, buyerKey),
-      });
-    }
+  it('accepts what the SDK buyer sends and returns what settlement needs', async () => {
+    const pr = await offerFor(offerOpts);
+    const q = await preflight(opts({ paymentRequired: pr }));
+    const { header } = await authorize(q, {
+      buyerKey,
+      wallet: wallet(),
+      persist: async () => {},
+    });
+    expect(checkPayment(header, pr)).toMatchObject({
+      payer: BUYER,
+      buyerKey: hex(buyerKey),
+      nonce: annonNonce(CONTRACT, FILE, buyerKey),
+    });
   });
 
   it('gives the official x402 client nothing to sign, and refuses its random nonce anyway', async () => {
@@ -1792,7 +1672,7 @@ describe('offerFor and checkPayment', () => {
         () => 'signed',
         () => 'refused',
       );
-    w.file = x402File();
+    w.file = file();
     const pr = await offerFor(offerOpts);
     w.file = file();
     const splitter = await offerFor(offerOpts);
@@ -1816,15 +1696,15 @@ describe('offerFor and checkPayment', () => {
   });
 
   it('hands a standard facilitator only annon-exact payments, renamed exact', async () => {
-    w.file = file();
-    const splitter = await offerFor(offerOpts);
-    expect(reject(() => forFacilitator('e30=', splitter.accepts[0] as never))).toMatch(
-      /^method_mismatch/,
-    );
+    const pr = await offerFor(offerOpts);
+    const other = { ...pr.accepts[0], scheme: 'exact' };
+    expect(reject(() => forFacilitator('e30=', other as never))).toMatch(/^method_mismatch/);
+    const { paymentRequirements } = forFacilitator('e30=', pr.accepts[0] as never);
+    expect(paymentRequirements.scheme).toBe('exact');
   });
 
   it('refuses a payment signed for the identity key, which would put the key in the clear', async () => {
-    w.file = x402File();
+    w.file = file();
     const pr = await offerFor(offerOpts);
     const zero = bls.G1.Point.ZERO.toBytes(true);
     const a = {
@@ -1835,9 +1715,7 @@ describe('offerFor and checkPayment', () => {
       validBefore: BigInt(NOW + 300),
       nonce: annonNonce(CONTRACT, FILE, zero),
     };
-    const sig = await buyerAccount.signTypedData(
-      asViem(typedData('TransferWithAuthorization', USDC, a)),
-    );
+    const sig = await buyerAccount.signTypedData(asViem(typedData(USDC, a)));
     const header = paymentSignature(pr, pr.accepts[0] as never, a, sig, {
       contractId: CONTRACT,
       fileId: FILE,
@@ -1854,7 +1732,7 @@ describe('offerFor and checkPayment', () => {
   });
 
   it('does not care about the order of keys in the echoed offer', async () => {
-    w.file = x402File();
+    w.file = file();
     const pr = await offerFor(offerOpts);
     const q = await preflight(opts({ paymentRequired: pr }));
     const { header } = await authorize(q, { buyerKey, wallet: wallet(), persist: async () => {} });
@@ -1866,7 +1744,7 @@ describe('offerFor and checkPayment', () => {
   });
 
   it('settles no authorization valid for longer than the stop window allows, whoever signed it', async () => {
-    w.file = x402File();
+    w.file = file();
     const pr = await offerFor(offerOpts);
     const signFor = async (seconds: number) => {
       const a = {
@@ -1877,9 +1755,7 @@ describe('offerFor and checkPayment', () => {
         validBefore: BigInt(NOW + seconds),
         nonce: annonNonce(CONTRACT, FILE, buyerKey),
       };
-      const sig = await buyerAccount.signTypedData(
-        asViem(typedData('TransferWithAuthorization', USDC, a)),
-      );
+      const sig = await buyerAccount.signTypedData(asViem(typedData(USDC, a)));
       return paymentSignature(pr, pr.accepts[0] as never, a, sig, {
         contractId: CONTRACT,
         fileId: FILE,
@@ -1895,7 +1771,7 @@ describe('offerFor and checkPayment', () => {
   });
 
   it('reads the registration again before settling: a stop after the 402 refuses the payment', async () => {
-    w.file = x402File();
+    w.file = file();
     const pr = await offerFor(offerOpts);
     const q = await preflight(opts({ paymentRequired: pr }));
     const { header } = await authorize(q, { buyerKey, wallet: wallet(), persist: async () => {} });
@@ -1907,18 +1783,18 @@ describe('offerFor and checkPayment', () => {
         () => 'ok',
         (e: PayError) => e.code,
       );
-    w.file = { ...x402File(), sales_stopped_at: NOW };
+    w.file = { ...file(), sales_stopped_at: NOW };
     expect(await code(verifyPayment(header, { ...offerOpts, baseRpc: BASE }))).toBe(
       'sales_stopped',
     );
-    w.file = { ...x402File(), taken_down: 'court_order' };
+    w.file = { ...file(), taken_down: 'court_order' };
     expect(await code(verifyPayment(header, { ...offerOpts, baseRpc: BASE }))).toBe('taken_down');
     // The stale 402 alone would still pass: that is why servers call verifyPayment.
     expect(checkPayment(header, pr)).toMatchObject({ payer: BUYER });
   });
 
   it("measures the bound in Base time, so a server whose clock runs fast can't stretch it", async () => {
-    w.file = x402File();
+    w.file = file();
     const pr = await offerFor(offerOpts);
     const a = {
       from: BUYER,
@@ -1928,9 +1804,7 @@ describe('offerFor and checkPayment', () => {
       validBefore: BigInt(NOW + 250),
       nonce: annonNonce(CONTRACT, FILE, buyerKey),
     };
-    const sig = await buyerAccount.signTypedData(
-      asViem(typedData('TransferWithAuthorization', USDC, a)),
-    );
+    const sig = await buyerAccount.signTypedData(asViem(typedData(USDC, a)));
     const header = paymentSignature(pr, pr.accepts[0] as never, a, sig, {
       contractId: CONTRACT,
       fileId: FILE,
@@ -1952,7 +1826,7 @@ describe('offerFor and checkPayment', () => {
   });
 
   it('takes the time before it reads the registration, so a slow read cannot stretch the window', async () => {
-    w.file = x402File();
+    w.file = file();
     const pr = await offerFor(offerOpts);
     const q = await preflight(opts({ paymentRequired: pr }));
     const { header } = await authorize(q, { buyerKey, wallet: wallet(), persist: async () => {} });

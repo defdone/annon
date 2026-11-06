@@ -4,14 +4,13 @@
  * wallet. `specs/vectors/texts.json`, written by the contract's own tests, keeps both in step.
  */
 
-export type Source = { kind: 'partner' } | { kind: 'x402'; pay_to: string };
-
 export interface RegisterArgs {
   file_id: string;
   seller: string;
   /** USDC base units (6 decimals), as the contract's `U128`: a decimal string. */
   price: string;
-  source: Source;
+  /** Where buyers pay: the seller's wallet, a platform's, or e.g. an immutable revenue split. */
+  pay_to: string;
   cipher_hash: string;
   moderator: string | null;
   /** The seller's one-time G1 key, 48 bytes hex. */
@@ -61,10 +60,6 @@ export function utc(secs: number): string {
 }
 
 export function registerText(contractId: string, a: RegisterArgs): string {
-  const source =
-    a.source.kind === 'partner'
-      ? 'partner'
-      : `x402, pay to ${hex0x(a.source.pay_to, 20, 'pay_to')}`;
   return [
     'Annon: list a file for sale',
     'Signing this lets whoever holds the seller key below open the file.',
@@ -72,7 +67,7 @@ export function registerText(contractId: string, a: RegisterArgs): string {
     `file: ${hex0x(a.file_id, 32, 'file_id')}`,
     `seller: ${hex0x(a.seller, 20, 'seller')}`,
     `price: ${usdc(a.price)} USDC`,
-    `source: ${source}`,
+    `pay to: ${hex0x(a.pay_to, 20, 'pay_to')}`,
     `cipher: ${hex0x(a.cipher_hash, 32, 'cipher_hash')}`,
     `moderator: ${a.moderator ?? '(none)'}`,
     `seller key: ${hex0x(a.seller_key, 48, 'seller_key')}`,
