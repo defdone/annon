@@ -9,14 +9,10 @@ import type { Authorization } from './eip3009.js';
 /** CAIP-2 id of Base mainnet. */
 export const BASE_NETWORK = 'eip155:8453';
 /**
- * The scheme of a splitter (Payaion) offer: EIP-3009 `ReceiveWithAuthorization`, which only the
- * splitter can settle. Its own scheme, not `exact`, so a client without Annon has no handler for
- * it and signs nothing (checked against the official x402 client).
- */
-export const ANNON_RECEIVE = 'annon-receive';
-/**
- * The scheme of a direct offer: plain EIP-3009 `TransferWithAuthorization` to the seller, under its
- * own name for the same reason. The seller settles it through any standard facilitator as `exact`
+ * The scheme of an Annon offer: plain EIP-3009 `TransferWithAuthorization` to the file's `pay_to`,
+ * under its own name so a client without Annon has no handler for it and signs nothing (checked
+ * against the official x402 client: it signs any `exact` offer with a random nonce, which could
+ * never release the key). The seller settles it through any standard facilitator as `exact`
  * (`forFacilitator`): the scheme label is not part of what the buyer signs.
  */
 export const ANNON_EXACT = 'annon-exact';

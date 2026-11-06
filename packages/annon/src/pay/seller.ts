@@ -1,21 +1,14 @@
 /**
  * The seller's side of `specs/x402-annon.md`: the 402 for an Annon file, built from its
  * registration, and the check a server runs on `PAYMENT-SIGNATURE` before it settles. Settlement
- * itself stays with the server's facilitator: any standard x402 one for `annon-exact` (through
- * `forFacilitator`), the splitter's for `annon-receive`.
+ * itself stays with the server's facilitator: any standard x402 one, through `forFacilitator`.
  */
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 import { getConfig, getFile } from '../near/rpc.js';
 import { fail, head } from './base.js';
-import { annonNonce, digest, fromHex, payaionNonce, signer } from './eip3009.js';
+import { annonNonce, digest, fromHex, signer } from './eip3009.js';
 import { MAX_CLOCK_SKEW_SECONDS, MAX_VALIDITY_SECONDS } from './pay.js';
-import {
-  ANNON_EXACT,
-  ANNON_RECEIVE,
-  BASE_NETWORK,
-  type Offer,
-  type PaymentRequired,
-} from './x402.js';
+import { ANNON_EXACT, BASE_NETWORK, type Offer, type PaymentRequired } from './x402.js';
 
 export interface OfferOptions {
   nearRpc: string;
@@ -29,7 +22,7 @@ export interface OfferOptions {
   download?: string;
   /** The seller publishes the body too: the client then checks the whole file before signing. */
   public?: boolean;
-  /** At most this long for the buyer's authorization; the Annon client signs for at most 300. */
+  /** At most this long for the buyer's authorization; the Annon client signs for at most 180. */
   maxTimeoutSeconds?: number;
 }
 
@@ -44,18 +37,14 @@ export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
   if (file.takenDown) fail('taken_down', `the file was taken down (${file.takenDown})`);
   if (file.salesStoppedAt !== null) fail('sales_stopped', 'the seller stopped selling this file');
   const config = await getConfig(o.nearRpc, o.contractId);
-  const source = file.source;
-  const splitter = source.kind === 'payaion';
   const offer: Offer = {
-    scheme: splitter ? ANNON_RECEIVE : ANNON_EXACT,
+    scheme: ANNON_EXACT,
     network: BASE_NETWORK,
     amount: file.price.toString(),
     asset: config.usdc,
-    payTo: source.kind === 'payaion' ? config.payaionSplitter : source.pay_to,
+    payTo: file.payTo,
     maxTimeoutSeconds: o.maxTimeoutSeconds ?? 300,
-    extra: splitter
-      ? { name: 'USD Coin', version: '2', creator: file.seller }
-      : { name: 'USD Coin', version: '2' },
+    extra: { name: 'USD Coin', version: '2' },
   };
   const info = {
     version: 1,
@@ -96,8 +85,8 @@ export interface CheckedPayment {
   payer: string;
   /** The buyer's one-time key: `unlock` needs it. */
   buyerKey: string;
-  /** `annonNonce`: the splitter's `commitment` for an `annon-receive` payment. */
-  commitment: string;
+  /** The nonce the buyer signed: `annonNonce(contract, fileId, buyerKey)`. */
+  nonce: string;
   offer: Offer;
 }
 
@@ -184,9 +173,7 @@ export function checkPayment(
   }
   const contract = String(advertised.contract);
   const fileId = String(advertised.fileId);
-  const commitment = annonNonce(contract, fileId, fromHex(buyerKey, 48, 'buyerKey'));
-  const receive = offer.scheme === ANNON_RECEIVE;
-  const nonce = receive ? payaionNonce(String(offer.extra?.creator), commitment) : commitment;
+  const nonce = annonNonce(contract, fileId, fromHex(buyerKey, 48, 'buyerKey'));
 
   const a = p.payload?.authorization ?? {};
   const str = (k: string) => (typeof a[k] === 'string' ? (a[k] as string) : '');
@@ -206,7 +193,6 @@ export function checkPayment(
     fail('bad_requirements', 'the authorization is valid for too long');
   }
   const from = str('from').toLowerCase();
-  const kind = receive ? 'ReceiveWithAuthorization' : 'TransferWithAuthorization';
   const auth = {
     from,
     to: offer.payTo.toLowerCase(),
@@ -216,20 +202,16 @@ export function checkPayment(
     nonce,
   };
   const sig = p.payload?.signature;
-  if (
-    typeof sig !== 'string' ||
-    signer(digest(kind, offer.asset.toLowerCase(), auth), sig) !== from
-  ) {
+  if (typeof sig !== 'string' || signer(digest(offer.asset.toLowerCase(), auth), sig) !== from) {
     fail('bad_signature', "the signature is not the payer's, or not in the form USDC takes");
   }
-  return { payer: from, buyerKey, commitment, offer };
+  return { payer: from, buyerKey, nonce, offer };
 }
 
 /**
  * A checked `annon-exact` payment as a standard x402 facilitator takes it: the same signed
  * authorization with the scheme named `exact` in both the payload and the requirements (the
- * official facilitator checks both). Run `checkPayment` first. `annon-receive` payments settle
- * only through the splitter.
+ * official facilitator checks both). Run `verifyPayment` first.
  */
 export function forFacilitator(header: string, offer: Offer) {
   if (offer.scheme !== ANNON_EXACT) {

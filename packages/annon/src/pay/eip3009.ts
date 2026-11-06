@@ -7,11 +7,8 @@ import { keccak_256 } from '@noble/hashes/sha3.js';
 
 export const BASE_CHAIN_ID = 8453;
 
-/**
- * A Payaion file is paid with `ReceiveWithAuthorization`: only the splitter (`to`) can settle it.
- * A direct x402 file with `TransferWithAuthorization` straight to the seller's `pay_to`.
- */
-export type Kind = 'ReceiveWithAuthorization' | 'TransferWithAuthorization';
+/** What the buyer signs: USDC `TransferWithAuthorization` straight to the file's `pay_to`. */
+const PRIMARY_TYPE = 'TransferWithAuthorization';
 
 export interface Authorization {
   from: string;
@@ -32,10 +29,10 @@ const FIELDS = [
 ] as const;
 
 /** The typed data in the shape `signTypedData` takes (viem, ethers' `_signTypedData` minus domain types). */
-export const typedData = (kind: Kind, usdc: string, a: Authorization) => ({
+export const typedData = (usdc: string, a: Authorization) => ({
   domain: { name: 'USD Coin', version: '2', chainId: BASE_CHAIN_ID, verifyingContract: usdc },
-  types: { [kind]: FIELDS },
-  primaryType: kind,
+  types: { [PRIMARY_TYPE]: FIELDS },
+  primaryType: PRIMARY_TYPE,
   message: a,
 });
 
@@ -67,8 +64,8 @@ export function word(n: bigint): Uint8Array {
 /** An address as a 32-byte word. */
 export const addressWord = (a: string) => concat(new Uint8Array(12), fromHex(a, 20, 'address'));
 
-/** The EIP-712 digest a wallet signs for `typedData(kind, usdc, a)`. */
-export function digest(kind: Kind, usdc: string, a: Authorization): Uint8Array {
+/** The EIP-712 digest a wallet signs for `typedData(usdc, a)`. */
+export function digest(usdc: string, a: Authorization): Uint8Array {
   const domainType = keccak_256(
     utf8.encode(
       'EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)',
@@ -83,7 +80,9 @@ export function digest(kind: Kind, usdc: string, a: Authorization): Uint8Array {
       addressWord(usdc),
     ),
   );
-  const type = keccak_256(utf8.encode(`${kind}(${FIELDS.map((f) => `${f.type} ${f.name}`)})`));
+  const type = keccak_256(
+    utf8.encode(`${PRIMARY_TYPE}(${FIELDS.map((f) => `${f.type} ${f.name}`)})`),
+  );
   const struct = keccak_256(
     concat(
       type,
@@ -136,7 +135,3 @@ export const annonNonce = (contractId: string, fileId: string, buyerKey: Uint8Ar
       ),
     ),
   );
-
-/** `keccak256(abi.encodePacked(creator, annonNonce))`: what a Payaion file's buyer signs. */
-export const payaionNonce = (creator: string, annon: string) =>
-  toHex(keccak_256(concat(fromHex(creator, 20, 'creator'), fromHex(annon, 32, 'annonNonce'))));

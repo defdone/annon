@@ -183,7 +183,7 @@ describe('views', () => {
   const file = {
     seller: `0x${'ab'.repeat(20)}`,
     price: '340282366920938463463374607431768211455',
-    source: { kind: 'payaion' },
+    pay_to: `0x${'5e'.repeat(20)}`,
     cipher_hash: `0x${'22'.repeat(32)}`,
     moderator: null,
     sales_stopped_at: null,
@@ -199,11 +199,9 @@ describe('views', () => {
     expect(await getFile('https://rpc', CONTRACT, '0x11')).toBeNull();
   });
 
-  it('reads an x402 listing in whatever hex form it was registered', async () => {
-    const payTo = '58DA990A8F4A3A6CA7CB6315D68A140105917352';
-    respond({ result: { result: bytes({ ...file, source: { kind: 'x402', pay_to: payTo } }) } });
-    const f = await getFile('https://rpc', CONTRACT, '0x11');
-    expect(f?.source).toEqual({ kind: 'x402', pay_to: `0x${payTo.toLowerCase()}` });
+  it('reads pay_to as the contract prints it: 0x and lowercase', async () => {
+    respond({ result: { result: bytes(file) } });
+    expect((await getFile('https://rpc', CONTRACT, '0x11'))?.payTo).toBe(`0x${'5e'.repeat(20)}`);
   });
 
   it('refuses a get_file answer that is not what the contract returns', async () => {
@@ -216,7 +214,9 @@ describe('views', () => {
       { ...file, sales_stopped_at: -1 },
       { ...file, sales_stopped_at: 0 },
       { ...file, seller: '0xAB' },
-      { ...file, source: { kind: 'x402' } },
+      { ...file, pay_to: undefined },
+      { ...file, pay_to: '0x5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E' },
+      { ...file, pay_to: '5e'.repeat(20) },
       { ...file, taken_down: 'other' },
       'file',
     ]) {
@@ -230,7 +230,6 @@ describe('views', () => {
       mpc: 'v1.signer',
       ckd_domain: 2,
       foreign_tx_domain: 3,
-      payaion_splitter: `0x${'51'.repeat(20)}`,
       usdc: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
     };
     respond({ result: { result: bytes(config) } });
@@ -238,15 +237,14 @@ describe('views', () => {
       mpc: 'v1.signer',
       ckdDomain: 2,
       foreignTxDomain: 3,
-      payaionSplitter: config.payaion_splitter,
       usdc: config.usdc,
     });
     for (const bad of [
       { ...config, mpc: 'Not An Account' },
       { ...config, ckd_domain: '2' },
       { ...config, foreign_tx_domain: 1.5 },
-      { ...config, payaion_splitter: '0x833589FCD6EDB6E08F4C7C32D4F71B54BDA02913' },
-      { ...config, payaion_splitter: `0x${'51'.repeat(19)}` },
+      { ...config, usdc: '0x833589FCD6EDB6E08F4C7C32D4F71B54BDA02913' },
+      { ...config, usdc: `0x${'83'.repeat(19)}` },
       { ...config, usdc: undefined },
       null,
     ]) {

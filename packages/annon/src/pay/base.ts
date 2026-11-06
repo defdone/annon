@@ -5,7 +5,7 @@
  * it misreports is caught by NEAR MPC, which reads Base itself.
  */
 import { keccak_256 } from '@noble/hashes/sha3.js';
-import { type Authorization, addressWord, fromHex, type Kind, toHex, word } from './eip3009.js';
+import { type Authorization, addressWord, fromHex, toHex, word } from './eip3009.js';
 
 export type PayErrorCode =
   /** The RPC couldn't be reached or answered something malformed; safe to retry. */
@@ -19,7 +19,6 @@ export type PayErrorCode =
   | 'price_mismatch'
   | 'price_above_max'
   | 'recipient_mismatch'
-  | 'seller_mismatch'
   | 'file_mismatch'
   | 'network_mismatch'
   | 'token_mismatch'
@@ -120,11 +119,15 @@ export async function block(url: string, at: number | 'latest' | 'finalized'): P
   };
 }
 
-async function uint(url: string, to: string, data: string, block: number): Promise<bigint> {
+/** A view call at `block` that returns one 32-byte word. */
+export async function viewWord(url: string, to: string, data: string, block: number) {
   const r = await ask(url, 'eth_call', [{ to, data }, qty(block)]);
   if (!isHexData(r) || r.length !== 66) return malformed('eth_call result');
-  return BigInt(r);
+  return r.toLowerCase();
 }
+
+const uint = async (url: string, to: string, data: string, block: number) =>
+  BigInt(await viewWord(url, to, data, block));
 
 export const balanceOf = (url: string, usdc: string, owner: string, block: number) =>
   uint(url, usdc, call(selector('balanceOf(address)'), addressWord(owner)), block);
@@ -149,19 +152,22 @@ export const authorizationState = async (
   )) !== 0n;
 
 /** Whether an address has code: a contract, or an EOA delegated with EIP-7702. */
-export async function hasCode(url: string, address: string, block: number): Promise<boolean> {
+/** The runtime code at `address`, lowercase hex; `0x` for none. */
+export async function getCode(url: string, address: string, block: number): Promise<string> {
   const r = await ask(url, 'eth_getCode', [address, qty(block)]);
   if (!isHexData(r)) return malformed('eth_getCode result');
-  return r !== '0x';
+  return r.toLowerCase();
 }
 
-/** `receiveWithAuthorization` / `transferWithAuthorization(from, to, value, after, before, nonce, v, r, s)`. */
-export function authorizationCall(kind: Kind, a: Authorization, signature: string): string {
+export const hasCode = async (url: string, address: string, block: number) =>
+  (await getCode(url, address, block)) !== '0x';
+
+/** `transferWithAuthorization(from, to, value, after, before, nonce, v, r, s)`. */
+export function authorizationCall(a: Authorization, signature: string): string {
   const sig = fromHex(signature, 65, 'signature');
-  const name = kind === 'ReceiveWithAuthorization' ? 'receive' : 'transfer';
   return call(
     selector(
-      `${name}WithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)`,
+      'transferWithAuthorization(address,address,uint256,uint256,uint256,bytes32,uint8,bytes32,bytes32)',
     ),
     addressWord(a.from),
     addressWord(a.to),
@@ -177,25 +183,18 @@ export function authorizationCall(kind: Kind, a: Authorization, signature: strin
 
 /**
  * Runs the signed authorization against USDC without sending it: signature, nonce, validity
- * window, balance and blacklist, all by USDC's own code. `receiveWithAuthorization` only accepts
- * its `to` as caller, so the call is made from there.
+ * window, balance and blacklist, all by USDC's own code.
  */
-export async function dryRun(
-  url: string,
-  usdc: string,
-  kind: Kind,
-  a: Authorization,
-  signature: string,
-) {
-  const from = kind === 'ReceiveWithAuthorization' ? a.to : a.from;
+export async function dryRun(url: string, usdc: string, a: Authorization, signature: string) {
   const body = await rpc(url, 'eth_call', [
-    { from, to: usdc, data: authorizationCall(kind, a, signature) },
+    { from: a.from, to: usdc, data: authorizationCall(a, signature) },
     'latest',
   ]);
   if (body.error) {
     const message = String(body.error.message ?? '');
-    if (/revert/i.test(message))
+    if (/revert/i.test(message)) {
       fail('payment_rejected', `USDC refused the authorization: ${message}`);
+    }
     fail('transport', `Base RPC error: ${JSON.stringify(body.error)}`);
   }
   if (!isHexData(body.result)) malformed('eth_call result');
@@ -271,7 +270,6 @@ export async function blockHeader(url: string, hash: string): Promise<string> {
 
 const topic = (signature: string) => toHex(keccak_256(new TextEncoder().encode(signature)));
 export const TOPICS = {
-  paymentSplit: topic('PaymentSplit(address,address,uint256,uint256,uint256,bytes32)'),
   authorizationUsed: topic('AuthorizationUsed(address,bytes32)'),
   authorizationCanceled: topic('AuthorizationCanceled(address,bytes32)'),
   transfer: topic('Transfer(address,address,uint256)'),
@@ -315,15 +313,12 @@ function evmLog(l: Record<string, unknown>): EvmLog {
 
 /** What a purchase expects to find on Base: the job saved before the buyer signed. */
 export interface Expected {
-  kind: Kind;
   usdc: string;
-  /** Payaion: the splitter. x402: the registered `pay_to`. */
+  /** The registered `pay_to`. */
   to: string;
   from: string;
   /** The signed nonce. */
   nonce: string;
-  /** Payaion: the registered seller (the `creator` topic). */
-  seller: string;
   price: bigint;
 }
 
@@ -331,8 +326,7 @@ const strip = (h: string) => h.slice(2).toLowerCase();
 const topicOf = (address: string) => strip(toHex(addressWord(address)));
 
 /**
- * The logs of this purchase in a transaction receipt, exactly as `unlock` checks them: Payaion,
- * the splitter's `PaymentSplit` to the seller with the signed nonce; x402, USDC's
+ * The logs of this purchase in a transaction receipt, exactly as `unlock` checks them: USDC's
  * `AuthorizationUsed` for the nonce and the `Transfer` to `pay_to` right after it. Null when the
  * receipt holds no such payment.
  */
@@ -350,26 +344,18 @@ export function paymentLogs(receipt: unknown, e: Expected): EvmLog[] | null {
   const amount = (data: string, offset: number) =>
     BigInt(`0x${data.slice(2 + offset * 64, 2 + (offset + 1) * 64) || '0'}`);
 
-  if (e.kind === 'ReceiveWithAuthorization') {
-    const found = logs.filter(
-      (l) =>
-        at(e.to, TOPICS.paymentSplit)(l) &&
-        // Equal only when the data is exactly four words, the last one the nonce.
-        l.data.slice(2 + 3 * 64) === strip(e.nonce),
-    );
-    const [split] = found;
-    if (found.length !== 1 || !split) return null;
-    if (split.topics[1] !== topicOf(e.from) || split.topics[2] !== topicOf(e.seller)) return null;
-    return amount(split.data, 0) >= e.price ? [split] : null;
-  }
+  // EIP-3009 nonces are per authorizer: another payer's log with the same nonce in the same
+  // transaction must not hide this one.
   const i = logs.findIndex(
-    (l) => at(e.usdc, TOPICS.authorizationUsed)(l) && l.topics[2] === strip(e.nonce),
+    (l) =>
+      at(e.usdc, TOPICS.authorizationUsed)(l) &&
+      l.topics[1] === topicOf(e.from) &&
+      l.topics[2] === strip(e.nonce),
   );
   const [auth, transfer] = [logs[i], logs[i + 1]];
   if (i < 0 || !auth || !transfer || !at(e.usdc, TOPICS.transfer)(transfer)) return null;
   if (
     transfer.log_index !== auth.log_index + 1 ||
-    auth.topics[1] !== topicOf(e.from) ||
     transfer.topics[1] !== topicOf(e.from) ||
     transfer.topics[2] !== topicOf(e.to) ||
     transfer.data.length !== 2 + 64

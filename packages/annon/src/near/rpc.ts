@@ -8,8 +8,6 @@
  *   log `EVENT_JSON` with standard `annon`.
  * The RPC is trusted to report the chain; answers that don't fit the request are refused.
  */
-import type { Source } from './texts.js';
-
 export type NearErrorCode =
   /** The RPC couldn't be reached or answered something malformed; safe to retry. */
   | 'transport'
@@ -103,7 +101,8 @@ const TAKEDOWN = ['illegal_content', 'court_order', 'rights_holder_notice'] as c
 export interface FileInfo {
   seller: string;
   price: bigint;
-  source: Source;
+  /** Where buyers pay, `0x` and lowercase. */
+  payTo: string;
   cipherHash: string;
   moderator: string | null;
   salesStoppedAt: number | null;
@@ -120,18 +119,12 @@ export async function getFile(
     unknown
   > | null;
   if (f === null) return null;
-  const s = f?.source as { kind?: unknown; pay_to?: unknown } | undefined;
-  // The contract stores `pay_to` as registered: any case, `0x` or not.
-  const payTo =
-    s?.kind === 'x402' && typeof s.pay_to === 'string' && /^(0x)?[0-9a-fA-F]{40}$/.test(s.pay_to)
-      ? `0x${s.pay_to.replace(/^0x/, '').toLowerCase()}`
-      : undefined;
   const price = typeof f?.price === 'string' && /^\d{1,39}$/.test(f.price) ? BigInt(f.price) : 0n;
   if (
     !isHex(f?.seller, 20) ||
     price < 1n ||
     price > U128_MAX ||
-    !(s?.kind === 'payaion' || payTo) ||
+    !isHex(f.pay_to, 20) ||
     !isHex(f.cipher_hash, 32) ||
     !(f.moderator === null || isAccount(f.moderator)) ||
     !(
@@ -145,7 +138,7 @@ export async function getFile(
   return {
     seller: f.seller as string,
     price,
-    source: payTo ? { kind: 'x402', pay_to: payTo } : { kind: 'payaion' },
+    payTo: f.pay_to as string,
     cipherHash: f.cipher_hash as string,
     moderator: f.moderator as string | null,
     salesStoppedAt: f.sales_stopped_at as number | null,
@@ -153,12 +146,11 @@ export async function getFile(
   };
 }
 
-/** The contract's `get_config`: the payment sources it trusts on Base. */
+/** The contract's `get_config`: the token it accepts on Base and the MPC it asks. */
 export interface Config {
   mpc: string;
   ckdDomain: number;
   foreignTxDomain: number;
-  payaionSplitter: string;
   usdc: string;
 }
 
@@ -168,7 +160,6 @@ export async function getConfig(url: string, contractId: string): Promise<Config
     !isAccount(c?.mpc) ||
     !Number.isSafeInteger(c?.ckd_domain) ||
     !Number.isSafeInteger(c?.foreign_tx_domain) ||
-    !isHex(c?.payaion_splitter, 20) ||
     !isHex(c?.usdc, 20)
   ) {
     return malformed('get_config');
@@ -177,7 +168,6 @@ export async function getConfig(url: string, contractId: string): Promise<Config
     mpc: c?.mpc as string,
     ckdDomain: c?.ckd_domain as number,
     foreignTxDomain: c?.foreign_tx_domain as number,
-    payaionSplitter: c?.payaion_splitter as string,
     usdc: c?.usdc as string,
   };
 }
