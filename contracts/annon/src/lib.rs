@@ -25,22 +25,13 @@ pub use register::{RegisterArgs, ReopenArgs};
 use unlock::buyer_entry;
 pub use unlock::UnlockArgs;
 
-/// Where the payment for a file comes from (plan 4.7).
-#[near(serializers = [borsh, json])]
-#[derive(Clone, Debug, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Source {
-    /// Partner's splitter `PaymentSplit`; the event's `creator` must be the seller.
-    Partner,
-    /// A direct x402 payment: USDC `Transfer` to `pay_to`.
-    X402 { pay_to: String },
-}
-
 #[near(serializers = [json])]
 pub struct FileView {
     pub seller: String,
     pub price: U128,
-    pub source: Source,
+    /// Where the payment goes: USDC `Transfer` to this address, `0x` and lowercase. A wallet, or
+    /// any contract the seller chose (e.g. an immutable revenue split).
+    pub pay_to: String,
     pub cipher_hash: String,
     pub moderator: Option<AccountId>,
     /// Unix seconds when the seller stopped sales, if they did.
@@ -49,14 +40,13 @@ pub struct FileView {
     pub taken_down: Option<TakedownReason>,
 }
 
-/// What the contract was initialized with: the payment sources it trusts and the MPC it asks. A
-/// client checks a payment request against these before the buyer signs.
+/// What the contract was initialized with: the token it accepts and the MPC it asks. A client
+/// checks a payment request against these before the buyer signs.
 #[near(serializers = [json])]
 pub struct ConfigView {
     pub mpc: AccountId,
     pub ckd_domain: u64,
     pub foreign_tx_domain: u64,
-    pub partner_splitter: String,
     pub usdc: String,
 }
 
@@ -64,7 +54,7 @@ pub struct ConfigView {
 struct File {
     seller: [u8; 20],
     price: u128,
-    source: Source,
+    pay_to: [u8; 20],
     cipher_hash: [u8; 32],
     moderator: Option<AccountId>,
     // Fixed width, paid for at `register`, so a stop or takedown never grows storage.
@@ -84,9 +74,7 @@ pub struct Annon {
     ckd_domain: u64,
     /// MPC domain for `verify_foreign_transaction` (secp256k1; 3 on mainnet).
     foreign_tx_domain: u64,
-    /// Partner's splitter on Base, the only valid emitter of `PaymentSplit`.
-    partner_splitter: [u8; 20],
-    /// USDC on Base, the only valid emitter of `AuthorizationUsed` and `Transfer` for x402.
+    /// USDC on Base, the only valid emitter of the `AuthorizationUsed` and `Transfer` of a payment.
     usdc: [u8; 20],
     /// `file_id ‖ buyer address` for every wallet that paid.
     buyers: LookupMap<[u8; 52], ()>,
@@ -100,13 +88,7 @@ pub struct Annon {
 #[near]
 impl Annon {
     #[init]
-    pub fn new(
-        mpc: AccountId,
-        ckd_domain: u64,
-        foreign_tx_domain: u64,
-        partner_splitter: String,
-        usdc: String,
-    ) -> Self {
+    pub fn new(mpc: AccountId, ckd_domain: u64, foreign_tx_domain: u64, usdc: String) -> Self {
         // Deploy and init in one transaction, signed by the contract account. Nobody else can pick
         // the MPC account, domains or payment sources that a locked contract trusts forever.
         require!(
@@ -118,7 +100,6 @@ impl Annon {
             mpc,
             ckd_domain,
             foreign_tx_domain,
-            partner_splitter: bytes::<20>(&partner_splitter, "partner_splitter"),
             usdc: bytes::<20>(&usdc, "usdc"),
             buyers: LookupMap::new(b"b"),
             used: LookupMap::new(b"u"),
@@ -134,7 +115,7 @@ impl Annon {
     }
 
     /// Whether a Base payment has already unlocked a file: its transaction and the index of its
-    /// first log (`PaymentSplit`, or `AuthorizationUsed` for x402), as in `payment_verified`.
+    /// first log (`AuthorizationUsed`), as in `payment_verified`.
     pub fn is_payment_used(&self, base_tx: String, log_index: u64) -> bool {
         let mut payment = [0u8; 40];
         payment[..32].copy_from_slice(&bytes::<32>(&base_tx, "base_tx"));
@@ -148,7 +129,7 @@ impl Annon {
             .map(|f| FileView {
                 seller: hex0x(&f.seller),
                 price: U128(f.price),
-                source: f.source.clone(),
+                pay_to: hex0x(&f.pay_to),
                 cipher_hash: hex0x(&f.cipher_hash),
                 moderator: f.moderator.clone(),
                 sales_stopped_at: (f.sales_stopped_at != 0).then_some(f.sales_stopped_at),
@@ -161,7 +142,6 @@ impl Annon {
             mpc: self.mpc.clone(),
             ckd_domain: self.ckd_domain,
             foreign_tx_domain: self.foreign_tx_domain,
-            partner_splitter: hex0x(&self.partner_splitter),
             usdc: hex0x(&self.usdc),
         }
     }
@@ -185,7 +165,6 @@ mod init_tests {
         let c = init().get_config();
         assert_eq!(c.mpc.as_str(), "v1.signer");
         assert_eq!((c.ckd_domain, c.foreign_tx_domain), (2, 3));
-        assert_eq!(c.partner_splitter, SPLITTER.to_lowercase());
         assert_eq!(c.usdc, USDC.to_lowercase());
     }
 }

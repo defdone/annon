@@ -140,7 +140,7 @@ mod tests {
         c.storage_deposit(None);
         let before = balance(&c, RELAYER);
         as_caller(RELAYER, NearToken::from_yoctonear(0)); // a function-call key attaches nothing
-        c.unlock(unlock_args(split_log()));
+        c.unlock(unlock_args());
         assert_eq!(balance(&c, RELAYER), before - UNLOCK_DEPOSIT.as_yoctonear());
     }
 
@@ -150,9 +150,9 @@ mod tests {
         as_caller(RELAYER, NearToken::from_millinear(100));
         c.storage_deposit(None);
         as_caller(RELAYER, NearToken::from_yoctonear(0));
-        c.unlock(unlock_args(split_log()));
+        c.unlock(unlock_args());
         let reserved = balance(&c, RELAYER);
-        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        mpc_answered(verified(X402_PAYLOAD_HASH));
         let receipts = get_created_receipts().len();
         prepaid_callback(&mut c);
         let back = balance(&c, RELAYER) - reserved;
@@ -174,7 +174,7 @@ mod tests {
         c.storage_deposit(None);
         let start = balance(&c, RELAYER);
         as_caller(RELAYER, NearToken::from_yoctonear(0));
-        c.unlock(unlock_args(split_log()));
+        c.unlock(unlock_args());
         mpc_answered(PromiseResult::Failed);
         prepaid_callback(&mut c);
         assert_eq!(balance(&c, RELAYER), start);
@@ -185,7 +185,7 @@ mod tests {
     fn unlock_with_no_deposit_and_no_balance_is_refused() {
         let mut c = listed();
         as_caller("agent.near", NearToken::from_yoctonear(0));
-        c.unlock(unlock_args(split_log()));
+        c.unlock(unlock_args());
     }
 
     #[test]

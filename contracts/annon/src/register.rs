@@ -7,7 +7,7 @@ use crate::events::emit;
 use crate::evm::{bytes, hex0x, recover_eip191};
 use crate::text::{usdc, utc};
 use crate::unlock::buyer_entry;
-use crate::{Annon, AnnonExt, File, Source};
+use crate::{Annon, AnnonExt, File};
 use near_sdk::serde_json::json;
 
 #[near(serializers = [json])]
@@ -19,7 +19,9 @@ pub struct RegisterArgs {
     pub seller: String,
     /// USDC base units (6 decimals).
     pub price: U128,
-    pub source: Source,
+    /// Where buyers pay: USDC goes to this address. The seller's wallet, a platform's, or any
+    /// contract the seller chose (e.g. an immutable revenue split); the signed text names it.
+    pub pay_to: String,
     /// The PAY2 `cipherHash` (`specs/pay2.md`, section 3), hex. The contract only stores it;
     /// clients check the file against it.
     pub cipher_hash: String,
@@ -56,9 +58,7 @@ impl Annon {
         let seller = bytes::<20>(&args.seller, "seller");
         let cipher_hash = bytes::<32>(&args.cipher_hash, "cipher_hash");
         let seller_key = bytes::<48>(&args.seller_key, "seller_key");
-        if let Source::X402 { pay_to } = &args.source {
-            bytes::<20>(pay_to, "pay_to");
-        }
+        let pay_to = bytes::<20>(&args.pay_to, "pay_to");
         require!(args.price.0 > 0, "price must be above zero");
         require!(
             env::block_timestamp() / 1_000_000_000 <= args.deadline,
@@ -77,7 +77,7 @@ impl Annon {
             "file_id": hex0x(&file_id),
             "seller": hex0x(&seller),
             "price": args.price,
-            "source": args.source,
+            "pay_to": hex0x(&pay_to),
             "cipher_hash": hex0x(&cipher_hash),
             "moderator": args.moderator,
         });
@@ -87,7 +87,7 @@ impl Annon {
             File {
                 seller,
                 price: args.price.0,
-                source: args.source,
+                pay_to,
                 cipher_hash,
                 moderator: args.moderator,
                 sales_stopped_at: 0,
@@ -103,12 +103,7 @@ impl Annon {
 
     /// The exact text the seller signs. The SDK shows this to the wallet, so both sides agree.
     pub fn register_message(&self, args: RegisterArgs) -> String {
-        let source = match &args.source {
-            Source::Partner => "partner".to_string(),
-            Source::X402 { pay_to } => {
-                format!("x402, pay to {}", hex0x(&bytes::<20>(pay_to, "pay_to")))
-            }
-        };
+        let pay_to = hex0x(&bytes::<20>(&args.pay_to, "pay_to"));
         let moderator = args.moderator.as_ref().map_or("(none)", |m| m.as_str()); // "(" never appears in an account id
         format!(
             "Annon: list a file for sale\n\
@@ -117,7 +112,7 @@ impl Annon {
              file: {}\n\
              seller: {}\n\
              price: {} USDC\n\
-             source: {source}\n\
+             pay to: {pay_to}\n\
              cipher: {}\n\
              moderator: {moderator}\n\
              seller key: {}\n\
@@ -198,7 +193,7 @@ mod tests {
         let f = c.get_file(a.file_id).unwrap();
         assert_eq!(f.seller, seller.address());
         assert_eq!(f.price, U128(10_000));
-        assert_eq!(f.source, Source::Partner);
+        assert_eq!(f.pay_to, PAY_TO);
         assert_eq!(f.cipher_hash, a.cipher_hash);
         assert_eq!(f.moderator, a.moderator);
         assert_eq!(f.sales_stopped_at, None);
@@ -206,17 +201,25 @@ mod tests {
     }
 
     #[test]
-    fn registers_a_direct_x402_file() {
+    fn stores_pay_to_in_lowercase_whatever_case_it_was_signed_in() {
         let mut c = contract();
         let seller = Seller::new(1);
         let mut a = args(&seller);
-        a.source = Source::X402 {
-            pay_to: Seller::new(9).address(),
-        };
+        a.pay_to = PAY_TO.to_uppercase().replace("0X", "0x");
         a.moderator = None;
         let sig = signed(&c, &seller, &a);
         c.register(a.clone(), sig);
-        assert_eq!(c.get_file(a.file_id).unwrap().source, a.source);
+        assert_eq!(c.get_file(a.file_id).unwrap().pay_to, PAY_TO);
+    }
+
+    #[test]
+    #[should_panic(expected = "pay_to must be 20 bytes of hex")]
+    fn refuses_a_pay_to_that_is_not_an_address() {
+        let mut c = contract();
+        let seller = Seller::new(1);
+        let mut a = args(&seller);
+        a.pay_to = "0x1234".into();
+        c.register(a, "0x00".into());
     }
 
     #[test]
@@ -228,7 +231,7 @@ mod tests {
             CONTRACT,
             &seller.address(),
             "\nprice: 0.01 USDC\n",
-            "partner",
+            &format!("\npay to: {PAY_TO}\n"),
             "moderator.sputnik-dao.near",
             "\nvalid until: 2026-10-26 07:43:20 UTC",
             "lets whoever holds the seller key below open the file",
@@ -256,11 +259,11 @@ mod tests {
         };
         let seller = Seller::new(1).address();
         let register =
-            |price: u128, source: Source, moderator: Option<&str>, deadline: u64| RegisterArgs {
+            |price: u128, pay_to: &str, moderator: Option<&str>, deadline: u64| RegisterArgs {
                 file_id: format!("0x{}", "11".repeat(32)),
                 seller: seller.clone(),
                 price: U128(price),
-                source,
+                pay_to: pay_to.into(),
                 cipher_hash: format!("0x{}", "22".repeat(32)),
                 moderator: moderator.map(|m| m.parse().unwrap()),
                 seller_key: format!("0x{}", "33".repeat(48)),
@@ -272,9 +275,7 @@ mod tests {
             cipher_hash: "0x".to_string() + &"Ee".repeat(32),
             ..register(
                 1,
-                Source::X402 {
-                    pay_to: "58DA990A8F4A3A6CA7CB6315D68A140105917352".into(),
-                },
+                "58DA990A8F4A3A6CA7CB6315D68A140105917352",
                 None,
                 951_782_400,
             )
@@ -287,35 +288,35 @@ mod tests {
         let dev = "annon-dev.synthetic.near";
         for (id, contract, a) in [
             (
-                "register-partner",
+                "register-moderated",
                 main,
                 register(
                     10_000,
-                    Source::Partner,
+                    &seller,
                     Some("moderator.sputnik-dao.near"),
                     1_793_000_600,
                 ),
             ),
-            ("register-x402-mixed-case-hex", main, mixed_case),
+            ("register-mixed-case-hex", main, mixed_case),
             (
                 "register-whole-usdc-epoch",
                 dev,
-                register(1_000_000, Source::Partner, None, 0),
+                register(1_000_000, PAY_TO, None, 0),
             ),
             (
                 "register-fraction-2100",
                 main,
-                register(123_456_789, Source::Partner, None, 4_107_542_400),
+                register(123_456_789, PAY_TO, None, 4_107_542_400),
             ),
             (
                 "register-1.5-end-of-2099",
                 main,
-                register(1_500_000, Source::Partner, None, 4_102_444_799),
+                register(1_500_000, PAY_TO, None, 4_102_444_799),
             ),
             (
                 "register-max-price",
                 main,
-                register(u128::MAX, Source::Partner, None, 1_793_800_706),
+                register(u128::MAX, PAY_TO, None, 1_793_800_706),
             ),
         ] {
             let text = at(contract).register_message(a.clone());
@@ -676,7 +677,7 @@ mod tests {
         assert_eq!(e["file_id"], a.file_id);
         assert_eq!(e["seller"], seller.address());
         assert_eq!(e["price"], "10000");
-        assert_eq!(e["source"]["kind"], "partner");
+        assert_eq!(e["pay_to"], PAY_TO);
         assert_eq!(e["cipher_hash"], a.cipher_hash);
         assert_eq!(e["moderator"], "moderator.sputnik-dao.near");
         assert_eq!(self_calls(before), vec!["on_key_released"]);

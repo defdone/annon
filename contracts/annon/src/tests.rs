@@ -10,7 +10,6 @@ use unlock::UNLOCK_DEPOSIT;
 
 pub(crate) const CONTRACT: &str = "v1.annon.defdone.near";
 pub(crate) const NOW_S: u64 = 1_793_000_000;
-pub(crate) const SPLITTER: &str = "0x5151515151515151515151515151515151515151";
 /// Address of Seller::new(7), the test buyer.
 pub(crate) const PAYER: &str = "0x4a62316623ad457f02cdc5d997ded67a383ec569";
 
@@ -55,13 +54,7 @@ pub(crate) fn contract() -> Annon {
 }
 
 pub(crate) fn init() -> Annon {
-    Annon::new(
-        "v1.signer".parse().unwrap(),
-        2,
-        3,
-        SPLITTER.into(),
-        USDC.into(),
-    )
+    Annon::new("v1.signer".parse().unwrap(), 2, 3, USDC.into())
 }
 
 pub(crate) fn args(seller: &Seller) -> RegisterArgs {
@@ -69,7 +62,7 @@ pub(crate) fn args(seller: &Seller) -> RegisterArgs {
         file_id: format!("0x{}", "11".repeat(32)),
         seller: seller.address(),
         price: U128(10_000),
-        source: Source::Partner,
+        pay_to: PAY_TO.into(),
         cipher_hash: format!("0x{}", "22".repeat(32)),
         moderator: Some("moderator.sputnik-dao.near".parse().unwrap()),
         seller_key: format!("0x{}", "33".repeat(48)),
@@ -104,16 +97,6 @@ pub(crate) fn ckd_calls() -> usize {
         .count()
 }
 
-// A PaymentSplit log for args(Seller::new(1)) paid with buyer key 0x33..33. Its nonce is the
-// creator-bound one from specs/vectors/nonce.json ("unit-test-fixture", f01651c9...). The payload
-// hash was computed by the reference code, which matched NEAR MPC byte for byte on mainnet (it gives
-// fff5f9d0... for the same log with the plain Annon nonce, the value before the creator binding).
-pub(crate) const SPLIT_TOPIC: &str =
-    "1d53deaef03137ccd2fa5503b6c280dacfce2e7ae1483128fb0ebfc6fa050e8c";
-pub(crate) const SPLIT_DATA: &str = "0x000000000000000000000000000000000000000000000000000000000000271000000000000000000000000000000000000000000000000000000000000001f4000000000000000000000000000000000000000000000000000000000000251cf01651c947fc627fc5b67502b9918ad510ddb54771203306ec5ca7a178daad93";
-pub(crate) const SPLIT_PAYLOAD_HASH: &str =
-    "be111d7b88c141e67b6db560274210d3728dd665aefa524c85fd83aca349ca31";
-
 pub(crate) fn h256(s: &str) -> Hash256 {
     Hash256(
         hex::decode(s.trim_start_matches("0x"))
@@ -131,26 +114,9 @@ pub(crate) fn topic_address(a: &str) -> Hash256 {
     ))
 }
 
-pub(crate) fn split_log() -> EvmLog {
-    EvmLog {
-        removed: false,
-        log_index: 7,
-        transaction_index: 5,
-        transaction_hash: h256(&"aa".repeat(32)),
-        block_hash: h256(&"bb".repeat(32)),
-        block_number: 0x3000000,
-        address: Hash160([0x51; 20]),
-        data: SPLIT_DATA.into(),
-        topics: vec![
-            h256(SPLIT_TOPIC),
-            topic_address(PAYER),
-            topic_address(&Seller::new(1).address()),
-        ],
-    }
-}
-
-pub(crate) fn unlock_args(log: EvmLog) -> UnlockArgs {
-    unlock_logs(vec![log])
+/// `unlock` with the test payment (`x402_logs`).
+pub(crate) fn unlock_args() -> UnlockArgs {
+    unlock_logs(x402_logs())
 }
 
 pub(crate) fn unlock_logs(logs: Vec<EvmLog>) -> UnlockArgs {
@@ -162,9 +128,10 @@ pub(crate) fn unlock_logs(logs: Vec<EvmLog>) -> UnlockArgs {
     }
 }
 
-/// An RLP block header for `log`'s block at Base time `time`, and the log with its `block_hash`
-/// set to the header's hash, as on Base. Fields other than number (8) and time (11) are zeros.
-pub(crate) fn with_header(mut log: EvmLog, time: u64) -> (EvmLog, String) {
+/// An RLP block header for the logs' block at Base time `time`, and the logs with their
+/// `block_hash` set to the header's hash, as on Base. Fields other than number (8) and time (11)
+/// are zeros.
+pub(crate) fn with_header(mut logs: Vec<EvmLog>, time: u64) -> (Vec<EvmLog>, String) {
     let int = |n: u64| {
         let b: Vec<u8> = n
             .to_be_bytes()
@@ -179,7 +146,7 @@ pub(crate) fn with_header(mut log: EvmLog, time: u64) -> (EvmLog, String) {
     let mut fields = Vec::new();
     for i in 0..15 {
         fields.extend(match i {
-            8 => int(log.block_number),
+            8 => int(logs[0].block_number),
             11 => int(time),
             _ => vec![0xa0].into_iter().chain([0u8; 32]).collect(),
         });
@@ -187,15 +154,19 @@ pub(crate) fn with_header(mut log: EvmLog, time: u64) -> (EvmLog, String) {
     let mut rlp = vec![0xf9, (fields.len() >> 8) as u8, fields.len() as u8];
     rlp.extend(fields);
     // sha3's Keccak, not the contract's env::keccak256: an independent hash.
-    log.block_hash = Hash256(Keccak256::digest(&rlp).into());
-    (log, format!("0x{}", hex::encode(rlp)))
+    let hash = Hash256(Keccak256::digest(&rlp).into());
+    for l in &mut logs {
+        l.block_hash = hash.clone();
+    }
+    (logs, format!("0x{}", hex::encode(rlp)))
 }
 
 pub(crate) const USDC: &str = "0x5252525252525252525252525252525252525252";
-/// Address of Seller::new(9), the x402 seller's `pay_to`.
+/// Address of Seller::new(9), the test file's `pay_to`.
 pub(crate) const PAY_TO: &str = "0x58da990a8f4a3a6ca7cb6315d68a140105917352";
-// USDC `AuthorizationUsed` (log 7) and `Transfer` (log 8) of one direct x402 payment for the test
-// file and buyer key. Payload hash of both logs from the reference code, as for PaymentSplit.
+// USDC `AuthorizationUsed` (log 7) and `Transfer` (log 8) of one payment for the test file and
+// buyer key. The payload hash of both logs was computed by the reference code, which matched NEAR
+// MPC byte for byte on mainnet.
 pub(crate) const AUTH_USED_TOPIC: &str =
     "98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5";
 pub(crate) const TRANSFER_TOPIC: &str =
@@ -237,20 +208,6 @@ pub(crate) fn x402_logs() -> Vec<EvmLog> {
             &format!("0x{:064x}", 10_000),
         ),
     ]
-}
-
-/// A contract with the test file listed for a direct x402 payment to `PAY_TO`.
-pub(crate) fn listed_x402() -> Annon {
-    let mut c = contract();
-    let seller = Seller::new(1);
-    let mut a = args(&seller);
-    a.source = Source::X402 {
-        pay_to: PAY_TO.into(),
-    };
-    let sig = signed(&c, &seller, &a);
-    c.register(a, sig);
-    context(UNLOCK_DEPOSIT);
-    c
 }
 
 /// A contract with the test file registered, ready for unlock.
@@ -305,8 +262,8 @@ pub(crate) fn callback(c: &mut Annon) {
         format!("0x{}", "11".repeat(32)),
         format!("0x{}", "33".repeat(48)),
         PAYER.into(),
-        format!("0x{}{}", "aa".repeat(32), "0000000000000007"),
-        SPLIT_PAYLOAD_HASH.into(),
+        format!("0x{}{}", "cc".repeat(32), "0000000000000007"),
+        X402_PAYLOAD_HASH.into(),
         "relayer.annon.defdone.near".parse().unwrap(),
         U128(UNLOCK_DEPOSIT.as_yoctonear()),
         false,
@@ -368,8 +325,8 @@ pub(crate) fn prepaid_callback(c: &mut Annon) {
         format!("0x{}", "11".repeat(32)),
         format!("0x{}", "33".repeat(48)),
         PAYER.into(),
-        format!("0x{}{}", "aa".repeat(32), "0000000000000007"),
-        SPLIT_PAYLOAD_HASH.into(),
+        format!("0x{}{}", "cc".repeat(32), "0000000000000007"),
+        X402_PAYLOAD_HASH.into(),
         RELAYER.parse().unwrap(),
         U128(UNLOCK_DEPOSIT.as_yoctonear()),
         true,

@@ -11,7 +11,7 @@ use crate::text::utc;
 use crate::{Annon, AnnonExt, File};
 
 /// A payment that lands on Base this long after a stop still counts, so an authorization signed
-/// before the stop (the SDK signs for at most 300 s) can't be settled into a payment without a key,
+/// before the stop (the SDK signs for at most 180 s, plus 60 s of clock skew) can't be settled into a payment without a key,
 /// by a slow facilitator or a seller who stops on purpose.
 pub(crate) const STOP_SETTLEMENT_SECONDS: u64 = 300;
 
@@ -181,12 +181,12 @@ mod tests {
         c.stop_sales(a, sig);
     }
 
-    /// A Partner payment that landed on Base at `at`, with its block header.
+    /// The test payment, landed on Base at `at`, with its block header.
     fn paid_at(at: u64) -> UnlockArgs {
-        let (log, header) = with_header(split_log(), at);
+        let (logs, header) = with_header(x402_logs(), at);
         UnlockArgs {
             header: Some(header),
-            ..unlock_args(log)
+            ..unlock_logs(logs)
         }
     }
 
@@ -296,14 +296,14 @@ mod tests {
         let mut c = listed();
         now(NOW_S);
         stop(&mut c, &Seller::new(1));
-        c.unlock(unlock_args(split_log()));
+        c.unlock(unlock_args());
     }
 
     #[test]
     fn while_sales_are_open_no_header_is_needed() {
         let mut c = listed();
         now(NOW_S);
-        c.unlock(unlock_args(split_log())); // reaches MPC
+        c.unlock(unlock_args()); // reaches MPC
     }
 
     #[test]
@@ -313,11 +313,11 @@ mod tests {
         now(NOW_S);
         stop(&mut c, &Seller::new(1));
         // A real, earlier header, but the log is in another block.
-        let (_, early) = with_header(split_log(), NOW_S - 60);
-        let (log, _) = with_header(split_log(), NOW_S + YEAR);
+        let (_, early) = with_header(x402_logs(), NOW_S - 60);
+        let (logs, _) = with_header(x402_logs(), NOW_S + YEAR);
         c.unlock(UnlockArgs {
             header: Some(early),
-            ..unlock_args(log)
+            ..unlock_logs(logs)
         });
     }
 
@@ -328,23 +328,25 @@ mod tests {
         now(NOW_S);
         stop(&mut c, &Seller::new(1));
         // The header hashes to the log's block hash, but is for the next block number.
-        let mut next = split_log();
-        next.block_number += 1;
+        let mut next = x402_logs();
+        for l in &mut next {
+            l.block_number += 1;
+        }
         let (hashed, header) = with_header(next, NOW_S - 60);
-        let log = near_mpc_contract_interface::types::EvmLog {
-            block_hash: hashed.block_hash,
-            ..split_log()
-        };
+        let mut logs = x402_logs();
+        for l in &mut logs {
+            l.block_hash = hashed[0].block_hash.clone();
+        }
         c.unlock(UnlockArgs {
             header: Some(header),
-            ..unlock_args(log)
+            ..unlock_logs(logs)
         });
     }
 
     #[test]
     fn past_buyers_can_still_reopen_after_a_stop() {
         let mut c = listed();
-        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        mpc_answered(verified(X402_PAYLOAD_HASH));
         callback(&mut c);
         now(NOW_S);
         stop(&mut c, &Seller::new(1));
@@ -403,7 +405,7 @@ mod tests {
         moderator(1);
         c.takedown(FILE.into(), TakedownReason::RightsHolderNotice);
         now(NOW_S);
-        c.unlock(unlock_args(split_log()));
+        c.unlock(unlock_args());
     }
 
     #[test]
@@ -421,10 +423,10 @@ mod tests {
     #[test]
     fn a_takedown_during_verification_releases_nothing_and_keeps_the_payment_usable() {
         let mut c = listed();
-        c.unlock(unlock_args(split_log()));
+        c.unlock(unlock_args());
         moderator(1);
         c.takedown(FILE.into(), TakedownReason::IllegalContent);
-        mpc_answered(verified(SPLIT_PAYLOAD_HASH));
+        mpc_answered(verified(X402_PAYLOAD_HASH));
         let before = get_created_receipts().len();
         callback(&mut c);
         assert!(!c.is_buyer(FILE.into(), PAYER.into()));
@@ -437,7 +439,7 @@ mod tests {
         moderator(1);
         c.restore(FILE.into());
         now(NOW_S);
-        c.unlock(unlock_args(split_log())); // the same payment works after restore
+        c.unlock(unlock_args()); // the same payment works after restore
     }
 
     /// Runs the callback that the last `unlock` scheduled, with exactly the arguments it
@@ -515,7 +517,7 @@ mod tests {
     #[test]
     fn a_stop_during_verification_without_a_header_keeps_the_payment_for_a_retry() {
         let mut c = listed();
-        unlock_then_stop(&mut c, unlock_args(split_log()));
+        unlock_then_stop(&mut c, unlock_args());
         run_scheduled_callback(&mut c, NOW_S + 10);
         assert!(!c.is_buyer(FILE.into(), PAYER.into()));
         assert!(near_sdk::test_utils::get_logs()

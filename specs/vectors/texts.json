@@ -2,41 +2,36 @@
   "source": "written by contracts/annon/src/register.rs texts_match_the_shared_vectors",
   "cases": [
     {
-      "id": "register-partner",
+      "id": "register-moderated",
       "contractId": "v1.annon.defdone.near",
       "kind": "register",
       "args": {
         "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
         "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
         "price": "10000",
-        "source": {
-          "kind": "partner"
-        },
+        "pay_to": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
         "cipher_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
         "moderator": "moderator.sputnik-dao.near",
         "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
         "deadline": 1793000600
       },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 0.01 USDC\nsource: partner\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: moderator.sputnik-dao.near\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2026-10-26 07:43:20 UTC"
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 0.01 USDC\npay to: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: moderator.sputnik-dao.near\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2026-10-26 07:43:20 UTC"
     },
     {
-      "id": "register-x402-mixed-case-hex",
+      "id": "register-mixed-case-hex",
       "contractId": "v1.annon.defdone.near",
       "kind": "register",
       "args": {
         "file_id": "AbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEf0123",
         "seller": "0x1A642F0E3C3AF545E7ACBD38B07251B3990914F1",
         "price": "1",
-        "source": {
-          "kind": "x402",
-          "pay_to": "58DA990A8F4A3A6CA7CB6315D68A140105917352"
-        },
+        "pay_to": "58DA990A8F4A3A6CA7CB6315D68A140105917352",
         "cipher_hash": "0xEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEe",
         "moderator": null,
         "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
         "deadline": 951782400
       },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef0123\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 0.000001 USDC\nsource: x402, pay to 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2000-02-29 00:00:00 UTC"
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef0123\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 0.000001 USDC\npay to: 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2000-02-29 00:00:00 UTC"
     },
     {
       "id": "register-whole-usdc-epoch",
@@ -46,15 +41,13 @@
         "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
         "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
         "price": "1000000",
-        "source": {
-          "kind": "partner"
-        },
+        "pay_to": "0x58da990a8f4a3a6ca7cb6315d68a140105917352",
         "cipher_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
         "moderator": null,
         "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
         "deadline": 0
       },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: annon-dev.synthetic.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 1 USDC\nsource: partner\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 1970-01-01 00:00:00 UTC"
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: annon-dev.synthetic.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 1 USDC\npay to: 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 1970-01-01 00:00:00 UTC"
     },
     {
       "id": "register-fraction-2100",
@@ -64,15 +57,13 @@
         "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
         "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
         "price": "123456789",
-        "source": {
-          "kind": "partner"
-        },
+        "pay_to": "0x58da990a8f4a3a6ca7cb6315d68a140105917352",
         "cipher_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
         "moderator": null,
         "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
         "deadline": 4107542400
       },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 123.456789 USDC\nsource: partner\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2100-03-01 00:00:00 UTC"
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 123.456789 USDC\npay to: 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2100-03-01 00:00:00 UTC"
     },
     {
       "id": "register-1.5-end-of-2099",
@@ -82,15 +73,13 @@
         "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
         "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
         "price": "1500000",
-        "source": {
-          "kind": "partner"
-        },
+        "pay_to": "0x58da990a8f4a3a6ca7cb6315d68a140105917352",
         "cipher_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
         "moderator": null,
         "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
         "deadline": 4102444799
       },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 1.5 USDC\nsource: partner\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2099-12-31 23:59:59 UTC"
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 1.5 USDC\npay to: 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2099-12-31 23:59:59 UTC"
     },
     {
       "id": "register-max-price",
@@ -100,15 +89,13 @@
         "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
         "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
         "price": "340282366920938463463374607431768211455",
-        "source": {
-          "kind": "partner"
-        },
+        "pay_to": "0x58da990a8f4a3a6ca7cb6315d68a140105917352",
         "cipher_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
         "moderator": null,
         "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
         "deadline": 1793800706
       },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 340282366920938463463374607431768.211455 USDC\nsource: partner\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2026-11-04 13:58:26 UTC"
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 340282366920938463463374607431768.211455 USDC\npay to: 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2026-11-04 13:58:26 UTC"
     },
     {
       "id": "reopen",
