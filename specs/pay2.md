@@ -217,8 +217,9 @@ limit in section 3.
 
 - Every chunk has its own key and the last flag in its nonce, and the hash list fixes the number and
   order of chunks. So reordering, dropping, repeating or truncating chunks fails at step 4 or 8.
-- The hash list and `cipherHash` are public and reveal only the size of the file, rounded to chunks.
-  The ciphertext reveals that much anyway.
+- The hash list and `cipherHash` reveal the file's size rounded to chunks. The whole ciphertext
+  reveals the exact size: only the metadata is padded, so the body length minus the header, the
+  metadata and the GCM tags is the plaintext length. Name, type and content stay secret.
 - Hosting, a relayer or anyone in between can't change a byte without failing step 2, 3 or 4: the
   registration covers the body, the commitments and the hash list, and the seller's signature
   covers the whole header. Where the bytes are public this is known before paying; where they
