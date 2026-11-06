@@ -7,8 +7,8 @@ with two schemes of its own, one extension, `annon`, and the payment nonce of [n
 The SDK builds and checks all of it (`offerFor`, `checkPayment`, `forFacilitator` on the seller's
 side; `discover`, `preflight`, `authorize` on the buyer's); integrators don't write these objects.
 
-Status: sections 1 to 6 and 8 are v1, frozen for integration. Section 7 is a draft: its message
-formats are fixed when the SDK implements them.
+Status: draft, not frozen. A split payment kind (a shared Annon splitter on Base) is being added;
+the profile is frozen only after that and the owner's approval.
 
 ## 1. Why its own schemes
 
