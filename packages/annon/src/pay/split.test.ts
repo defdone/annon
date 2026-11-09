@@ -15,6 +15,8 @@ import {
   createSplit,
   encodeSplit,
   MAX_RECIPIENTS,
+  MULTICALL3,
+  payoutCall,
   payoutCalls,
   readSplit,
   SPLIT_FACTORIES,
@@ -164,6 +166,8 @@ const SPLITS_ABI = parseAbi([
   'function createSplitDeterministic(Split _splitParams, address _owner, address _creator, bytes32 _salt) returns (address)',
   'function distribute(Split _split, address _token, address _distributor)',
   'function withdraw(address _owner, address _token)',
+  'struct Call3 { address target; bool allowFailure; bytes callData; }',
+  'function aggregate3(Call3[] calls) payable returns ((bool success, bytes returnData)[])',
 ]);
 const asViem = (s: Split) => ({
   recipients: s.recipients.map((r) => r.toLowerCase()) as `0x${string}`[],
@@ -225,6 +229,36 @@ describe('createSplit against viem', () => {
       ).toThrow(/zero address/);
     }
     expect(() => createSplit('other' as 'push', partner, SALT.salt)).toThrow(/push or pull/);
+  });
+});
+
+describe('payoutCall against viem', () => {
+  const D = `0x${'d1'.repeat(20)}` as const;
+  it('pull: one aggregate3 on Multicall3, distribute must succeed, each withdrawal may fail', () => {
+    for (const s of [partner, { ...partner, distributionIncentive: 10_000 }, many(100)]) {
+      const calls = payoutCalls('pull', SPLIT, s, USDC, D);
+      const tx = payoutCall('pull', SPLIT, s, USDC, D);
+      expect(tx.to).toBe(MULTICALL3);
+      expect(tx.data).toBe(
+        encodeFunctionData({
+          abi: SPLITS_ABI,
+          functionName: 'aggregate3',
+          args: [
+            calls.map((c, i) => ({
+              target: c.to as `0x${string}`,
+              allowFailure: i > 0,
+              callData: c.data as `0x${string}`,
+            })),
+          ],
+        }),
+      );
+    }
+  });
+
+  it('push: the single distribute itself', () => {
+    expect(payoutCall('push', SPLIT, partner, USDC, D)).toEqual(
+      payoutCalls('push', SPLIT, partner, USDC, D)[0],
+    );
   });
 });
 

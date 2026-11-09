@@ -190,15 +190,65 @@ export function createSplit(
 }
 
 /**
- * The transactions that pay out what the split at `address` holds in `token`: `distribute` first,
- * then for a pull split one SplitsWarehouse withdrawal per recipient (and for `distributor`, if the
+ * The calls that pay out what the split at `address` holds in `token`: `distribute` first, then
+ * for a pull split one SplitsWarehouse withdrawal per recipient (and for `distributor`, if the
  * split pays a reward), each paying that address's wallet. Anyone may send them; the sender pays
- * the gas and `distributor` gets the split's distribution reward. Send the withdrawals one by one,
- * not as one batch: one reverts when there is nothing to pay, when USDC blacklists that address,
- * or when its owner paused its withdrawals in the warehouse, and must not stop the others. Send
- * each only after the one before it is in a block: a wallet estimates a withdrawal on the current
- * state, and before `distribute` lands there is nothing to withdraw.
+ * the gas and `distributor` gets the split's distribution reward. `payoutCall` sends them as one
+ * transaction. Sent one by one, each goes after the one before it is in a block: a wallet
+ * estimates a withdrawal on the current state, and before `distribute` lands there is nothing to
+ * withdraw.
  */
+/** Multicall3, at the same address on Base as on every chain it is deployed to. */
+export const MULTICALL3 = '0xca11bde05977b3631167028862be2a173976ca11';
+
+/**
+ * The payout as one transaction through Multicall3 `aggregate3`. `distribute` must succeed or the
+ * whole transaction reverts; each withdrawal may fail on its own (nothing to pay, a USDC-blacklisted
+ * or paused recipient) without stopping the others. A push split's payout is already one call.
+ * Check the receipt's warehouse events for who was paid: a transaction that succeeded may still
+ * hold a failed withdrawal.
+ */
+export function payoutCall(
+  kind: 'push' | 'pull',
+  address: string,
+  split: Split,
+  token: string,
+  distributor: string,
+): SplitCall {
+  const calls = payoutCalls(kind, address, split, token, distributor);
+  if (kind === 'push') return calls[0] as SplitCall;
+  // aggregate3((address target, bool allowFailure, bytes callData)[]): the array's offset, its
+  // length, one offset per element (from after the length), then each element.
+  const elements = calls.map((c, i) => {
+    const data = fromHex(c.data, (c.data.length - 2) / 2, 'callData');
+    const padded = new Uint8Array(Math.ceil(data.length / 32) * 32);
+    padded.set(data);
+    return concat([
+      addressWord(c.to),
+      word(i === 0 ? 0n : 1n),
+      word(96n),
+      word(BigInt(data.length)),
+      padded,
+    ]);
+  });
+  const offsets: Uint8Array[] = [];
+  let at = 32n * BigInt(elements.length);
+  for (const e of elements) {
+    offsets.push(word(at));
+    at += BigInt(e.length);
+  }
+  return {
+    to: MULTICALL3,
+    data: calldata(
+      `aggregate3((address,bool,bytes)[])`,
+      word(32n),
+      word(BigInt(elements.length)),
+      ...offsets,
+      ...elements,
+    ),
+  };
+}
+
 export function payoutCalls(
   kind: 'push' | 'pull',
   address: string,
