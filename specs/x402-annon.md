@@ -1,4 +1,4 @@
-# Annon payment profile for x402 v2 (draft)
+# Annon payment profile for x402 v2 (v1)
 
 How a server sells an Annon file over x402 v2, and what an Annon client sends. It is plain x402 v2
 ([spec](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md),
@@ -8,7 +8,8 @@ with one scheme of its own, one extension, `annon`, and the payment nonce of [no
 The SDK builds and checks all of it (`offerFor`, `verifyPayment`, `forFacilitator` on the seller's
 side; `discover`, `preflight`, `authorize` on the buyer's); integrators don't write these objects.
 
-Status: draft, not frozen. Frozen after the owner's approval.
+Status: v1, frozen on 9 Nov 2026. Any change to what a client or server sends or checks is a new
+version.
 
 ## 1. Why its own scheme
 
@@ -149,14 +150,39 @@ choice:
 
 For a split the SDK checks, from the split's terms and its creation salt or nonce (both in its
 `SplitCreated` event), that `pay_to` is the address an 0xSplits V2.2 factory on Base gives those
-terms with owner 0, that its code is that factory's clone, that it is on chain and not paused, and
-that `0 < totalAllocation < 2^128` (above that, `distribute` overflows on any real amount and the
-money stays in the split).
+terms with owner 0, that its code is that factory's clone, that it is on chain and not paused, that
+it has at most 100 recipients and none is the zero address (USDC refuses to pay it), and that
+`0 < totalAllocation < 2^128`. `distribute` computes `amount * allocation / totalAllocation` in
+uint256, so below `2^128` no USDC amount can overflow it; above, a large enough payment would,
+and that money would stay in the split.
 A split created with an owner is refused even if the owner later renounced it (an owner could
 have approved its USDC to anyone first). The integrator then shows the seller who gets what percent
-before they sign; a push split pays the wallets at `distribute`, a pull split credits them in the
-SplitsWarehouse, from which they withdraw. The key is released when the payment reaches the split, before distribution;
-distribution is a separate transaction whose caller pays the gas.
+before they sign. The SDK can also build the transaction that creates such a split (owner 0, a
+salt the platform keeps) and the transactions that pay it out.
+
+The key is released when the payment reaches the split. The money then waits in the split until
+someone calls `distribute`; nothing has to happen by a deadline, and anyone may call it and pay its
+gas: the platform after a sale or once a day, the seller, or the 0xSplits app.
+
+A split's distribution reward (`distributionIncentive`, in millionths, at most 65 535 or 6.5535%) comes off each payment
+before the shares and goes to whoever the caller of `distribute` names, so it is a tip for
+running the payout, not a platform fee. A platform takes its fee as a recipient and sets the
+reward to 0.
+
+- **Push:** `distribute` pays every recipient's wallet in one transaction. If USDC blacklists any
+  one recipient, the transfer to it fails and nobody is paid.
+- **Pull:** `distribute` credits each recipient in the SplitsWarehouse; a second transaction,
+  `withdraw(recipient, token)`, pays that recipient's wallet, and anyone may send it for them,
+  unless that recipient paused its own withdrawals in the warehouse (then only it can). A
+  blacklisted recipient blocks only itself, as long as each withdrawal is its own transaction.
+  A distribution reward is credited in the warehouse too and withdrawn the same way. This is the
+  safer default for a platform with many sellers.
+
+What the check proves is the terms, not that a payout will go through. Circle can blacklist a
+recipient, the split or the warehouse, the same way it can freeze a seller's own wallet. Each
+share rounds down, and a few units of the token stay behind: one in the split at each
+`distribute`, and for pull one in each warehouse balance at withdrawal. Tiny payments may pay
+nobody until more arrive.
 
 ## 9. Browser clients
 
