@@ -19,7 +19,7 @@ import {
   signedBy,
   TAG,
 } from '../envelope/pay2.js';
-import { isBuyer } from '../near/rpc.js';
+import { getFile, isBuyer } from '../near/rpc.js';
 
 export type DownloadErrorCode =
   /** No or malformed `Authorization`: answer 401 with a new challenge. */
@@ -30,6 +30,8 @@ export type DownloadErrorCode =
   | 'bad_signature'
   /** The wallet did not buy this file on the trusted contract: answer 403. */
   | 'not_buyer'
+  /** The moderator took the file down (or it is not registered): answer 410. */
+  | 'taken_down'
   /** Client: the host answered something this protocol does not allow. */
   | 'bad_response'
   /** Client: the bytes are not the file whose header was checked before paying. */
@@ -174,7 +176,7 @@ export interface VerifyDownloadOptions extends DownloadTerms {
 /**
  * Host side: whether the request may get the file. Returns the buyer's wallet, or throws
  * `DownloadError` (`no_authorization`, `challenge_invalid`, `bad_signature`: answer 401 with a new
- * challenge; `not_buyer`: 403). Run it for every request, Range requests included.
+ * challenge; `not_buyer`: 403; `taken_down`: 410). Run it for every request, Range requests included.
  */
 export async function verifyDownload(
   header: string | null | undefined,
@@ -212,6 +214,12 @@ export async function verifyDownload(
   if (!signedBy(downloadMessage(o, wallet, c), sig, wallet)) return fail('bad_signature');
   if (!(await isBuyer(o.nearRpc, o.contractId, o.fileId, wallet))) {
     return fail('not_buyer', 'this wallet did not buy the file');
+  }
+  // is_buyer stays true after a takedown; a takedown blocks the body too. A stop does not: past
+  // buyers keep their purchase.
+  const file = await getFile(o.nearRpc, o.contractId, o.fileId);
+  if (!file || file.takenDown !== null) {
+    return fail('taken_down', 'the file was taken down');
   }
   return { wallet };
 }

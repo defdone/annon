@@ -50,11 +50,22 @@ const terms: DownloadTerms = {
   headerHash: HEADER_HASH,
 };
 
-// NEAR: is_buyer answers from this set, as the contract would at final state.
+// NEAR: is_buyer answers from this set, get_file from this record, as the contract would at
+// final state.
 let buyers: Set<string>;
+let fileView: Record<string, unknown> | null;
 const nearCalls: unknown[] = [];
 beforeEach(() => {
   buyers = new Set([buyer.address.toLowerCase()]);
+  fileView = {
+    seller: seller.address.toLowerCase(),
+    price: '10000',
+    pay_to: seller.address.toLowerCase(),
+    cipher_hash: `0x${'22'.repeat(32)}`,
+    moderator: null,
+    sales_stopped_at: null,
+    taken_down: null,
+  };
   nearCalls.length = 0;
   vi.stubGlobal(
     'fetch',
@@ -62,7 +73,10 @@ beforeEach(() => {
       const b = JSON.parse(init.body);
       const args = JSON.parse(Buffer.from(b.params.args_base64, 'base64').toString());
       nearCalls.push({ ...b.params, args });
-      const answer = b.params.method_name === 'is_buyer' && buyers.has(args.wallet);
+      const answer =
+        b.params.method_name === 'get_file'
+          ? fileView
+          : b.params.method_name === 'is_buyer' && buyers.has(args.wallet);
       return {
         ok: true,
         json: async () => ({
@@ -166,6 +180,7 @@ describe('verifyDownload (host)', () => {
     expect(await verify(h)).toEqual({ wallet: buyer.address.toLowerCase() });
     expect(nearCalls).toMatchObject([
       { method_name: 'is_buyer', account_id: CONTRACT, finality: 'final', args: { file_id: FILE } },
+      { method_name: 'get_file', account_id: CONTRACT, finality: 'final', args: { file_id: FILE } },
     ]);
     expect(await codeOf(verify(h))).toBe('challenge_invalid');
   });
@@ -173,6 +188,15 @@ describe('verifyDownload (host)', () => {
   it('refuses a wallet that did not buy', async () => {
     buyers.clear();
     expect(await codeOf(verify(await auth(issue())))).toBe('not_buyer');
+  });
+
+  it('refuses a buyer once the file is taken down, but not once sales are stopped', async () => {
+    fileView = { ...fileView, sales_stopped_at: NOW - 100 };
+    expect(await codeOf(verify(await auth(issue())))).toBe('ok');
+    fileView = { ...fileView, taken_down: 'court_order' };
+    expect(await codeOf(verify(await auth(issue())))).toBe('taken_down');
+    fileView = null;
+    expect(await codeOf(verify(await auth(issue())))).toBe('taken_down');
   });
 
   it('refuses missing, malformed, expired, early and unknown authorizations', async () => {

@@ -75,8 +75,10 @@ lives at most 120 s, and `issuedAt ≤ now < expiresAt`; the host rebuilds the m
 `domain` and download URL (never from request headers), the challenge and the claimed address,
 and the signature
 recovers to that address; `is_buyer(fileId, address)` on the trusted Annon contract at final
-state is `true`. A failure of the first two answers `401` with a new challenge; a wallet that did
-not buy answers `403`. Then the host serves the PAY2 file: `206` with `Content-Range` for a Range
+state is `true`; and the file exists and is not taken down (`get_file` at final state; `is_buyer`
+does not see a takedown). A stop does not end past buyers' access. A failure of the first two
+answers `401` with a new challenge; a wallet that did not buy answers `403`; a taken-down file
+answers `410`. Then the host serves the PAY2 file: `206` with `Content-Range` for a Range
 request, or `200` with the whole file.
 
 ## 4. Client checks
