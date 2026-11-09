@@ -435,7 +435,7 @@ describe('preflight', () => {
       'network_mismatch',
       () => {
         w.file = file();
-        return opts({ paymentRequired: required(offer({ scheme: 'annon-receive' })) });
+        return opts({ paymentRequired: required(offer({ scheme: 'upto' })) });
       },
     ],
     [
@@ -1674,11 +1674,8 @@ describe('offerFor and checkPayment', () => {
       );
     w.file = file();
     const pr = await offerFor(offerOpts);
-    w.file = file();
-    const splitter = await offerFor(offerOpts);
-    // Neither Annon scheme has a handler in a plain client: it signs nothing.
+    // `annon-exact` has no handler in a plain client: it signs nothing.
     expect(await signs(pr)).toBe('refused');
-    expect(await signs(splitter)).toBe('refused');
     // Shown the same offer as plain `exact`, it signs a random nonce; the seller check refuses it.
     const asExact = { ...pr, accepts: [{ ...pr.accepts[0], scheme: 'exact' }] } as PaymentRequired;
     const payload = await client.createPaymentPayload(asExact as never);
