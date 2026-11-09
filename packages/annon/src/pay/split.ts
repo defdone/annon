@@ -20,7 +20,7 @@ export interface Split {
   /** Shares, in any unit below 2^128 in total; each recipient gets `amount * allocation / total`. */
   allocations: bigint[];
   totalAllocation: bigint;
-  /** Reward to whoever calls `distribute`, in millionths (at most 65 535, 6.5%). */
+  /** Reward to the distributor the `distribute` caller names, in millionths (at most 65 535, 6.5535%). */
   distributionIncentive: number;
 }
 
@@ -63,7 +63,7 @@ export interface SplitTerms {
   kind: 'push' | 'pull';
   /** Each recipient and its share of a payment, after the distribution reward, in percent. */
   shares: { recipient: string; percent: number }[];
-  /** The reward to whoever calls `distribute`, in percent. */
+  /** The reward to the distributor the `distribute` caller names, in percent. */
   distributorPercent: number;
 }
 
@@ -122,10 +122,119 @@ export function splitAddress(
 
 const ZERO = `0x${'00'.repeat(20)}`;
 const selector = (sig: string) => toHex(keccak_256(new TextEncoder().encode(sig)).subarray(0, 4));
+const calldata = (sig: string, ...parts: Uint8Array[]) =>
+  selector(sig) + toHex(concat(parts)).slice(2);
+const SPLIT_TUPLE = '(address[],uint256[],uint256,uint16)';
+/** The split's tuple without the leading offset word, for a call that has other arguments. */
+const tuple = (s: Split) => encodeSplit(s).subarray(32);
+
+/** The SplitsWarehouse on Base, where a pull split credits its recipients. */
+export const SPLITS_WAREHOUSE = '0x8fb66f38cf86a3d5e8768f8f1754a24a6c661fb8';
+
+/**
+ * Most recipients a split may have here. A push `distribute` makes one USDC transfer (about 30k to
+ * 60k gas) per recipient in one transaction; 100 stays far below Base's gas limits.
+ */
+export const MAX_RECIPIENTS = 100;
+
+/** Terms the SDK accepts, whether it creates the split or reads one. */
+function checkTerms(s: Split) {
+  if (s.recipients.length > MAX_RECIPIENTS) {
+    fail('bad_requirements', `the split has more than ${MAX_RECIPIENTS} recipients`);
+  }
+  // USDC refuses any transfer to address 0: a push split could never pay anyone, a pull split
+  // would keep that share for good.
+  if (s.recipients.some((r) => BigInt(r) === 0n)) {
+    fail('bad_requirements', 'the split pays the zero address');
+  }
+  if (s.totalAllocation < 1n) fail('bad_requirements', 'the split allocates nothing');
+  // `distribute` computes amount * allocation / total in uint256. With the total below 2^128 that
+  // cannot overflow for any amount below 2^128 (USDC's supply is far smaller); above, a large
+  // enough payment would, and the money would stay in the split.
+  if (s.totalAllocation >= 2n ** 128n) {
+    fail('bad_requirements', 'the split allocations are too large to distribute');
+  }
+}
+
+/** A transaction to send from any wallet on Base. */
+export interface SplitCall {
+  to: string;
+  data: string;
+}
+
+/**
+ * The transaction that creates `split` as an ownerless (immutable) split of `kind` at the address
+ * it returns. Send it from any wallet on Base. Keep `split` and `salt`: `readSplit` needs them, and
+ * the same terms and salt always give the same address (sent again, the factory just returns it).
+ */
+export function createSplit(
+  kind: 'push' | 'pull',
+  split: Split,
+  salt: string,
+): SplitCall & { address: string } {
+  checkTerms(split);
+  if (split.allocations.reduce((a, b) => a + b, 0n) !== split.totalAllocation) {
+    throw new RangeError('the allocations must add up to totalAllocation');
+  }
+  const f = SPLIT_FACTORIES.find((f) => f.kind === kind);
+  if (!f) throw new TypeError('kind is push or pull');
+  const data = calldata(
+    `createSplitDeterministic(${SPLIT_TUPLE},address,address,bytes32)`,
+    word(128n),
+    addressWord(ZERO),
+    addressWord(ZERO),
+    fromHex(salt, 32, 'salt'),
+    tuple(split),
+  );
+  return { to: f.factory, data, address: splitAddress(f, split, ZERO, { salt }) };
+}
+
+/**
+ * The transactions that pay out what the split at `address` holds in `token`: `distribute` first,
+ * then for a pull split one SplitsWarehouse withdrawal per recipient (and for `distributor`, if the
+ * split pays a reward), each paying that address's wallet. Anyone may send them; the sender pays
+ * the gas and `distributor` gets the split's distribution reward. Send the withdrawals one by one,
+ * not as one batch: one reverts when there is nothing to pay, when USDC blacklists that address,
+ * or when its owner paused its withdrawals in the warehouse, and must not stop the others.
+ */
+export function payoutCalls(
+  kind: 'push' | 'pull',
+  address: string,
+  split: Split,
+  token: string,
+  distributor: string,
+): SplitCall[] {
+  // A pull split would credit the reward to address 0 for good; push could never distribute.
+  if (BigInt(distributor) === 0n) throw new TypeError('distributor is the address that sends them');
+  const calls = [
+    {
+      to: address.toLowerCase(),
+      data: calldata(
+        `distribute(${SPLIT_TUPLE},address,address)`,
+        word(96n),
+        addressWord(token),
+        addressWord(distributor),
+        tuple(split),
+      ),
+    },
+  ];
+  if (kind === 'pull') {
+    const paid = [...split.recipients, ...(split.distributionIncentive > 0 ? [distributor] : [])];
+    for (const r of new Set(paid.map((r) => r.toLowerCase()))) {
+      calls.push({
+        to: SPLITS_WAREHOUSE,
+        data: calldata('withdraw(address,address)', addressWord(r), addressWord(token)),
+      });
+    }
+  }
+  return calls;
+}
 
 /**
  * Checks that `address` on Base is the ownerless 0xSplits V2.2 split `split`, created as `origin`
  * says, and returns what it pays whom. Throws `PayError` `bad_requirements` otherwise.
+ * It proves the terms, not that a payout will go through: Circle can blacklist a recipient (a push
+ * split then pays nobody, a pull split only not that one) or the split itself, and shares round down.
  */
 export async function readSplit(
   baseRpc: string,
@@ -134,12 +243,7 @@ export async function readSplit(
   origin: SplitOrigin,
 ): Promise<SplitTerms> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new TypeError('address must be 0x and 20 bytes');
-  if (split.totalAllocation < 1n) fail('bad_requirements', 'the split allocates nothing');
-  // `distribute` computes amount * allocation in uint256: with a larger total any real amount
-  // overflows and the money stays in the split.
-  if (split.totalAllocation >= 2n ** 128n) {
-    fail('bad_requirements', 'the split allocations are too large to distribute');
-  }
+  checkTerms(split);
   const to = address.toLowerCase();
   const f = SPLIT_FACTORIES.find((f) => splitAddress(f, split, ZERO, origin) === to);
   if (!f) {

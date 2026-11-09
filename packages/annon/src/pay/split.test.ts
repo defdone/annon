@@ -1,6 +1,7 @@
 import {
   concat,
   encodeAbiParameters,
+  encodeFunctionData,
   encodeFunctionResult,
   getContractAddress,
   keccak256,
@@ -11,7 +12,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PayError } from './base.js';
 import {
   cloneCode,
+  createSplit,
   encodeSplit,
+  MAX_RECIPIENTS,
+  payoutCalls,
   readSplit,
   SPLIT_FACTORIES,
   type Split,
@@ -154,6 +158,129 @@ describe('splitAddress against viem', () => {
   });
 });
 
+// The 0xSplits V2.2 signatures, copied from SplitFactoryV2.sol, PushSplit.sol and SplitsWarehouse.sol.
+const SPLITS_ABI = parseAbi([
+  'struct Split { address[] recipients; uint256[] allocations; uint256 totalAllocation; uint16 distributionIncentive; }',
+  'function createSplitDeterministic(Split _splitParams, address _owner, address _creator, bytes32 _salt) returns (address)',
+  'function distribute(Split _split, address _token, address _distributor)',
+  'function withdraw(address _owner, address _token)',
+]);
+const asViem = (s: Split) => ({
+  recipients: s.recipients.map((r) => r.toLowerCase()) as `0x${string}`[],
+  allocations: s.allocations,
+  totalAllocation: s.totalAllocation,
+  distributionIncentive: s.distributionIncentive,
+});
+const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+const WAREHOUSE = '0x8fb66f38cf86a3d5e8768f8f1754a24a6c661fb8';
+const many = (n: number): Split => ({
+  recipients: Array.from({ length: n }, (_, i) => `0x${(i + 1).toString(16).padStart(40, '0')}`),
+  allocations: Array.from({ length: n }, () => 1n),
+  totalAllocation: BigInt(n),
+  distributionIncentive: 0,
+});
+
+describe('createSplit against viem', () => {
+  it('calls the factory of its kind with these terms, owner 0, and gives the address it will create', () => {
+    for (const [kind, f] of [
+      ['push', PUSH],
+      ['pull', PULL],
+    ] as const) {
+      const s = { ...partner, distributionIncentive: 7 };
+      const tx = createSplit(kind, s, SALT.salt);
+      expect(tx.to).toBe(f.factory);
+      expect(tx.data).toBe(
+        encodeFunctionData({
+          abi: SPLITS_ABI,
+          functionName: 'createSplitDeterministic',
+          args: [asViem(s), ZERO, ZERO, SALT.salt],
+        }),
+      );
+      expect(tx.address).toBe(viemAddress(f, s, ZERO, SALT));
+    }
+  });
+
+  it('takes up to MAX_RECIPIENTS recipients and a total below 2^128, and nothing else', () => {
+    expect(MAX_RECIPIENTS).toBe(100);
+    expect(createSplit('push', many(100), SALT.salt).address).toMatch(/^0x[0-9a-f]{40}$/);
+    const top = {
+      ...partner,
+      allocations: [2n ** 128n - 2n, 1n],
+      totalAllocation: 2n ** 128n - 1n,
+    };
+    expect(createSplit('pull', top, SALT.salt).to).toBe(PULL.factory);
+    const refused = [
+      many(101),
+      { ...partner, allocations: [2n ** 128n - 1n, 1n], totalAllocation: 2n ** 128n },
+      { ...partner, allocations: [0n, 0n], totalAllocation: 0n },
+    ];
+    for (const s of refused) expect(() => createSplit('push', s, SALT.salt)).toThrow(PayError);
+    expect(() =>
+      createSplit('push', { ...partner, totalAllocation: 1_000_001n }, SALT.salt),
+    ).toThrow(/add up/);
+    expect(() => createSplit('push', partner, '0x12')).toThrow();
+    for (const kind of ['push', 'pull'] as const) {
+      expect(() =>
+        createSplit(kind, { ...partner, recipients: [SELLER, ZERO] }, SALT.salt),
+      ).toThrow(/zero address/);
+    }
+    expect(() => createSplit('other' as 'push', partner, SALT.salt)).toThrow(/push or pull/);
+  });
+});
+
+describe('payoutCalls against viem', () => {
+  const D = `0x${'d1'.repeat(20)}` as const;
+  const distribute = (s: Split) =>
+    encodeFunctionData({ abi: SPLITS_ABI, functionName: 'distribute', args: [asViem(s), USDC, D] });
+
+  it('push: one distribute on the split, which pays the wallets', () => {
+    expect(payoutCalls('push', SPLIT.toUpperCase().replace('0X', '0x'), partner, USDC, D)).toEqual([
+      { to: SPLIT, data: distribute(partner) },
+    ]);
+  });
+
+  it('pull: also withdraws the reward for a distributor outside the split, never twice', () => {
+    const withdraw = (r: string) =>
+      encodeFunctionData({
+        abi: SPLITS_ABI,
+        functionName: 'withdraw',
+        args: [r as `0x${string}`, USDC],
+      });
+    const paid = (s: Split, d: string) =>
+      payoutCalls('pull', SPLIT, s, USDC, d)
+        .slice(1)
+        .map((c) => c.data);
+    const rewarded = { ...partner, distributionIncentive: 10_000 };
+    expect(paid(rewarded, D)).toEqual([withdraw(SELLER), withdraw(SAFE), withdraw(D)]);
+    expect(paid(rewarded, SAFE)).toEqual([withdraw(SELLER), withdraw(SAFE)]);
+    expect(paid(partner, D)).toEqual([withdraw(SELLER), withdraw(SAFE)]);
+    expect(payoutCalls('push', SPLIT, rewarded, USDC, D)).toHaveLength(1);
+    for (const kind of ['push', 'pull'] as const) {
+      expect(() => payoutCalls(kind, SPLIT, rewarded, USDC, ZERO)).toThrow(/distributor/);
+    }
+  });
+
+  it('pull: distribute, then one warehouse withdrawal to each recipient, once each', () => {
+    const s = {
+      ...partner,
+      recipients: [SELLER, SAFE, SELLER.toUpperCase().replace('0X', '0x')],
+      allocations: [1n, 1n, 1n],
+      totalAllocation: 3n,
+    };
+    const withdraw = (r: string) =>
+      encodeFunctionData({
+        abi: SPLITS_ABI,
+        functionName: 'withdraw',
+        args: [r as `0x${string}`, USDC],
+      });
+    expect(payoutCalls('pull', SPLIT, s, USDC, D)).toEqual([
+      { to: SPLIT, data: distribute(s) },
+      { to: WAREHOUSE, data: withdraw(SELLER) },
+      { to: WAREHOUSE, data: withdraw(SAFE) },
+    ]);
+  });
+});
+
 const ABI = parseAbi([
   'function splitHash() view returns (bytes32)',
   'function owner() view returns (address)',
@@ -292,6 +419,24 @@ describe('readSplit', () => {
       expect(await code(readSplit('https://base', SPLIT, s, SALT))).toMatch(
         /allocates nothing|too large/,
       );
+    }
+    expect(await code(readSplit('https://base', SPLIT, many(101), SALT))).toMatch(
+      /more than 100 recipients/,
+    );
+    const zero = { ...partner, recipients: [ZERO, SAFE] };
+    chain.at = splitAddress(PUSH, zero, ZERO, SALT);
+    chain.hash = splitHash(zero);
+    expect(await code(readSplit('https://base', chain.at, zero, SALT))).toMatch(/zero address/);
+  });
+
+  it('accepts a split of 100 recipients and a total just below 2^128', async () => {
+    for (const s of [
+      many(100),
+      { ...partner, allocations: [2n ** 128n - 2n, 1n], totalAllocation: 2n ** 128n - 1n },
+    ]) {
+      chain.at = splitAddress(PUSH, s, ZERO, SALT);
+      chain.hash = splitHash(s);
+      expect(await code(readSplit('https://base', chain.at, s, SALT))).toBe('ok');
     }
   });
 
