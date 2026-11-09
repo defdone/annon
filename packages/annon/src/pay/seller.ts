@@ -4,6 +4,7 @@
  * itself stays with the server's facilitator: any standard x402 one, through `forFacilitator`.
  */
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
+import { secureUrl } from '../download/download.js';
 import { getConfig, getFile } from '../near/rpc.js';
 import { fail, head } from './base.js';
 import { annonNonce, digest, fromHex, signer } from './eip3009.js';
@@ -16,10 +17,10 @@ export interface OfferOptions {
   fileId: string;
   /** The URL being paid for (x402 `resource.url`). */
   url: string;
-  /** URL of the complete PAY2 header, public (profile section 7). */
-  header?: string;
+  /** URL of the complete PAY2 header, public (profile section 7): the client checks it first. */
+  header: string;
   /** URL of the PAY2 file for buyers: entitlement on NEAR plus a wallet-signed challenge. */
-  download?: string;
+  download: string;
   /** The seller publishes the body too: the client then checks the whole file before signing. */
   public?: boolean;
   /** At most this long for the buyer's authorization; the Annon client signs for at most 180. */
@@ -32,6 +33,13 @@ export interface OfferOptions {
  * `unknown_file` for one that isn't registered.
  */
 export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
+  // An Annon client won't sign without the header, and a buyer can't get the file without a
+  // download, which goes over https only (specs/download.md).
+  if (typeof o.header !== 'string' || !URL.canParse(o.header)) {
+    throw new TypeError('header must be an absolute URL');
+  }
+  if (typeof o.download !== 'string') throw new TypeError('download must be an https URL');
+  secureUrl(o.download);
   const file = await getFile(o.nearRpc, o.contractId, o.fileId);
   if (!file) return fail('unknown_file', 'the file is not registered on the Annon contract');
   if (file.takenDown) fail('taken_down', `the file was taken down (${file.takenDown})`);
@@ -51,8 +59,8 @@ export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
     network: 'near:mainnet',
     contract: o.contractId,
     fileId: o.fileId,
-    ...(o.header ? { header: o.header } : {}),
-    ...(o.download ? { download: o.download } : {}),
+    header: o.header,
+    download: o.download,
     ...(o.public ? { public: true } : {}),
   };
   return {

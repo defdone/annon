@@ -6,6 +6,7 @@
  * request is only compared against it. The host can make the purchase fail, not misdirect it.
  */
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
+import { type Inspected, inspect, inspectHeader, Pay2Error } from '../envelope/pay2.js';
 import { type FileInfo, getConfig, getFile, isBuyer } from '../near/rpc.js';
 import {
   balanceOf,
@@ -55,6 +56,11 @@ export interface PreflightOptions {
   buyer: string;
   /** The 402's `PAYMENT-REQUIRED`, read with `readPaymentRequired`. */
   paymentRequired: PaymentRequired;
+  /**
+   * The PAY2 header served at `extensions.annon.info.header`; the whole file when the offer says
+   * `public`. Checked against the registration before anything is signed (profile section 7).
+   */
+  pay2: Uint8Array;
   /** USDC base units: refused above it. */
   maxPrice: bigint;
   /** Moderators the buyer trusts to take a file down. A file with any other is refused. */
@@ -78,10 +84,36 @@ export interface Quote {
   file: FileInfo;
   paymentRequired: PaymentRequired;
   offer: Offer;
+  /** The checked PAY2 header; `authorize` checks it again and the download names its hash. */
+  header: Uint8Array;
 }
 
 const lower = (v: unknown) => (typeof v === 'string' ? v.toLowerCase() : undefined);
 const isAddress = (v: unknown) => typeof v === 'string' && /^0x[0-9a-fA-F]{40}$/.test(v);
+
+/**
+ * Profile section 7: the header (or, for a public body, the whole file) is the registered file,
+ * signed by its seller, with a key stanza for this contract. Before any signature.
+ */
+async function checkPay2(
+  pay2: Uint8Array,
+  wholeFile: boolean,
+  contractId: string,
+  fileId: string,
+  file: FileInfo,
+): Promise<Inspected> {
+  const listing = { fileId, cipherHash: file.cipherHash, seller: file.seller };
+  let r: Inspected;
+  try {
+    r = await (wholeFile ? inspect : inspectHeader)(pay2, listing, contractId);
+  } catch (e) {
+    if (e instanceof Pay2Error)
+      return fail('file_invalid', `the PAY2 file failed its check: ${e.code}`);
+    throw e;
+  }
+  if (!r.usable) fail('file_invalid', 'the PAY2 header has no key for this contract');
+  return r;
+}
 
 /** The registration, if the file can still be bought. */
 async function forSale(nearRpc: string, contractId: string, fileId: string): Promise<FileInfo> {
@@ -131,6 +163,8 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
     fail('unknown_moderator', `the file's moderator ${file.moderator} is not one you trust`);
   }
   const config = await getConfig(o.nearRpc, o.contractId);
+  if (!(o.pay2 instanceof Uint8Array)) throw new TypeError('pay2 must be the PAY2 header bytes');
+  const checked = await checkPay2(o.pay2, info?.public === true, o.contractId, o.fileId, file);
 
   const to = file.payTo;
   // Facilitators take the EIP-712 domain from the offer, so it must be there and be USDC's.
@@ -182,6 +216,7 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
     file,
     paymentRequired: pr,
     offer: req,
+    header: checked.header,
   };
 }
 
@@ -266,10 +301,13 @@ export async function authorize(
     now.seller !== q.seller ||
     now.price !== q.price ||
     now.payTo !== q.file.payTo ||
-    now.moderator !== q.file.moderator
+    now.moderator !== q.file.moderator ||
+    now.cipherHash !== q.file.cipherHash
   ) {
     fail('price_mismatch', 'the registration changed since the quote; check it again');
   }
+  // Never sign without a checked header, even for a quote not made by `preflight`.
+  await checkPay2(q.header, false, q.contractId, q.fileId, now);
   const annon = annonNonce(q.contractId, q.fileId, o.buyerKey);
   // The search for the payment starts at the finalized block: a reorg or a lying RPC can't put the
   // payment below it.

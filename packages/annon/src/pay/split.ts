@@ -195,7 +195,9 @@ export function createSplit(
  * split pays a reward), each paying that address's wallet. Anyone may send them; the sender pays
  * the gas and `distributor` gets the split's distribution reward. Send the withdrawals one by one,
  * not as one batch: one reverts when there is nothing to pay, when USDC blacklists that address,
- * or when its owner paused its withdrawals in the warehouse, and must not stop the others.
+ * or when its owner paused its withdrawals in the warehouse, and must not stop the others. Send
+ * each only after the one before it is in a block: a wallet estimates a withdrawal on the current
+ * state, and before `distribute` lands there is nothing to withdraw.
  */
 export function payoutCalls(
   kind: 'push' | 'pull',

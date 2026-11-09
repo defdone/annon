@@ -26,6 +26,8 @@ export type PayErrorCode =
   | 'method_mismatch'
   /** The payment request names an Annon contract this client doesn't trust. */
   | 'untrusted_contract'
+  /** The PAY2 header (or the public file) isn't the registered file signed by its seller. */
+  | 'file_invalid'
   | 'bad_requirements'
   | 'insufficient_balance'
   | 'smart_wallet_unsupported'

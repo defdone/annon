@@ -14,13 +14,16 @@ import {
   encodePacked,
   getAddress,
   hashTypedData,
+  hexToBytes,
   keccak256,
   parseAbi,
   recoverTypedDataAddress,
+  sha256,
   verifyTypedData,
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { inspect, inspectHeader, publishText, seal } from '../envelope/pay2.js';
 import { blockHeader, type Expected, PayError, paymentLogs } from './base.js';
 import { type Authorization, annonNonce, digest, signer, typedData } from './eip3009.js';
 import {
@@ -31,6 +34,7 @@ import {
   preflight,
   status,
 } from './pay.js';
+import { nextStep, purchaseKey } from './recover.js';
 import { checkPayment, forFacilitator, offerFor, verifyPayment } from './seller.js';
 import { discover, type PaymentRequired, paymentSignature, readPaymentRequired } from './x402.js';
 
@@ -141,9 +145,36 @@ const NEAR = 'https://near.rpc';
 const BASE = 'https://base.rpc';
 const CONTRACT = 'v1.annon.defdone.near';
 const FILE = `0x${'11'.repeat(32)}`;
-const SELLER = `0x${'ab'.repeat(20)}`;
+const sellerAccount = privateKeyToAccount(`0x${'44'.repeat(32)}`);
+const SELLER = sellerAccount.address.toLowerCase();
 const PAY_TO = `0x${'5e'.repeat(20)}`;
 const NOW = 1_800_000_000;
+// A real PAY2 file for FILE, sealed and signed by the seller; the registration below carries its
+// cipherHash, so the header check in preflight and authorize passes only for these bytes.
+const headerLength = (b: Uint8Array) => new DataView(b.buffer, b.byteOffset).getUint32(8);
+const sealFor = async (contractId: string, signer = sellerAccount) => {
+  const s = await seal(new TextEncoder().encode('the paid file'), {
+    fileId: Uint8Array.from(Buffer.from(FILE.slice(2), 'hex')),
+    name: 'f.txt',
+    mime: 'text/plain',
+  });
+  const pay2 = await s.finish({
+    contractId,
+    ckdSecret: bls.G1.Point.BASE.multiply(5n).toBytes(true),
+    seller: signer.address,
+    sign: (message) => signer.signMessage({ message }),
+  });
+  return {
+    pay2,
+    header: pay2.subarray(0, headerLength(pay2)),
+    cipherHash: `0x${Buffer.from(s.cipherHash).toString('hex')}`,
+  };
+};
+const {
+  pay2: PAY2,
+  header: HEADER,
+  cipherHash: CIPHER_HASH,
+} = await sealFor('v1.annon.defdone.near');
 const SIGNED = 0x3000000;
 /** Base since Denim: five blocks a second. */
 const at = (n: number) => ({ number: n, timestamp: NOW + Math.floor((n - SIGNED) / 5) });
@@ -169,6 +200,8 @@ type World = {
   calls: { method: string; data?: string; from?: string }[];
   /** Runs on every NEAR view, e.g. to let time pass while one stalls. */
   onNear?: () => void;
+  /** `is_payment_used` for the test payment (TX, log 3). */
+  paymentUsed?: boolean;
 };
 let w: World;
 
@@ -176,7 +209,7 @@ const file = (over: Record<string, unknown> = {}) => ({
   seller: SELLER,
   price: '10000',
   pay_to: PAY_TO,
-  cipher_hash: `0x${'22'.repeat(32)}`,
+  cipher_hash: CIPHER_HASH,
   moderator: null,
   sales_stopped_at: null,
   taken_down: null,
@@ -240,6 +273,10 @@ async function respond(
     if (p.account_id !== (w.contract ?? CONTRACT) || p.finality !== 'final') {
       return { id: body.id, error: { cause: { name: 'UNKNOWN_ACCOUNT' } } };
     }
+    if (p.method_name === 'is_payment_used') {
+      const ours = args.base_tx === TX && args.log_index === 3;
+      return reply({ result: [...Buffer.from(String(ours && w.paymentUsed === true))] });
+    }
     if (p.method_name !== 'get_config' && args.file_id !== FILE) {
       return reply({ result: [...Buffer.from('null')] });
     }
@@ -286,6 +323,11 @@ async function respond(
     }
     case 'eth_getTransactionReceipt':
       return reply(w.receipt);
+    case 'eth_getBlockByHash': {
+      // Real Base blocks only: blockHeader checks the rebuilt header hashes to the asked hash.
+      const c = headers.cases.find((h) => h.hash === params[0]);
+      return reply(c ? { ...c.json, hash: c.hash } : null);
+    }
     case 'eth_call': {
       // viem decodes what the SDK encoded: a wrong selector or argument fails here.
       const { functionName, args } = decodeFunctionData({
@@ -380,6 +422,7 @@ const opts = (over: Record<string, unknown> = {}) => ({
   fileId: FILE,
   buyer: buyerAccount.address,
   paymentRequired: required(),
+  pay2: HEADER,
   maxPrice: 10_000n,
   ...over,
 });
@@ -593,8 +636,12 @@ describe('preflight', () => {
 
   it('reads the contract it was given, not the mainnet one', async () => {
     w.contract = 'annon-dev.synthetic.near';
+    const dev = await sealFor('annon-dev.synthetic.near');
+    w.file = file({ cipher_hash: dev.cipherHash });
     const pr = withInfo(annonInfo({ contract: 'annon-dev.synthetic.near' }));
-    const q = await preflight(opts({ contractId: 'annon-dev.synthetic.near', paymentRequired: pr }));
+    const q = await preflight(
+      opts({ contractId: 'annon-dev.synthetic.near', paymentRequired: pr, pay2: dev.header }),
+    );
     expect(q.contractId).toBe('annon-dev.synthetic.near');
   });
 
@@ -678,6 +725,107 @@ async function serverVerify(header: string, pr: PaymentRequired) {
   if (a.value !== req.amount) return 'amount_mismatch';
   return { ok: true, payload: p };
 }
+
+describe('the PAY2 check before signing (profile section 7)', () => {
+  it('quotes the registered file with its exact header, and nothing else', async () => {
+    const q = await preflight(opts());
+    expect(Buffer.from(q.header).equals(Buffer.from(HEADER))).toBe(true);
+  });
+
+  it('hashes exactly the header, whether it gets the header or the whole file', async () => {
+    const listing = { fileId: FILE, cipherHash: CIPHER_HASH, seller: SELLER };
+    for (const r of [
+      await inspect(PAY2, listing, CONTRACT),
+      await inspectHeader(HEADER, listing, CONTRACT),
+    ]) {
+      expect(hex(r.headerHash)).toBe(sha256(HEADER));
+      expect(Buffer.from(r.header).equals(Buffer.from(HEADER))).toBe(true);
+    }
+  });
+
+  it('refuses a header with any byte changed', async () => {
+    for (let i = 0; i < HEADER.length; i++) {
+      const bad = Uint8Array.from(HEADER);
+      bad[i] = (bad[i] as number) ^ (1 << (i % 8));
+      expect(await codeOf(preflight(opts({ pay2: bad }))), `byte ${i}`).not.toBe('ok');
+    }
+  });
+
+  it('refuses another file, another seller, a cut header, and body bytes after it', async () => {
+    const other = await sealFor(CONTRACT);
+    const stranger = await sealFor(CONTRACT, otherAccount);
+    w.file = file({ cipher_hash: stranger.cipherHash });
+    expect(await codeOf(preflight(opts({ pay2: stranger.header })))).toBe('file_invalid');
+    w.file = file();
+    for (const pay2 of [
+      other.header,
+      HEADER.subarray(0, HEADER.length - 1),
+      PAY2,
+      new Uint8Array(0),
+    ]) {
+      expect(await codeOf(preflight(opts({ pay2 })))).toBe('file_invalid');
+    }
+  });
+
+  it('refuses a header whose only key is for another contract, even if signed for this one', async () => {
+    const elsewhere = await sealFor('other.near');
+    const h = Uint8Array.from(elsewhere.header);
+    const signed = h.subarray(0, h.length - 65);
+    const text = publishText(CONTRACT, h.subarray(12, 44), hexToBytes(sha256(signed)));
+    h.set(hexToBytes(await sellerAccount.signMessage({ message: text })), h.length - 65);
+    w.file = file({ cipher_hash: elsewhere.cipherHash });
+    expect(await codeOf(preflight(opts({ pay2: h })))).toBe('file_invalid');
+  });
+
+  it('checks the whole file when the seller publishes the body', async () => {
+    const pr = withInfo({ ...annonInfo(), public: true });
+    const q = await preflight(opts({ paymentRequired: pr, pay2: PAY2 }));
+    expect(Buffer.from(q.header).equals(Buffer.from(HEADER))).toBe(true);
+    expect(await codeOf(preflight(opts({ paymentRequired: pr, pay2: HEADER })))).toBe(
+      'file_invalid',
+    );
+    const bad = Uint8Array.from(PAY2);
+    bad[bad.length - 1] = (bad[bad.length - 1] as number) ^ 1;
+    expect(await codeOf(preflight(opts({ paymentRequired: pr, pay2: bad })))).toBe('file_invalid');
+  });
+
+  it('authorize checks the header again and never asks the wallet without it', async () => {
+    const q = await preflight(opts());
+    const wallet = {
+      address: buyerAccount.address,
+      signTypedData: vi.fn((t: ReturnType<typeof typedData>) =>
+        buyerAccount.signTypedData(asViem(t)),
+      ),
+    };
+    const bad = Uint8Array.from(HEADER);
+    bad[60] = (bad[60] as number) ^ 1;
+    // Only the seller's signature changed: the registration still matches.
+    const badSig = Uint8Array.from(HEADER);
+    badSig[HEADER.length - 10] = (badSig[HEADER.length - 10] as number) ^ 1;
+    const persist = vi.fn(async () => {});
+    for (const header of [bad, badSig, new Uint8Array(0)]) {
+      expect(await codeOf(authorize({ ...q, header }, { buyerKey, wallet, persist }))).toBe(
+        'file_invalid',
+      );
+    }
+    // A quote built by hand around a header signed for this contract but keyed for another.
+    const elsewhere = await sealFor('other.near');
+    const h = Uint8Array.from(elsewhere.header);
+    const text = publishText(
+      CONTRACT,
+      h.subarray(12, 44),
+      hexToBytes(sha256(h.subarray(0, h.length - 65))),
+    );
+    h.set(hexToBytes(await sellerAccount.signMessage({ message: text })), h.length - 65);
+    w.file = file({ cipher_hash: elsewhere.cipherHash });
+    const keyless = { ...q, header: h, file: { ...q.file, cipherHash: elsewhere.cipherHash } };
+    expect(await codeOf(authorize(keyless, { buyerKey, wallet, persist }))).toBe('file_invalid');
+    w.file = file({ cipher_hash: `0x${'22'.repeat(32)}` });
+    expect(await codeOf(authorize(q, { buyerKey, wallet, persist }))).toBe('price_mismatch');
+    expect(wallet.signTypedData).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+  });
+});
 
 describe('authorize', () => {
   const sign = (account = buyerAccount) => ({
@@ -1260,6 +1408,64 @@ describe('status', () => {
     expect(await status(BASE, job())).toEqual({ state: 'canceled' });
   });
 
+  it("after a restart, says unlock with the job's own key, logs and block header, then reopen once recorded", async () => {
+    // The payment sits in a real Base block, so the header is that block's and its number is the
+    // logs' block number, as the contract checks.
+    const real = headers.cases[0] as (typeof headers.cases)[number];
+    const inBlock = (l: RpcLog) => ({ ...atBlock(l, real.number), blockHash: real.hash });
+    w.head = at(real.number + 30);
+    w.getLogs = [inBlock(used(ANNON))];
+    w.receipt = receipt(x402Receipt().map(inBlock));
+    const paidJob = job({
+      block: real.number - 20,
+      validBefore: String(at(real.number + 30).timestamp + 300),
+    });
+    const step = await nextStep(paidJob, { nearRpc: NEAR, baseRpc: BASE });
+    expect(step).toMatchObject({
+      step: 'unlock',
+      args: { file_id: FILE, buyer_key: hex(buyerKey), header: real.rlp },
+    });
+    if (step.step !== 'unlock') throw new Error('unreachable');
+    expect(step.args.logs.map((l) => l.log_index)).toEqual([3, 4]);
+    expect(step.args.logs.map((l) => l.block_number)).toEqual([real.number, real.number]);
+    w.paymentUsed = true;
+    expect(await nextStep(paidJob, { nearRpc: NEAR, baseRpc: BASE })).toEqual({
+      step: 'reopen',
+      txHash: TX,
+    });
+  });
+
+  it('says wait while a signed payment can still settle, and buy only once it never can', async () => {
+    w.head = at(SIGNED + 2000);
+    w.getLogs = [atBlock(canceledLog(), SIGNED + 10)];
+    w.finalized = at(SIGNED + 9);
+    expect(await nextStep(job(), { nearRpc: NEAR, baseRpc: BASE })).toEqual({ step: 'wait' });
+    w.finalized = at(SIGNED + 10);
+    expect(await nextStep(job(), { nearRpc: NEAR, baseRpc: BASE })).toEqual({ step: 'buy' });
+  });
+
+  it('two tabs at once: a store that holds one job per wallet and file lets only one sign', async () => {
+    const saved = new Map<string, PaymentJob>();
+    const persist = async (j: PaymentJob) => {
+      if (saved.has(purchaseKey(j)))
+        throw new Error('a purchase of this file is already under way');
+      saved.set(purchaseKey(j), j);
+    };
+    const wallet = {
+      address: buyerAccount.address,
+      signTypedData: vi.fn((t: ReturnType<typeof typedData>) =>
+        buyerAccount.signTypedData(asViem(t)),
+      ),
+    };
+    const q = await preflight(opts());
+    const tabs = await Promise.allSettled([
+      authorize(q, { buyerKey, wallet, persist }),
+      authorize(q, { buyerKey: bls.G1.Point.BASE.multiply(8n).toBytes(true), wallet, persist }),
+    ]);
+    expect(tabs.map((t) => t.status).sort()).toEqual(['fulfilled', 'rejected']);
+    expect(wallet.signTypedData).toHaveBeenCalledTimes(1);
+  });
+
   it('never calls a used authorization expired, even when the RPC misses its log', async () => {
     w.authorizationState = true;
     w.head = at(SIGNED + 2000);
@@ -1597,7 +1803,22 @@ describe('offerFor and checkPayment', () => {
     contractId: CONTRACT,
     fileId: FILE,
     url: 'https://seller.example/f/1',
+    header: 'https://seller.example/f/1/header',
+    download: 'https://seller.example/f/1/file',
   };
+  it('needs the header and download URLs a buyer uses', async () => {
+    for (const over of [
+      { header: undefined },
+      { download: undefined },
+      { header: '/f/1/header' },
+      { download: '' },
+      { download: 'http://seller.example/f/1/file' },
+    ]) {
+      await expect(offerFor({ ...offerOpts, ...over } as never)).rejects.toThrow(TypeError);
+    }
+    const info = (await offerFor(offerOpts)).extensions?.annon?.info as Record<string, unknown>;
+    expect(info).toMatchObject({ header: offerOpts.header, download: offerOpts.download });
+  });
   const reject = (f: () => unknown) => {
     try {
       f();
