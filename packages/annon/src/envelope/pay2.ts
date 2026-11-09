@@ -9,7 +9,7 @@
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 
-type Bytes = Uint8Array<ArrayBuffer>;
+export type Bytes = Uint8Array<ArrayBuffer>;
 
 export type Pay2ErrorCode =
   | 'bad_magic'
@@ -63,21 +63,21 @@ export interface PreviewPackage {
   chunks: { index: number; key: string; data: string }[];
 }
 
-const MAGIC = [0x50, 0x41, 0x59, 0x32]; // "PAY2"
-const FIXED = 54;
-const TAG = 16;
-const MAX_HEADER = 65536;
-const MAX_CHUNKS = 1024;
-const MAX_PREVIEW = 65536;
-const MAX_META = 4096;
-const MAC = 32;
-const SIG = 65;
-const NEAR_CKD = 'near-ckd/v1';
+export const MAGIC = [0x50, 0x41, 0x59, 0x32]; // "PAY2"
+export const FIXED = 54;
+export const TAG = 16;
+export const MAX_HEADER = 65536;
+export const MAX_CHUNKS = 1024;
+export const MAX_PREVIEW = 65536;
+export const MAX_META = 4096;
+export const MAC = 32;
+export const SIG = 65;
+export const NEAR_CKD = 'near-ckd/v1';
 
 const subtle = globalThis.crypto.subtle;
 const utf8 = new TextEncoder();
 
-function concat(...parts: Uint8Array[]): Bytes {
+export function concat(...parts: Uint8Array[]): Bytes {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let at = 0;
   for (const p of parts) {
@@ -87,7 +87,7 @@ function concat(...parts: Uint8Array[]): Bytes {
   return out;
 }
 
-function int(value: number, bytes: 1 | 2 | 4 | 8): Bytes {
+export function int(value: number, bytes: 1 | 2 | 4 | 8): Bytes {
   const out = new Uint8Array(bytes);
   const view = new DataView(out.buffer);
   if (bytes === 1) view.setUint8(0, value);
@@ -97,16 +97,16 @@ function int(value: number, bytes: 1 | 2 | 4 | 8): Bytes {
   return out;
 }
 
-const equal = (a: Uint8Array, b: Uint8Array) =>
+export const equal = (a: Uint8Array, b: Uint8Array) =>
   a.length === b.length && a.every((x, i) => x === b[i]);
-const copy = (b: Uint8Array): Bytes => new Uint8Array(b);
+export const copy = (b: Uint8Array): Bytes => new Uint8Array(b);
 /** The input itself, never a copy: a hostile file must not cost memory before the limits pass. */
 function view(b: Uint8Array): Bytes {
   if (!(b.buffer instanceof ArrayBuffer)) throw new TypeError('pass bytes over an ArrayBuffer');
   return b as Bytes;
 }
 
-async function sha256(...parts: Uint8Array[]): Promise<Bytes> {
+export async function sha256(...parts: Uint8Array[]): Promise<Bytes> {
   const data = parts.length === 1 ? view(parts[0] as Uint8Array) : concat(...parts);
   return new Uint8Array(await subtle.digest('SHA-256', data));
 }
@@ -130,11 +130,11 @@ async function hkdf(ikm: Uint8Array | CryptoKey, salt: Uint8Array, info: Uint8Ar
   return new Uint8Array(bits);
 }
 
-const chunkKey = (K: Uint8Array | CryptoKey, fileId: Uint8Array, i: number) =>
+export const chunkKey = (K: Uint8Array | CryptoKey, fileId: Uint8Array, i: number) =>
   hkdf(K, fileId, concat(utf8.encode('annon/pay2/chunk'), int(i, 4)));
 
 /** Spec 2: binds a revealable chunk key, since AES-GCM alone doesn't commit to its key. */
-const commitment = (k: Uint8Array) => sha256(utf8.encode('annon/pay2/key'), k);
+export const commitment = (k: Uint8Array) => sha256(utf8.encode('annon/pay2/key'), k);
 
 function nonce(last: boolean): Bytes {
   const n = new Uint8Array(12);
@@ -148,14 +148,16 @@ async function gcm(mode: 'encrypt' | 'decrypt', key: Uint8Array, last: boolean, 
   return new Uint8Array(out);
 }
 
-const wrapKeyFor = async (ckdSecret: Uint8Array, fileId: Uint8Array, usage: KeyUsage) => {
+export { gcm, hkdf };
+
+export const wrapKeyFor = async (ckdSecret: Uint8Array, fileId: Uint8Array, usage: KeyUsage) => {
   if (ckdSecret.length !== 48) throw new TypeError('ckdSecret must be the 48-byte G1 point');
   const raw = await hkdf(ckdSecret, fileId, 'annon/pay2/near-ckd/v1');
   return subtle.importKey('raw', raw, 'AES-KW', false, [usage]);
 };
 
 /** Spec 3: binds the layout fields known before `register`, the commitments and the hash list. */
-const bodyHash = (
+export const bodyHash = (
   h: Pick<Header, 'chunkLog2' | 'fileId' | 'metaLen' | 'previewLen' | 'n' | 'commits' | 'hashes'>,
 ) =>
   sha256(
@@ -190,7 +192,7 @@ function fromBase64(s: unknown, maxBytes: number): Bytes {
   return out;
 }
 
-function hexBytes(hex: string | Uint8Array, bytes = 32): Uint8Array {
+export function hexBytes(hex: string | Uint8Array, bytes = 32): Uint8Array {
   const h = typeof hex === 'string' ? hex.replace(/^0x/, '') : '';
   if (
     typeof hex !== 'string'
@@ -231,7 +233,7 @@ export function signedBy(text: string, sig: Uint8Array, address: string): boolea
   }
 }
 
-function sellerAddress(seller: string): string {
+export function sellerAddress(seller: string): string {
   if (!/^0x[0-9a-f]{40}$/i.test(seller)) throw new TypeError('seller must be a 0x EVM address');
   return seller.toLowerCase();
 }
@@ -252,7 +254,7 @@ interface Header {
 }
 
 /** Spec 6, step 1. With `prefixOnly`, stops after the hash list (a preview package). */
-function parseHeader(b: Bytes, prefixOnly = false): Header {
+export function parseHeader(b: Bytes, prefixOnly = false): Header {
   if (b.length < 4 || !MAGIC.every((x, i) => b[i] === x)) fail('bad_magic');
   if (b.length < FIXED) fail('bad_header', 'shorter than the fixed header');
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
@@ -326,7 +328,7 @@ function parseHeader(b: Bytes, prefixOnly = false): Header {
 }
 
 /** Spec 5.1: `u8 len ‖ contractId ‖ wrapped K (40)`. */
-function nearCkd(body: Bytes): { contractId: string; wrapped: Bytes } | undefined {
+export function nearCkd(body: Bytes): { contractId: string; wrapped: Bytes } | undefined {
   const len = body[0] ?? 0;
   if (len < 2 || len > 64 || body.length !== 1 + len + 40) return undefined;
   const contractId = String.fromCharCode(...body.subarray(1, 1 + len));
@@ -344,11 +346,11 @@ function fixedLengths(h: Header): number[] {
 }
 
 /** Spec 3: the chunk count a file of `size` bytes must have. */
-const chunkCount = (size: number, previewLen: number, chunkLog2: number) =>
+export const chunkCount = (size: number, previewLen: number, chunkLog2: number) =>
   1 + (previewLen > 0 ? 1 : 0) + Math.max(1, Math.ceil((size - previewLen) / 2 ** chunkLog2));
 
 /** Spec 3.1, and the checks against the header that need only the metadata. */
-function parseMeta(piece: Bytes, h: Header): FileMeta {
+export function parseMeta(piece: Bytes, h: Header): FileMeta {
   const bad = (why: string) => fail('meta_invalid', why);
   const dv = new DataView(piece.buffer, piece.byteOffset, piece.byteLength);
   const nameLen = dv.getUint16(0);
@@ -384,6 +386,10 @@ export interface Inspected {
   fileId: Bytes;
   /** Whether a `near-ckd/v1` stanza names the trusted contract; `open` needs one. */
   usable: boolean;
+  /** The header, signature included: the bytes `info.header` serves (profile section 7). */
+  header: Bytes;
+  /** `SHA256(header)`, which the download challenge names. */
+  headerHash: Bytes;
 }
 
 /**
@@ -395,14 +401,39 @@ export async function inspect(
   listing: Listing,
   contractId: string,
 ): Promise<Inspected> {
-  const h = await checkPublic(view(file), listing, contractId);
-  const usable = h.stanzas.some(
-    (s) => s.type === NEAR_CKD && nearCkd(s.body)?.contractId === contractId,
-  );
-  return { fileId: h.fileId, usable };
+  return inspected(await checkPublic(view(file), listing, contractId), view(file), contractId);
 }
 
-async function checkPublic(b: Bytes, listing: Listing, contractId: string): Promise<Header> {
+/**
+ * Spec 6, steps 1 to 3, on the header alone: what a client checks before paying when only the
+ * header is public (profile section 7). `header` must be exactly the header, with no body bytes.
+ * It proves which bytes the buyer pays for, not that a host holds them. Throws `Pay2Error`.
+ */
+export async function inspectHeader(
+  header: Uint8Array,
+  listing: Listing,
+  contractId: string,
+): Promise<Inspected> {
+  const b = view(header);
+  const h = await checkSigned(b, listing, contractId);
+  if (b.length !== h.headerLen) fail('bad_header', 'expected the header alone');
+  return inspected(h, b, contractId);
+}
+
+const inspected = async (h: Header, b: Bytes, contractId: string): Promise<Inspected> => {
+  const header = copy(b.subarray(0, h.headerLen));
+  return {
+    fileId: h.fileId,
+    usable: h.stanzas.some(
+      (s) => s.type === NEAR_CKD && nearCkd(s.body)?.contractId === contractId,
+    ),
+    header,
+    headerHash: await sha256(header),
+  };
+};
+
+/** Spec 6, steps 1 to 3. */
+async function checkSigned(b: Bytes, listing: Listing, contractId: string): Promise<Header> {
   const seller = sellerAddress(listing.seller);
   const h = await checkRegistration(parseHeader(b), listing);
   const signed = b.subarray(0, h.headerLen - SIG);
@@ -410,6 +441,11 @@ async function checkPublic(b: Bytes, listing: Listing, contractId: string): Prom
   if (!signedBy(text, b.subarray(h.headerLen - SIG, h.headerLen), seller)) {
     fail('seller_signature_invalid');
   }
+  return h;
+}
+
+async function checkPublic(b: Bytes, listing: Listing, contractId: string): Promise<Header> {
+  const h = await checkSigned(b, listing, contractId);
   const lengths = fixedLengths(h);
   const body = b.subarray(h.headerLen);
   const last = body.length - lengths.reduce((s, x) => s + x, 0);
@@ -425,7 +461,7 @@ async function checkPublic(b: Bytes, listing: Listing, contractId: string): Prom
 }
 
 /** Spec 6, step 2. */
-async function checkRegistration(
+export async function checkRegistration(
   h: Header,
   listing: Pick<Listing, 'fileId' | 'cipherHash'>,
 ): Promise<Header> {
