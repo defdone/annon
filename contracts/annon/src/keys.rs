@@ -144,22 +144,14 @@ impl Annon {
     pub fn reopen_text(&self, args: ReopenArgs) -> String {
         let id = bytes::<32>(&args.purchase_id, "purchase_id");
         let rec = self.purchase(&id);
-        format!(
-            "Annon: open a purchased file again\n\
-             contract: {}\n\
-             purchase: {}\n\
-             file: {}\n\
-             recovery: {}\n\
-             new key: {}\n\
-             nonce: {}\n\
-             valid until: {}",
-            env::current_account_id(),
-            hex0x(&id),
-            hex0x(&rec.file_id),
-            rec.recovery.text(),
-            hex0x(&bytes::<48>(&args.fresh_key, "fresh_key")),
-            hex0x(&bytes::<32>(&args.nonce, "nonce")),
-            utc(args.deadline),
+        reopen_text_for(
+            &env::current_account_id(),
+            &id,
+            &rec.file_id,
+            &rec.recovery,
+            &bytes::<48>(&args.fresh_key, "fresh_key"),
+            &bytes::<32>(&args.nonce, "nonce"),
+            args.deadline,
         )
     }
 
@@ -215,6 +207,34 @@ impl Annon {
             buyer_key: hex0x(&key),
         })
     }
+}
+
+/// The text a purchase's recovery identity authorizes to add a grant for `key`.
+pub(crate) fn reopen_text_for(
+    contract: &near_sdk::AccountId,
+    id: &[u8; 32],
+    file_id: &[u8; 32],
+    recovery: &Identity,
+    key: &[u8; 48],
+    nonce: &[u8; 32],
+    deadline: u64,
+) -> String {
+    format!(
+        "Annon: open a purchased file again\n\
+         contract: {contract}\n\
+         purchase: {}\n\
+         file: {}\n\
+         recovery: {}\n\
+         new key: {}\n\
+         nonce: {}\n\
+         valid until: {}",
+        hex0x(id),
+        hex0x(file_id),
+        recovery.text(),
+        hex0x(key),
+        hex0x(nonce),
+        utc(deadline),
+    )
 }
 
 #[cfg(test)]

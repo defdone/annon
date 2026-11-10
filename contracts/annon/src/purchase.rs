@@ -87,7 +87,7 @@ pub enum Parsed {
 }
 
 /// The refund identity from the fixed prefix, read without parsing the rest.
-fn refund_prefix(msg: &str) -> Option<Identity> {
+pub(crate) fn refund_prefix(msg: &str) -> Option<Identity> {
     let head = &msg.as_bytes()[..msg.len().min(MAX_PREFIX)];
     let head = std::str::from_utf8(head).ok().or_else(|| {
         // A multi-byte character cut at the bound: the prefix is ASCII, so the valid part is enough.

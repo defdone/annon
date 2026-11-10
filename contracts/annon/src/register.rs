@@ -175,6 +175,10 @@ impl Annon {
         if let Some(why) = terms.problem(&self.network, &self.near_usdc) {
             env::panic_str(why);
         }
+        require!(
+            terms.base.as_ref().is_none_or(|b| b.usdc == self.usdc),
+            "the Base price must be in the configured USDC"
+        );
         require!(now() <= args.deadline, "signature expired");
         require!(
             terms.seller.authorized(
@@ -284,21 +288,37 @@ impl Annon {
 
     pub fn reopen_seller_text(&self, args: SellerArgs) -> String {
         let file_id = bytes::<32>(&args.file_id, "file_id");
-        format!(
-            "Annon: open a file again\n\
-             Signing this lets whoever holds the one-time key below open the file.\n\
-             contract: {}\n\
-             file: {}\n\
-             seller: {}\n\
-             one-time key: {}\n\
-             valid until: {}",
-            env::current_account_id(),
-            hex0x(&file_id),
-            self.file(&file_id).terms.seller.text(),
-            hex0x(&bytes::<48>(args.key.as_deref().unwrap_or(""), "key")),
-            utc(args.deadline),
+        reopen_seller_text_for(
+            &env::current_account_id(),
+            &file_id,
+            &self.file(&file_id).terms.seller,
+            &bytes::<48>(args.key.as_deref().unwrap_or(""), "key"),
+            args.deadline,
         )
     }
+}
+
+/// The text a seller authorizes to get the key of `file_id` again, for `key`.
+pub(crate) fn reopen_seller_text_for(
+    contract: &AccountId,
+    file_id: &[u8; 32],
+    seller: &Identity,
+    key: &[u8; 48],
+    deadline: u64,
+) -> String {
+    format!(
+        "Annon: open a file again\n\
+         Signing this lets whoever holds the one-time key below open the file.\n\
+         contract: {contract}\n\
+         file: {}\n\
+         seller: {}\n\
+         one-time key: {}\n\
+         valid until: {}",
+        hex0x(file_id),
+        seller.text(),
+        hex0x(key),
+        utc(deadline),
+    )
 }
 
 #[cfg(test)]
@@ -552,6 +572,12 @@ mod tests {
     #[should_panic(expected = "split shares must be above 0 and sum to 10000 bps")]
     fn rejects_shares_that_do_not_add_up() {
         refused(|a| a.terms.near.recipients[1].bps = 400);
+    }
+
+    #[test]
+    #[should_panic(expected = "the Base price must be in the configured USDC")]
+    fn rejects_a_base_price_in_another_token() {
+        refused(|a| a.terms.base.as_mut().unwrap().usdc = PAY_TO.into());
     }
 
     #[test]

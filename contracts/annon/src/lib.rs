@@ -30,6 +30,8 @@ mod terms;
 mod tests;
 mod text;
 mod unlock;
+#[cfg(test)]
+mod vectors;
 
 use evm::{bytes, hex0x};
 use merkle::Accumulator;

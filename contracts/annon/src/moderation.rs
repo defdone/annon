@@ -56,17 +56,11 @@ impl Annon {
     /// The exact text a seller authorizes to stop selling a file.
     pub fn stop_sales_text(&self, args: SellerArgs) -> String {
         let file_id = bytes::<32>(&args.file_id, "file_id");
-        format!(
-            "Annon: stop selling a file\n\
-             Signing this is final: the file can't be sold again. Past buyers keep access.\n\
-             contract: {}\n\
-             file: {}\n\
-             seller: {}\n\
-             valid until: {}",
-            env::current_account_id(),
-            hex0x(&file_id),
-            self.file(&file_id).terms.seller.text(),
-            utc(args.deadline),
+        stop_sales_text_for(
+            &env::current_account_id(),
+            &file_id,
+            &self.file(&file_id).terms.seller,
+            args.deadline,
         )
     }
 
@@ -155,6 +149,26 @@ pub(crate) fn reason(code: u8) -> Option<TakedownReason> {
 
 fn now() -> u64 {
     env::block_timestamp() / 1_000_000_000
+}
+
+/// The text a seller authorizes to stop selling `file_id`.
+pub(crate) fn stop_sales_text_for(
+    contract: &near_sdk::AccountId,
+    file_id: &[u8; 32],
+    seller: &crate::identity::Identity,
+    deadline: u64,
+) -> String {
+    format!(
+        "Annon: stop selling a file\n\
+         Signing this is final: the file can't be sold again. Past buyers keep access.\n\
+         contract: {contract}\n\
+         file: {}\n\
+         seller: {}\n\
+         valid until: {}",
+        hex0x(file_id),
+        seller.text(),
+        utc(deadline),
+    )
 }
 
 #[cfg(test)]
