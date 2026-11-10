@@ -1,27 +1,22 @@
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
-import { getAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { createSiweMessage, parseSiweMessage } from 'viem/siwe';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seal, sha256 } from '../envelope/pay2.js';
+import { checksumAddress, DownloadError, download } from './download.js';
+import { verifyBuyerProof } from './proof.js';
 import {
-  AUTH_SCHEME,
-  type Challenge,
-  checksumAddress,
-  DownloadError,
-  type DownloadTerms,
-  download,
-  downloadMessage,
-  newChallenge,
-  verifyDownload,
-} from './download.js';
+  readSignIn,
+  type SignInChallenge,
+  signInChallenge,
+  signInExtension,
+  verifySignIn,
+} from './siwx.js';
 
 const CONTRACT = 'v1.annon.defdone.near';
 const FILE = `0x${'11'.repeat(32)}`;
 const buyer = privateKeyToAccount(`0x${'42'.repeat(32)}`);
 const stranger = privateKeyToAccount(`0x${'43'.repeat(32)}`);
 const seller = privateKeyToAccount(`0x${'44'.repeat(32)}`);
-const NOW = 1_800_000_000;
 const hex = (b: Uint8Array) => `0x${Buffer.from(b).toString('hex')}`;
 const NOW_REAL = () => Math.floor(Date.now() / 1000);
 
@@ -42,227 +37,21 @@ const PAY2 = await sealed.finish({
 const HEADER = PAY2.subarray(0, new DataView(PAY2.buffer, PAY2.byteOffset).getUint32(8));
 const HEADER_HASH = hex(await sha256(HEADER));
 const URL_ = 'https://files.example.com/f/1';
-const terms: DownloadTerms = {
-  domain: 'files.example.com',
-  uri: URL_,
-  contractId: CONTRACT,
-  fileId: FILE,
-  headerHash: HEADER_HASH,
-};
 
-// NEAR: is_buyer answers from this set, get_file from this record, as the contract would at
-// final state.
+// The wallets the fake host counts as buyers (on a real host: is_buyer on NEAR).
 let buyers: Set<string>;
-let fileView: Record<string, unknown> | null;
-const nearCalls: unknown[] = [];
 beforeEach(() => {
   buyers = new Set([buyer.address.toLowerCase()]);
-  fileView = {
-    seller: seller.address.toLowerCase(),
-    price: '10000',
-    pay_to: seller.address.toLowerCase(),
-    cipher_hash: `0x${'22'.repeat(32)}`,
-    moderator: null,
-    sales_stopped_at: null,
-    taken_down: null,
-  };
-  nearCalls.length = 0;
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (_url: string, init: { body: string }) => {
-      const b = JSON.parse(init.body);
-      const args = JSON.parse(Buffer.from(b.params.args_base64, 'base64').toString());
-      nearCalls.push({ ...b.params, args });
-      const answer =
-        b.params.method_name === 'get_file'
-          ? fileView
-          : b.params.method_name === 'is_buyer' && buyers.has(args.wallet);
-      return {
-        ok: true,
-        json: async () => ({
-          jsonrpc: '2.0',
-          id: b.id,
-          result: { result: [...Buffer.from(JSON.stringify(answer))] },
-        }),
-      };
-    }),
-  );
 });
 afterEach(() => vi.unstubAllGlobals());
 
-const codeOf = (p: Promise<unknown>) =>
-  p.then(
-    () => 'ok',
-    (e: unknown) => (e instanceof DownloadError ? e.code : `${(e as Error).message}`),
-  );
-
-describe('the EIP-4361 message against viem', () => {
-  it('is exactly the message viem builds, and parses back to the same fields', () => {
-    for (let i = 0; i < 20; i++) {
-      const address = privateKeyToAccount(`0x${(i + 1).toString(16).padStart(64, '0')}`).address;
-      const c: Challenge = {
-        nonce: `n0nce${i}abcdef`,
-        issuedAt: NOW + i,
-        expiresAt: NOW + i + 120,
-      };
-      const fileId = `0x${i.toString(16).padStart(64, '0')}`;
-      const t = { ...terms, fileId, uri: `https://files.example.com/f/${i}?x=${i}` };
-      const ours = downloadMessage(t, address.toLowerCase(), c);
-      expect(ours).toBe(
-        createSiweMessage({
-          domain: t.domain,
-          address,
-          statement: 'Download an Annon file you bought.',
-          uri: t.uri,
-          version: '1',
-          chainId: 8453,
-          nonce: c.nonce,
-          issuedAt: new Date(c.issuedAt * 1000),
-          expirationTime: new Date(c.expiresAt * 1000),
-          resources: [`urn:annon:v1:${CONTRACT}:${fileId}:${HEADER_HASH}`],
-        }),
-      );
-      expect(parseSiweMessage(ours)).toMatchObject({ address, domain: t.domain, nonce: c.nonce });
-    }
-  });
-
+describe('checksumAddress', () => {
   it('checksums addresses as EIP-55 does', () => {
-    for (let i = 0; i < 50; i++) {
-      const a = hex(Uint8Array.from({ length: 20 }, (_, j) => (i * 37 + j * 11) & 0xff));
-      expect(checksumAddress(a)).toBe(getAddress(a));
-    }
-  });
-
-  it('refuses terms it cannot bind', () => {
-    const c = newChallenge(NOW);
-    for (const t of [
-      { ...terms, fileId: FILE.toUpperCase() },
-      { ...terms, headerHash: '0x12' },
-      { ...terms, contractId: 'Bad Account' },
-      { ...terms, uri: 'https://other.example.com/f/1' },
-      { ...terms, uri: '/f/1' },
-    ]) {
-      expect(() => downloadMessage(t, buyer.address, c)).toThrow(TypeError);
-    }
-    expect(() => downloadMessage(terms, buyer.address, { ...c, nonce: 'short' })).toThrow();
-  });
-});
-
-describe('verifyDownload (host)', () => {
-  let store: Map<string, Challenge>;
-  const take = async (n: string) => {
-    const c = store.get(n) ?? null;
-    store.delete(n);
-    return c;
-  };
-  const issue = () => {
-    const c = newChallenge(NOW);
-    store.set(c.nonce, c);
-    return c;
-  };
-  const auth = async (c: Challenge, signer = buyer, claimed = signer.address, t = terms) =>
-    `${AUTH_SCHEME} ${Buffer.from(
-      JSON.stringify({
-        address: claimed,
-        nonce: c.nonce,
-        signature: await signer.signMessage({ message: downloadMessage(t, claimed, c) }),
-      }),
-    ).toString('base64url')}`;
-  const verify = (h: string | null, now = NOW + 1) =>
-    verifyDownload(h, { ...terms, nearRpc: 'https://near.rpc', take, now });
-  beforeEach(() => {
-    store = new Map();
-  });
-
-  it('lets the buyer in, once per challenge, after reading is_buyer at final state', async () => {
-    const c = issue();
-    const h = await auth(c);
-    expect(await verify(h)).toEqual({ wallet: buyer.address.toLowerCase() });
-    expect(nearCalls).toMatchObject([
-      { method_name: 'is_buyer', account_id: CONTRACT, finality: 'final', args: { file_id: FILE } },
-      { method_name: 'get_file', account_id: CONTRACT, finality: 'final', args: { file_id: FILE } },
-    ]);
-    expect(await codeOf(verify(h))).toBe('challenge_invalid');
-  });
-
-  it('refuses a wallet that did not buy', async () => {
-    buyers.clear();
-    expect(await codeOf(verify(await auth(issue())))).toBe('not_buyer');
-  });
-
-  it('refuses a buyer once the file is taken down, but not once sales are stopped', async () => {
-    fileView = { ...fileView, sales_stopped_at: NOW - 100 };
-    expect(await codeOf(verify(await auth(issue())))).toBe('ok');
-    fileView = { ...fileView, taken_down: 'court_order' };
-    expect(await codeOf(verify(await auth(issue())))).toBe('taken_down');
-    fileView = null;
-    expect(await codeOf(verify(await auth(issue())))).toBe('taken_down');
-  });
-
-  it('refuses missing, malformed, expired, early and unknown authorizations', async () => {
-    for (const h of [
-      null,
-      '',
-      'Bearer abc',
-      `${AUTH_SCHEME}`,
-      `${AUTH_SCHEME} %%%`,
-      `${AUTH_SCHEME} ${Buffer.from('{"address":1}').toString('base64url')}`,
-      `${AUTH_SCHEME} a b`,
-    ]) {
-      expect(await codeOf(verify(h)), String(h)).toBe('no_authorization');
-    }
-    const valid = (await auth(issue())).split(' ')[1] as string;
-    expect(await codeOf(verify(`Bearer ${valid}`))).toBe('no_authorization');
-    expect(await codeOf(verify(`${AUTH_SCHEME} ${valid} x`))).toBe('no_authorization');
-    expect(await codeOf(verify(await auth(issue()), NOW + 120))).toBe('challenge_invalid');
-    // A stored challenge that lives longer than 120 s is refused, even inside its window.
-    const long = { nonce: 'longlived1', issuedAt: NOW, expiresAt: NOW + 86_400 };
-    store.set(long.nonce, long);
-    const signed = `${AUTH_SCHEME} ${Buffer.from(
-      JSON.stringify({
-        address: buyer.address,
-        nonce: long.nonce,
-        signature: await buyer.signMessage({
-          message: downloadMessage(terms, buyer.address, { ...long, expiresAt: NOW + 120 }),
-        }),
-      }),
-    ).toString('base64url')}`;
-    expect(await codeOf(verify(signed, NOW + 3600))).toBe('challenge_invalid');
-    expect(await codeOf(verify(await auth(issue()), NOW - 1))).toBe('challenge_invalid');
-    const forged = { nonce: 'neverissued1', issuedAt: NOW, expiresAt: NOW + 120 };
-    expect(await codeOf(verify(await auth(forged)))).toBe('challenge_invalid');
-  });
-
-  it('refuses a signature for anything else: other wallet, host, file, header or contract', async () => {
-    expect(await codeOf(verify(await auth(issue(), stranger, buyer.address)))).toBe(
-      'bad_signature',
+    expect(checksumAddress(buyer.address.toLowerCase())).toBe(buyer.address);
+    expect(checksumAddress(stranger.address.toUpperCase().replace('0X', '0x'))).toBe(
+      stranger.address,
     );
-    for (const t of [
-      { ...terms, domain: 'evil.example.com', uri: 'https://evil.example.com/f/1' },
-      { ...terms, uri: 'https://files.example.com/f/2' },
-      { ...terms, fileId: `0x${'12'.repeat(32)}` },
-      { ...terms, headerHash: `0x${'00'.repeat(32)}` },
-      { ...terms, contractId: 'annon-dev.synthetic.near' },
-    ]) {
-      expect(await codeOf(verify(await auth(issue(), buyer, buyer.address, t)))).toBe(
-        'bad_signature',
-      );
-    }
-    const c = issue();
-    const good = JSON.parse(
-      Buffer.from((await auth(c)).split(' ')[1] as string, 'base64url').toString(),
-    );
-    const flipped = {
-      ...good,
-      signature: `${good.signature.slice(0, -4)}00${good.signature.slice(-2)}`,
-    };
-    store.set(c.nonce, c);
-    expect(
-      await codeOf(
-        verify(`${AUTH_SCHEME} ${Buffer.from(JSON.stringify(flipped)).toString('base64url')}`),
-      ),
-    ).toBe('bad_signature');
-    expect(nearCalls).toHaveLength(0);
+    expect(() => checksumAddress('0x1234')).toThrow(TypeError);
   });
 });
 
@@ -275,43 +64,100 @@ describe('download (buyer)', () => {
     noRange?: boolean;
     contentRange?: (offset: number) => string;
     piece?: number;
-    /** The 401 body, instead of a fresh challenge. */
-    challenge?: () => string;
+    /** The sign-in challenge of the 402, instead of a fresh one. */
+    challenge?: () => SignInChallenge;
     /** End the first response cleanly after this many bytes (no network error). */
     cleanCutAt?: number;
     /** The header hash the host binds, when it serves another header than HEADER. */
     headerHash?: string;
+    /** Answer this many paid requests with settlement_pending (or 503 when `busy`) first. */
+    settling?: number;
+    busy?: boolean;
+    /** The host's configured `resource.url`, when it is spelled unlike the request URL. */
+    resourceUrl?: string;
+    /** The sign-in extension of the 402, instead of the one for `signInChallenge`. */
+    siwx?: (c: SignInChallenge) => unknown;
   };
   const ranges: string[] = [];
+  const asked: Record<string, string>[] = [];
   let bodiesCancelled = 0;
   const signals: AbortSignal[] = [];
+  const b64 = (v: unknown) => Buffer.from(JSON.stringify(v)).toString('base64');
   const host = (o: Host) => {
-    const store = new Map<string, Challenge>();
+    const challenges = new Map<string, SignInChallenge>();
+    const sessions = new Set<string>();
     let responses = 0;
+    let settling = o.settling ?? 0;
     return (async (
       url: string,
       init?: { headers?: Record<string, string>; signal?: AbortSignal },
     ) => {
       if (init?.signal) signals.push(init.signal);
-      const h = init?.headers ?? {};
-      if (!h.authorization) {
-        const c = newChallenge();
-        store.set(c.nonce, c);
-        return new Response(o.challenge?.() ?? JSON.stringify(c), { status: 401 });
-      }
-      await verifyDownload(h.authorization, {
-        ...terms,
-        headerHash: o.headerHash ?? HEADER_HASH,
-        uri: url,
-        nearRpc: 'https://near.rpc',
-        take: async (n) => {
-          const c = store.get(n) ?? null;
-          store.delete(n);
-          return c;
-        },
+      const h = new Headers(init?.headers);
+      const seen: Record<string, string> = {};
+      h.forEach((v, k) => {
+        seen[k] = v;
       });
-      ranges.push(h.range ?? '');
-      const offset = Number(/^bytes=(\d+)-$/.exec(h.range ?? '')?.[1] ?? 0);
+      asked.push(seen);
+      const extra: Record<string, string> = {};
+      let ok = sessions.has(/^Bearer (.+)$/.exec(h.get('authorization') ?? '')?.[1] ?? '');
+      const proof = readSignIn(h.get('sign-in-with-x'));
+      if (!ok && proof) {
+        const c = challenges.get(proof.nonce);
+        challenges.delete(proof.nonce);
+        const wallet = c ? verifySignIn(proof, c, NOW_REAL()) : null;
+        if (wallet) {
+          const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('hex');
+          sessions.add(token);
+          extra['annon-session'] = token;
+          ok = buyers.has(wallet);
+        }
+      }
+      const pay = h.get('payment-signature');
+      if (!ok && pay) {
+        if (settling > 0) {
+          settling--;
+          return o.busy
+            ? new Response(null, { status: 503, headers: { 'retry-after': '1' } })
+            : new Response(null, {
+                status: 402,
+                headers: {
+                  'payment-response': b64({
+                    success: false,
+                    errorReason: 'settlement_pending',
+                    transaction: `0x${'cc'.repeat(32)}`,
+                    network: 'eip155:8453',
+                  }),
+                },
+              });
+        }
+        const key = JSON.parse(Buffer.from(pay, 'base64').toString()).extensions.annon.info
+          .buyerKey;
+        ok = verifyBuyerProof(key, o.resourceUrl ?? url, h.get('annon-buyer-proof') ?? '');
+      }
+      if (!ok) {
+        const c =
+          o.challenge?.() ??
+          signInChallenge(url, {
+            contractId: CONTRACT,
+            fileId: FILE,
+            headerHash: o.headerHash ?? HEADER_HASH,
+          });
+        challenges.set(c.nonce, c);
+        return new Response(null, {
+          status: 402,
+          headers: {
+            ...extra,
+            'payment-required': b64({
+              x402Version: 2,
+              accepts: [],
+              extensions: { 'sign-in-with-x': o.siwx?.(c) ?? signInExtension(c) },
+            }),
+          },
+        });
+      }
+      ranges.push(h.get('range') ?? '');
+      const offset = Number(/^bytes=(\d+)-$/.exec(h.get('range') ?? '')?.[1] ?? 0);
       const body = o.noRange ? o.file : o.file.subarray(offset);
       const piece = o.piece ?? 5000;
       const first = responses++ === 0;
@@ -337,34 +183,29 @@ describe('download (buyer)', () => {
       });
       return new Response(stream, {
         status: o.noRange ? 200 : 206,
-        headers: o.noRange
-          ? {}
-          : {
-              'content-range':
-                o.contentRange?.(offset) ?? `bytes ${offset}-${o.file.length - 1}/${o.file.length}`,
-            },
+        headers: {
+          ...extra,
+          ...(o.noRange
+            ? {}
+            : {
+                'content-range':
+                  o.contentRange?.(offset) ??
+                  `bytes ${offset}-${o.file.length - 1}/${o.file.length}`,
+              }),
+        },
       });
     }) as unknown as typeof fetch;
   };
   let signatures = 0;
-  const get = async (o: Host, retries?: number, header = HEADER) => {
+  const wallet = (who = buyer) => ({
+    address: who.address,
+    signMessage: (message: string) => {
+      signatures++;
+      return who.signMessage({ message });
+    },
+  });
+  const drain = async (s: ReadableStream<Uint8Array>) => {
     const got: Uint8Array[] = [];
-    signatures = 0;
-    const s = download({
-      url: URL_,
-      contractId: CONTRACT,
-      fileId: FILE,
-      header,
-      wallet: {
-        address: buyer.address,
-        signMessage: (message) => {
-          signatures++;
-          return buyer.signMessage({ message });
-        },
-      },
-      fetch: host(o),
-      ...(retries === undefined ? {} : { retries }),
-    });
     const r = s.getReader();
     try {
       for (;;) {
@@ -376,9 +217,24 @@ describe('download (buyer)', () => {
       return { got, error: e instanceof DownloadError ? e.code : (e as Error).message };
     }
   };
+  const get = async (o: Host, retries?: number, header = HEADER) => {
+    signatures = 0;
+    return drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header,
+        wallet: wallet(),
+        fetch: host(o),
+        ...(retries === undefined ? {} : { retries }),
+      }),
+    );
+  };
   const joined = (parts: Uint8Array[]) => Buffer.concat(parts.map((p) => Buffer.from(p)));
   beforeEach(() => {
     ranges.length = 0;
+    asked.length = 0;
   });
 
   it('gets the exact file, header first, with a Range from the end of the header', async () => {
@@ -394,6 +250,8 @@ describe('download (buyer)', () => {
     expect(joined(r.got).equals(Buffer.from(PAY2))).toBe(true);
     // The metadata chunk (256 + 16) and the first data chunk (65536 + 16) were checked.
     expect(ranges).toEqual([`bytes=${HEADER.length}-`, `bytes=${HEADER.length + 272 + 65552}-`]);
+    // The resume used the session of the first sign-in: one signature for the whole download.
+    expect(signatures).toBe(1);
   });
 
   it('resumes from a host without Range by skipping what it has, even mid-read', async () => {
@@ -453,24 +311,240 @@ describe('download (buyer)', () => {
     expect(r.error).toBe('file_mismatch');
   });
 
-  it('refuses a challenge that is too large, too long-lived, expired or with a huge nonce', async () => {
+  const SECRET = Uint8Array.from(Buffer.from(7n.toString(16).padStart(64, '0'), 'hex'));
+  const payment = (url = URL_) => ({
+    header: b64({
+      x402Version: 2,
+      resource: { url },
+      extensions: {
+        annon: { info: { buyerKey: hex(bls.G1.Point.BASE.multiply(7n).toBytes(true)) } },
+      },
+    }),
+    secret: SECRET,
+  });
+  const quick = { wait: async () => {} };
+
+  it('gets the file with the payment, proving the one-time key, and no wallet prompt', async () => {
+    signatures = 0;
+    const r = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        payment: payment(),
+        fetch: host({ file: PAY2 }),
+      }),
+    );
+    expect(r.error).toBeUndefined();
+    expect(joined(r.got).equals(Buffer.from(PAY2))).toBe(true);
+    expect(signatures).toBe(0);
+    expect(asked[0]?.['annon-buyer-proof']).toMatch(/^[A-Za-z0-9_-]{128}$/);
+  });
+
+  it('signs the advertised resource.url as written, when it names the request URL another way', async () => {
+    const advertised = 'HTTPS://FILES.EXAMPLE.COM:443/f/1';
+    const r = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        payment: payment(advertised),
+        fetch: host({ file: PAY2, resourceUrl: advertised }),
+      }),
+    );
+    expect(r.error).toBeUndefined();
+    expect(joined(r.got).equals(Buffer.from(PAY2))).toBe(true);
+  });
+
+  it('never proves the key for another resource than the file URL', () => {
+    expect(() =>
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        payment: payment('https://evil.example/f/1'),
+      }),
+    ).toThrow(/another resource/);
+  });
+
+  it('asks again while the payment settles (402 pending or 503), then gets the file', async () => {
+    for (const busy of [false, true]) {
+      const r = await drain(
+        download({
+          url: URL_,
+          contractId: CONTRACT,
+          fileId: FILE,
+          header: HEADER,
+          payment: payment(),
+          fetch: host({ file: PAY2, settling: 3, busy }),
+          ...quick,
+        }),
+      );
+      expect(r.error).toBeUndefined();
+      expect(joined(r.got).equals(Buffer.from(PAY2))).toBe(true);
+    }
+    // It waits as long as the host says (Retry-After), else 3 s.
+    for (const [busy, ms] of [
+      [true, 1000],
+      [false, 3000],
+    ] as const) {
+      const waits: number[] = [];
+      await drain(
+        download({
+          url: URL_,
+          contractId: CONTRACT,
+          fileId: FILE,
+          header: HEADER,
+          payment: payment(),
+          fetch: host({ file: PAY2, settling: 2, busy }),
+          wait: async (w) => {
+            waits.push(w);
+          },
+        }),
+      );
+      expect(waits).toEqual([ms, ms]);
+    }
+    const stuck = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        payment: payment(),
+        fetch: host({ file: PAY2, settling: 100 }),
+        settleTries: 4,
+        ...quick,
+      }),
+    );
+    expect(stuck.error).toBe('settling');
+  });
+
+  it('signs in once and reuses the session for the next download on the host', async () => {
+    let token = '';
+    const fetcher = host({ file: PAY2 });
+    const first = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        wallet: wallet(),
+        onSession: (t) => {
+          token = t;
+        },
+        fetch: fetcher,
+      }),
+    );
+    expect(first.error).toBeUndefined();
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    signatures = 0;
+    const second = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        session: token,
+        wallet: wallet(),
+        fetch: fetcher,
+      }),
+    );
+    expect(second.error).toBeUndefined();
+    expect(signatures).toBe(0);
+    // A session the host does not know: the client signs in again.
+    const third = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        session: 'ab'.repeat(32),
+        wallet: wallet(),
+        fetch: fetcher,
+      }),
+    );
+    expect(third.error).toBeUndefined();
+    expect(signatures).toBe(1);
+  });
+
+  it('says not_authorized for a wallet that did not buy, and with nothing to sign in with', async () => {
+    signatures = 0;
+    const r = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        wallet: wallet(stranger),
+        fetch: host({ file: PAY2 }),
+      }),
+    );
+    expect(r.error).toBe('not_authorized');
+    const none = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        fetch: host({ file: PAY2 }),
+      }),
+    );
+    expect(none.error).toBe('not_authorized');
+  });
+
+  it('refuses a sign-in challenge for another host, URL, file or header, out of time, or malformed', async () => {
     const t = NOW_REAL();
-    for (const body of [
-      // A valid challenge, padded past 1 KiB: refused before it is parsed or signed.
-      `${JSON.stringify({ nonce: 'abcdefgh', issuedAt: t, expiresAt: t + 60 })}${' '.repeat(2000)}`,
-      JSON.stringify({ nonce: 'abcdefgh', issuedAt: t, expiresAt: t + 86_400 }),
-      JSON.stringify({ nonce: 'abcdefgh', issuedAt: t - 300, expiresAt: t - 200 }),
-      JSON.stringify({ nonce: 'a'.repeat(65), issuedAt: t, expiresAt: t + 60 }),
-      'not json',
-    ]) {
-      const r = await get({ file: PAY2, challenge: () => body });
-      expect(r.error, body.slice(0, 40)).toBe('bad_response');
-      expect(signatures).toBe(0);
+    const good = () =>
+      signInChallenge(URL_, { contractId: CONTRACT, fileId: FILE, headerHash: HEADER_HASH }, t);
+    const iso = (s: number) => new Date(s * 1000).toISOString();
+    for (const [name, c] of [
+      ['other domain', { ...good(), domain: 'evil.example' }],
+      ['other uri', { ...good(), uri: 'https://files.example.com/f/2' }],
+      [
+        'other file',
+        signInChallenge(
+          URL_,
+          { contractId: CONTRACT, fileId: `0x${'12'.repeat(32)}`, headerHash: HEADER_HASH },
+          t,
+        ),
+      ],
+      [
+        'other header',
+        signInChallenge(
+          URL_,
+          { contractId: CONTRACT, fileId: FILE, headerHash: `0x${'33'.repeat(32)}` },
+          t,
+        ),
+      ],
+      [
+        'expired',
+        signInChallenge(
+          URL_,
+          { contractId: CONTRACT, fileId: FILE, headerHash: HEADER_HASH },
+          t - 600,
+        ),
+      ],
+      [
+        'from the future',
+        signInChallenge(
+          URL_,
+          { contractId: CONTRACT, fileId: FILE, headerHash: HEADER_HASH },
+          t + 600,
+        ),
+      ],
+      ['too long-lived', { ...good(), expirationTime: iso(t + 3600) }],
+      ['bad nonce', { ...good(), nonce: 'xyz' }],
+    ] as const) {
+      const r = await get({ file: PAY2, challenge: () => c as SignInChallenge });
+      expect(r.error, name).toBe('bad_response');
+      expect(signatures, name).toBe(0);
     }
   });
 
-  it('does not retry when the wallet refuses, and refuses a challenge issued in the future', async () => {
-    let asks = 0;
+  it('does not retry when the wallet refuses', async () => {
     let requests = 0;
     const fetcher = host({ file: PAY2 });
     const s = download({
@@ -481,7 +555,6 @@ describe('download (buyer)', () => {
       wallet: {
         address: buyer.address,
         signMessage: async () => {
-          asks++;
           throw new Error('User rejected request');
         },
       },
@@ -493,40 +566,30 @@ describe('download (buyer)', () => {
     const reader = s.getReader();
     await reader.read();
     await expect(reader.read()).rejects.toMatchObject({ code: 'wallet_refused' });
-    expect([asks, requests]).toEqual([1, 1]);
-    const t = NOW_REAL();
-    const future = JSON.stringify({ nonce: 'abcdefgh', issuedAt: t + 600, expiresAt: t + 660 });
-    const r = await get({ file: PAY2, challenge: () => future });
-    expect(r.error).toBe('bad_response');
-    expect(signatures).toBe(0);
+    expect(requests).toBe(1);
   });
 
-  it('stops everything when cancelled, even while the challenge request is pending', async () => {
+  it('stops everything when cancelled, even while the first request is pending', async () => {
     // A fetch that honours the abort signal, and one that ignores it: neither may lead to a signature.
     for (const honours of [true, false]) {
       let release: () => void = () => {};
       let requests = 0;
-      let asks = 0;
-      const fetcher = (async (_u: string, init?: { signal?: AbortSignal }) => {
+      const inner = host({ file: PAY2 });
+      const fetcher = (async (u: string, init?: { signal?: AbortSignal }) => {
         requests++;
         await new Promise<void>((r) => {
           release = r;
         });
         if (honours && init?.signal?.aborted) throw new DOMException('aborted', 'AbortError');
-        return new Response(JSON.stringify(newChallenge()), { status: 401 });
+        return inner(u, init as never);
       }) as unknown as typeof fetch;
+      signatures = 0;
       const s = download({
         url: URL_,
         contractId: CONTRACT,
         fileId: FILE,
         header: HEADER,
-        wallet: {
-          address: buyer.address,
-          signMessage: async (message) => {
-            asks++;
-            return buyer.signMessage({ message });
-          },
-        },
+        wallet: wallet(),
         fetch: fetcher,
       });
       const reader = s.getReader();
@@ -537,11 +600,11 @@ describe('download (buyer)', () => {
       release();
       await next;
       await new Promise((r) => setTimeout(r, 50));
-      expect([requests, asks]).toEqual([1, 0]);
+      expect([requests, signatures]).toEqual([1, 0]);
     }
   });
 
-  it('downloads only over https, plain http only on this machine', () => {
+  it("downloads only over https, plain http only on this machine, and signs in only on the page's origin", () => {
     const opts = {
       contractId: CONTRACT,
       fileId: FILE,
@@ -550,8 +613,71 @@ describe('download (buyer)', () => {
     };
     expect(() => download({ ...opts, url: 'http://files.example.com/f/1' })).toThrow(/https/);
     expect(() => download({ ...opts, url: 'http://localhost:8080/f/1' })).not.toThrow();
-    vi.stubGlobal('location', { host: 'market.example.com' });
-    expect(() => download({ ...opts, url: URL_ })).toThrow(/page's host/);
+    vi.stubGlobal('location', { origin: 'https://market.example.com' });
+    expect(() => download({ ...opts, url: URL_ })).toThrow(/page's origin/);
+  });
+
+  it('refuses a last chunk shorter than its tag, even one the seller signed', async () => {
+    const n = new DataView(HEADER.buffer, HEADER.byteOffset).getUint32(50);
+    const lastAt = HEADER.length + 272 + 3 * 65552;
+    const shortLast = new Uint8Array(5).fill(9);
+    const header = Uint8Array.from(HEADER);
+    header.set(await sha256(shortLast), 54 + 32 * (1 + n - 1));
+    const file = Buffer.concat([header, PAY2.subarray(HEADER.length, lastAt), shortLast]);
+    const r = await get(
+      { file: new Uint8Array(file), headerHash: hex(await sha256(header)) },
+      3,
+      header,
+    );
+    expect(r.error).toBe('file_mismatch');
+  });
+
+  it('refuses a Content-Range whose end comes before its start or at its complete length', async () => {
+    for (const cr of [
+      (o: number) => `bytes ${o}-0/1`,
+      (o: number) => `bytes ${o}-${o + 9}/${o + 9}`,
+    ]) {
+      expect((await get({ file: PAY2, contentRange: cr })).error).toBe('bad_response');
+    }
+  });
+
+  it('asks without cookies and never follows a redirect', async () => {
+    const inits: RequestInit[] = [];
+    const h = host({ file: PAY2 });
+    const r = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        payment: payment(),
+        fetch: ((u: string, i: RequestInit) => {
+          inits.push(i);
+          return h(u, i as never);
+        }) as never,
+      }),
+    );
+    expect(r.error).toBeUndefined();
+    expect(inits.length).toBeGreaterThan(0);
+    expect(inits.every((i) => i.redirect === 'error' && i.credentials === 'omit')).toBe(true);
+  });
+
+  it('signs in only when the host takes Base and EIP-191', async () => {
+    for (const siwx of [
+      (c: SignInChallenge) => ({
+        info: c,
+        supportedChains: [{ chainId: 'eip155:1', type: 'eip191' }],
+      }),
+      (c: SignInChallenge) => ({ info: c }),
+      (c: SignInChallenge) => ({
+        info: c,
+        supportedChains: [{ chainId: 'eip155:8453', type: 'eip1271' }],
+      }),
+    ]) {
+      const r = await get({ file: PAY2, siwx });
+      expect(r.error).toBe('bad_response');
+      expect(signatures).toBe(0);
+    }
   });
 
   it('refuses bytes after the file, a cut file, and a resume from another offset', async () => {
@@ -568,18 +694,17 @@ describe('download (buyer)', () => {
     // The rejected response is not left open: every request of the download is aborted.
     expect(signals.length).toBeGreaterThan(0);
     expect(signals.every((sg) => sg.aborted)).toBe(true);
-    const open = (async () =>
-      new Response(JSON.stringify(newChallenge()), { status: 200 })) as unknown as typeof fetch;
-    const s = download({
-      url: URL_,
-      contractId: CONTRACT,
-      fileId: FILE,
-      header: HEADER,
-      wallet: { address: buyer.address, signMessage: (message) => buyer.signMessage({ message }) },
-      fetch: open,
-    });
-    const reader = s.getReader();
-    await reader.read();
-    await expect(reader.read()).rejects.toMatchObject({ code: 'bad_response' });
+    const broken = (async () => new Response('oops', { status: 500 })) as unknown as typeof fetch;
+    const r = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        wallet: wallet(),
+        fetch: broken,
+      }),
+    );
+    expect(r.error).toBe('bad_response');
   });
 });

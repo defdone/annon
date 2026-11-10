@@ -1,44 +1,37 @@
 /**
- * Download after payment (`specs/x402-annon.md`, section 7). The host serves a file only to a
- * wallet that bought it: it issues a single-use challenge, the wallet signs an EIP-4361 message
- * bound to the host, the contract, the file and the header the buyer checked before paying, and
- * the host checks the signature and `is_buyer` on the trusted contract at final state. The wire
- * format is in `specs/download.md`.
+ * Downloading a bought file (`specs/download.md`, profile v1.1 section 7). The file is the offer's
+ * `resource.url`. The paid request returns it to the buyer, who proves the purchase's one-time key
+ * (`Annon-Buyer-Proof`); later, the buyer's wallet signs in with x402 sign-in-with-x once and the
+ * host's session covers every download and resume for two hours.
  *
- * The client checks every chunk against the hash list of that header before passing it on, and
- * resumes a broken download with a Range request from the last checked chunk.
+ * The client checks every chunk against the hash list of the header it checked before paying,
+ * and resumes a broken download with a Range request from the last checked chunk.
  */
 import { keccak_256 } from '@noble/hashes/sha3.js';
+import { type Bytes, copy, equal, parseHeader, sha256, TAG } from '../envelope/pay2.js';
+import { BUYER_PROOF_HEADER, buyerProof, sameResource } from './proof.js';
 import {
-  type Bytes,
-  copy,
-  equal,
-  hexBytes,
-  parseHeader,
-  sha256,
-  signedBy,
-  TAG,
-} from '../envelope/pay2.js';
-import { getFile, isBuyer } from '../near/rpc.js';
+  fileUrn,
+  SIGN_IN_HEADER,
+  SIGN_IN_SECONDS,
+  SIGN_IN_WITH_X,
+  type SignInChallenge,
+  signInHeader,
+  signInMessage,
+} from './siwx.js';
 
 export type DownloadErrorCode =
-  /** No or malformed `Authorization`: answer 401 with a new challenge. */
-  | 'no_authorization'
-  /** The challenge is unknown, already used or expired: answer 401 with a new one. */
-  | 'challenge_invalid'
-  /** The signature is not from the wallet named: answer 401. */
-  | 'bad_signature'
-  /** The wallet did not buy this file on the trusted contract: answer 403. */
-  | 'not_buyer'
-  /** The moderator took the file down (or it is not registered): answer 410. */
-  | 'taken_down'
-  /** Client: the host answered something this protocol does not allow. */
+  /** The host answered something this protocol does not allow. */
   | 'bad_response'
-  /** Client: the bytes are not the file whose header was checked before paying. */
+  /** No payment, session or sign-in this host takes: the wallet did not buy, or none was given. */
+  | 'not_authorized'
+  /** The payment is still settling after every retry; send the same payload again later. */
+  | 'settling'
+  /** The bytes are not the file whose header was checked before paying. */
   | 'file_mismatch'
-  /** Client: the wallet did not sign; not retried. */
+  /** The wallet did not sign; not retried. */
   | 'wallet_refused'
-  /** Client: the caller cancelled the download. */
+  /** The caller cancelled the download. */
   | 'cancelled';
 
 export class DownloadError extends Error {
@@ -53,37 +46,6 @@ const fail = (code: DownloadErrorCode, message?: string): never => {
   throw new DownloadError(code, message);
 };
 
-/** What the host issues and keeps until it is used once. Unix seconds. */
-export interface Challenge {
-  nonce: string;
-  issuedAt: number;
-  expiresAt: number;
-}
-
-/** A challenge lives this long: enough to sign, too short to keep. */
-export const CHALLENGE_SECONDS = 120;
-export const AUTH_SCHEME = 'Annon-SIWE';
-
-export function newChallenge(now = Math.floor(Date.now() / 1000)): Challenge {
-  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
-    b.toString(16).padStart(2, '0'),
-  ).join('');
-  return { nonce, issuedAt: now, expiresAt: now + CHALLENGE_SECONDS };
-}
-
-/** What the signature binds, besides the wallet and the challenge. */
-export interface DownloadTerms {
-  /** The host's own authority, from its configuration, never from the request (`files.example`). */
-  domain: string;
-  /** The download URL, as the offer's `info.download` names it. */
-  uri: string;
-  contractId: string;
-  /** 0x and 32 bytes, lowercase. */
-  fileId: string;
-  /** `SHA256` of the complete header served at `info.header`, 0x and lowercase. */
-  headerHash: string;
-}
-
 /** EIP-55: the address with its checksum casing, as EIP-4361 requires. */
 export function checksumAddress(address: string): string {
   if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new TypeError('address must be 0x and 20 bytes');
@@ -97,13 +59,6 @@ export function checksumAddress(address: string): string {
   return out;
 }
 
-const iso = (secs: number) => new Date(secs * 1000).toISOString();
-const validLifetime = (c: Challenge) =>
-  Number.isSafeInteger(c.issuedAt) &&
-  Number.isSafeInteger(c.expiresAt) &&
-  c.expiresAt - c.issuedAt > 0 &&
-  c.expiresAt - c.issuedAt <= CHALLENGE_SECONDS;
-
 /**
  * Gated downloads go over HTTPS only: on plain HTTP anyone on the path reads the body or races the
  * buyer with the intercepted authorization. Plain HTTP only for this machine, in development.
@@ -116,173 +71,58 @@ export function secureUrl(url: string): URL {
   }
   return u;
 }
-const isHash = (s: string) => /^0x[0-9a-f]{64}$/.test(s);
-
-/** The EIP-4361 message the wallet signs for one download. */
-export function downloadMessage(t: DownloadTerms, address: string, c: Challenge): string {
-  if (!isHash(t.fileId) || !isHash(t.headerHash)) {
-    throw new TypeError('fileId and headerHash must be 0x and 32 bytes of lowercase hex');
-  }
-  if (!/^[a-z0-9._-]{2,64}$/.test(t.contractId)) throw new TypeError('bad NEAR account id');
-  if (!/^[a-zA-Z0-9]{8,64}$/.test(c.nonce))
-    throw new TypeError('the nonce must be 8 to 64 alphanumerics');
-  if (!validLifetime(c)) throw new TypeError(`a challenge lives 1 to ${CHALLENGE_SECONDS} s`);
-  // The URI must be absolute and on the same host as the domain the wallet shows.
-  if (new URL(t.uri).host !== t.domain) throw new TypeError('uri must be on domain');
-  return [
-    `${t.domain} wants you to sign in with your Ethereum account:`,
-    checksumAddress(address),
-    '',
-    'Download an Annon file you bought.',
-    '',
-    `URI: ${t.uri}`,
-    'Version: 1',
-    'Chain ID: 8453',
-    `Nonce: ${c.nonce}`,
-    `Issued At: ${iso(c.issuedAt)}`,
-    `Expiration Time: ${iso(c.expiresAt)}`,
-    'Resources:',
-    `- urn:annon:v1:${t.contractId}:${t.fileId}:${t.headerHash}`,
-  ].join('\n');
-}
-
-const b64url = {
-  encode: (s: string) =>
-    btoa(String.fromCharCode(...new TextEncoder().encode(s)))
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, ''),
-  decode: (s: string) =>
-    new TextDecoder('utf-8', { fatal: true }).decode(
-      Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)),
-    ),
-};
-
-/** The `Authorization` header value for a signed challenge. */
-export const authorization = (address: string, nonce: string, signature: string) =>
-  `${AUTH_SCHEME} ${b64url.encode(JSON.stringify({ address, nonce, signature }))}`;
-
-export interface VerifyDownloadOptions extends DownloadTerms {
-  nearRpc: string;
-  /**
-   * Returns the challenge with this nonce and deletes it in the same step (single use), or null.
-   * The host's store; it must be atomic across instances.
-   */
-  take: (nonce: string) => Promise<Challenge | null>;
-  /** Unix seconds; defaults to now. */
-  now?: number;
-}
-
-/**
- * Host side: whether the request may get the file. Returns the buyer's wallet, or throws
- * `DownloadError` (`no_authorization`, `challenge_invalid`, `bad_signature`: answer 401 with a new
- * challenge; `not_buyer`: 403; `taken_down`: 410). Run it for every request, Range requests included.
- */
-export async function verifyDownload(
-  header: string | null | undefined,
-  o: VerifyDownloadOptions,
-): Promise<{ wallet: string }> {
-  const [scheme, token, extra] = (header ?? '').trim().split(/\s+/);
-  if (scheme !== AUTH_SCHEME || !token || extra !== undefined) return fail('no_authorization');
-  let a: { address?: unknown; nonce?: unknown; signature?: unknown };
-  try {
-    a = JSON.parse(b64url.decode(token));
-  } catch {
-    return fail('no_authorization', 'the authorization is not base64url JSON');
-  }
-  if (
-    typeof a?.address !== 'string' ||
-    !/^0x[0-9a-fA-F]{40}$/.test(a.address) ||
-    typeof a.nonce !== 'string' ||
-    typeof a.signature !== 'string'
-  ) {
-    return fail('no_authorization', 'the authorization lacks address, nonce or signature');
-  }
-  // Single use: the challenge is gone after this, whatever the outcome.
-  const c = await o.take(a.nonce);
-  const now = o.now ?? Math.floor(Date.now() / 1000);
-  if (!c || c.nonce !== a.nonce || !validLifetime(c) || now >= c.expiresAt || now < c.issuedAt) {
-    return fail('challenge_invalid', 'unknown, used or expired challenge');
-  }
-  const wallet = a.address.toLowerCase();
-  let sig: Uint8Array;
-  try {
-    sig = hexBytes(a.signature, 65);
-  } catch {
-    return fail('bad_signature');
-  }
-  if (!signedBy(downloadMessage(o, wallet, c), sig, wallet)) return fail('bad_signature');
-  if (!(await isBuyer(o.nearRpc, o.contractId, o.fileId, wallet))) {
-    return fail('not_buyer', 'this wallet did not buy the file');
-  }
-  // is_buyer stays true after a takedown; a takedown blocks the body too. A stop does not: past
-  // buyers keep their purchase.
-  const file = await getFile(o.nearRpc, o.contractId, o.fileId);
-  if (!file || file.takenDown !== null) {
-    return fail('taken_down', 'the file was taken down');
-  }
-  return { wallet };
-}
-
 export interface DownloadOptions {
-  /** `info.download` from the offer. */
+  /** The file: the offer's `resource.url`. */
   url: string;
   contractId: string;
   fileId: string;
   /** The header the buyer checked before paying (`Quote.header`). */
   header: Uint8Array;
-  wallet: { address: string; signMessage(text: string): Promise<string> };
+  /**
+   * The paid request (profile section 7): the recorded `PAYMENT-SIGNATURE` and the purchase's
+   * one-time secret, which signs the buyer proof.
+   */
+  payment?: { header: string; secret: Uint8Array };
+  /** A session this host gave earlier (`Annon-Session`). */
+  session?: string;
+  /** Signs in when there is no payment or session that gets the file. */
+  wallet?: { address: string; signMessage(text: string): Promise<string> };
+  /** Gets the session a sign-in returns, to reuse on this host for two hours. */
+  onSession?: (token: string) => void;
   /** Attempts after a broken connection; each resumes from the last checked chunk. */
   retries?: number;
+  /** How often a payment that is still settling is asked again (default 40). */
+  settleTries?: number;
+  /** Waits between those (default: `Retry-After`, or 3 s). */
+  wait?: (ms: number) => Promise<void>;
   fetch?: typeof fetch;
   /** Unix seconds; defaults to now. */
   now?: () => number;
 }
 
-/** The 401's challenge is small; a host sending more is cut off, not buffered. */
-const MAX_CHALLENGE_BYTES = 1024;
-
-async function readSmall(r: Response): Promise<string> {
-  const reader = r.body?.getReader();
-  if (!reader) return '';
-  const parts: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const x = await reader.read();
-    if (x.done) break;
-    size += x.value.length;
-    if (size > MAX_CHALLENGE_BYTES) {
-      await reader.cancel().catch(() => {});
-      return fail('bad_response', 'the challenge is too large');
-    }
-    parts.push(x.value);
+const b64json = (s: string | null): unknown => {
+  try {
+    return s === null
+      ? null
+      : JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(s), (c) => c.charCodeAt(0))));
+  } catch {
+    return null;
   }
-  const all = new Uint8Array(size);
-  let at = 0;
-  for (const p of parts) {
-    all.set(p, at);
-    at += p.length;
-  }
-  return new TextDecoder().decode(all);
-}
+};
 
 /**
- * Buyer side: the complete PAY2 file, header first, as a stream. Every body chunk is checked
- * against the header's hash list before it is passed on; on any mismatch the stream errors with
- * `file_mismatch` and the caller must discard what it got. The result goes to `openStream` or to
- * storage.
- *
- * In a browser the wallet checks that the message's domain is the page's (EIP-4361), so the
- * download URL must be on the page's own host; a host elsewhere is reached through a same-origin
- * route.
+ * The file as a stream: the header first, then each chunk once its hash matches. Throws
+ * `DownloadError`; a broken connection is retried from the last checked chunk.
  */
 export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   const url = secureUrl(o.url);
-  const page = (globalThis as { location?: { host?: string } }).location?.host;
-  if (page !== undefined && page !== url.host) {
-    throw new TypeError(`in a browser the download must be on this page's host (${page})`);
+  // A browser wallet signs in only for the page's own origin (EIP-4361): the file must be there.
+  const page = (globalThis as { location?: { origin?: string } }).location?.origin;
+  if (o.wallet && page !== undefined && page !== url.origin) {
+    throw new TypeError(`in a browser the file must be on this page's origin (${page})`);
   }
   const now = o.now ?? (() => Math.floor(Date.now() / 1000));
+  const wait = o.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const header = copy(o.header);
   const h = parseHeader(header);
   const lengths = Array.from({ length: h.n - 1 }, (_, i) =>
@@ -303,64 +143,128 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   let offset = header.length; // its first byte in the file
   let sentHeader = false;
   let retries = o.retries ?? 3;
+  let session = o.session;
+  // The buyer proof only for the URL the payment names: never for another host's.
+  // It signs the advertised `resource.url` octets, which the host checks, not the request's spelling.
+  let payment = o.payment;
+  let named = '';
+  if (payment) {
+    const u = (b64json(payment.header) as { resource?: { url?: unknown } } | null)?.resource?.url;
+    if (typeof u !== 'string' || !sameResource(u, o.url)) {
+      throw new TypeError('the payment names another resource than the file URL');
+    }
+    named = u;
+  }
 
   // Where the current response ends, when the host says (Content-Range or Content-Length).
   let pos = 0;
   let end: number | undefined;
 
+  const get = (headers: Record<string, string>) => {
+    live();
+    // No redirects: one could move the request to plain HTTP or another host.
+    // No cookies either: a session travels only in `Authorization` (profile section 9).
+    return fetcher(o.url, {
+      redirect: 'error',
+      credentials: 'omit',
+      signal: abort.signal,
+      headers: { ...headers, range: `bytes=${offset}-` },
+    });
+  };
+  const body = (r: Response) => r.body && (r.status === 200 || r.status === 206);
+
+  /** The response that carries the file, from the payment, a session or a sign-in. */
+  async function authorized(): Promise<Response> {
+    if (payment) {
+      const p = payment;
+      for (let i = 0; ; i++) {
+        const r = await get({
+          'PAYMENT-SIGNATURE': p.header,
+          [BUYER_PROOF_HEADER]: buyerProof(p.secret, named),
+        });
+        if (body(r)) return r;
+        const pending =
+          r.status === 503 ||
+          (r.status === 402 &&
+            (b64json(r.headers.get('PAYMENT-RESPONSE')) as { errorReason?: unknown } | null)
+              ?.errorReason === 'settlement_pending');
+        await r.body?.cancel().catch(() => {});
+        if (!pending) break;
+        if (i + 1 >= (o.settleTries ?? 40))
+          return fail('settling', 'the payment is still settling');
+        const after = Number(r.headers.get('Retry-After'));
+        await wait(Number.isFinite(after) && after > 0 ? Math.min(after, 30) * 1000 : 3000);
+      }
+      // Settled without the body (another copy of the payload came first): sign in instead.
+      payment = undefined;
+    }
+    if (session) {
+      const r = await get({ authorization: `Bearer ${session}` });
+      if (body(r)) return r;
+      await r.body?.cancel().catch(() => {});
+      session = undefined;
+    }
+    if (!o.wallet) return fail('not_authorized', 'no payment, session or wallet gets the file');
+    const bare = await get({});
+    if (body(bare)) return bare;
+    await bare.body?.cancel().catch(() => {});
+    if (bare.status !== 402) return fail('bad_response', `the host answered ${bare.status}`);
+    const pr = b64json(bare.headers.get('PAYMENT-REQUIRED')) as {
+      extensions?: Record<string, { info?: SignInChallenge; supportedChains?: unknown }>;
+    } | null;
+    const ext = pr?.extensions?.[SIGN_IN_WITH_X];
+    const c = ext?.info;
+    // The wallet signs only for a chain the host takes: Base, EIP-191.
+    const base =
+      Array.isArray(ext?.supportedChains) &&
+      ext.supportedChains.some(
+        (x: { chainId?: unknown; type?: unknown }) =>
+          x?.chainId === 'eip155:8453' && x?.type === 'eip191',
+      );
+    const headerHash = `0x${Array.from(await sha256(header), (b) => b.toString(16).padStart(2, '0')).join('')}`;
+    const at = c ? Date.parse(c.issuedAt) / 1000 : Number.NaN;
+    const until = c ? Date.parse(c.expirationTime) / 1000 : Number.NaN;
+    if (
+      !c ||
+      !base ||
+      c.domain !== url.host ||
+      !sameResource(c.uri, o.url) ||
+      c.version !== '1' ||
+      !/^[0-9a-f]{32}$/.test(c.nonce) ||
+      !Array.isArray(c.resources) ||
+      c.resources.length !== 1 ||
+      c.resources[0] !== fileUrn(o.contractId, o.fileId, headerHash) ||
+      !(until > now() && at <= now() + 60 && until - at > 0 && until - at <= SIGN_IN_SECONDS)
+    ) {
+      return fail('bad_response', 'the 402 carries no sign-in challenge for this file');
+    }
+    live();
+    let signature: string;
+    try {
+      signature = await o.wallet.signMessage(signInMessage(c, o.wallet.address));
+    } catch (e) {
+      return fail('wallet_refused', e instanceof Error ? e.message : String(e));
+    }
+    const r = await get({ [SIGN_IN_HEADER]: signInHeader(c, o.wallet.address, signature) });
+    const token = r.headers.get('Annon-Session');
+    if (token && /^[0-9a-f]{64}$/.test(token)) {
+      session = token;
+      o.onSession?.(token);
+    }
+    if (body(r)) return r;
+    await r.body?.cancel().catch(() => {});
+    return fail(
+      'not_authorized',
+      `the host answered ${r.status}: this wallet did not buy the file`,
+    );
+  }
+
   async function request(): Promise<{
     reader: ReadableStreamDefaultReader<Uint8Array>;
     rest: Uint8Array;
   }> {
-    // No redirects: one could move the signed request to plain HTTP or another host.
-    live();
-    const first = await fetcher(o.url, { redirect: 'error', signal: abort.signal });
-    if (first.status !== 401) return fail('bad_response', `expected 401, got ${first.status}`);
-    let c: Challenge | null = null;
-    try {
-      c = JSON.parse(await readSmall(first));
-    } catch (e) {
-      if (e instanceof DownloadError) throw e;
-    }
-    if (
-      !c ||
-      typeof c.nonce !== 'string' ||
-      !/^[a-zA-Z0-9]{8,64}$/.test(c.nonce) ||
-      !validLifetime(c) ||
-      now() >= c.expiresAt ||
-      // The host refuses a challenge before its issue time; 60 s allows for clock skew.
-      c.issuedAt > now() + 60
-    ) {
-      return fail('bad_response', 'the 401 carries no valid challenge');
-    }
-    const terms: DownloadTerms = {
-      domain: new URL(o.url).host,
-      uri: o.url,
-      contractId: o.contractId,
-      fileId: o.fileId,
-      headerHash: `0x${Array.from(await sha256(header), (b) => b.toString(16).padStart(2, '0')).join('')}`,
-    };
-    const message = downloadMessage(terms, o.wallet.address, c);
-    live();
-    let signature: string;
-    try {
-      signature = await o.wallet.signMessage(message);
-    } catch (e) {
-      return fail('wallet_refused', e instanceof Error ? e.message : String(e));
-    }
-    live();
-    const r = await fetcher(o.url, {
-      redirect: 'error',
-      signal: abort.signal,
-      headers: {
-        authorization: authorization(o.wallet.address, c.nonce, signature),
-        range: `bytes=${offset}-`,
-      },
-    });
-    if (!r.body || (r.status !== 206 && r.status !== 200)) {
-      return fail('bad_response', `the host answered ${r.status}`);
-    }
-    const reader = r.body.getReader();
+    const r = await authorized();
+    const reader = (r.body as ReadableStream<Uint8Array>).getReader();
     // A host without Range support sends everything: skip what was already checked.
     if (r.status === 200) {
       const length = Number(r.headers.get('content-length') ?? Number.NaN);
@@ -369,7 +273,14 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
       return { reader, rest: await skip(reader, offset) };
     }
     const range = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(r.headers.get('content-range') ?? '');
-    if (!range || Number(range[1]) !== offset) {
+    // RFC 9110 section 14.4: first <= last < complete length, or the range is invalid.
+    if (
+      !range ||
+      Number(range[1]) !== offset ||
+      Number(range[2]) < offset ||
+      (range[3] !== '*' && Number(range[2]) >= Number(range[3]))
+    ) {
+      await reader.cancel().catch(() => {});
       return fail('bad_response', 'the host resumed from another offset');
     }
     end = Number(range[2]) + 1;

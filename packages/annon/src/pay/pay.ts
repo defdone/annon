@@ -7,6 +7,7 @@
  */
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { sameResource } from '../download/proof.js';
 import { type Inspected, inspect, inspectHeader, Pay2Error } from '../envelope/pay2.js';
 import { type FileInfo, getConfig, getFile, isBuyer } from '../near/rpc.js';
 import {
@@ -66,6 +67,11 @@ export interface PreflightOptions {
   buyer: string;
   /** The 402's `PAYMENT-REQUIRED`, read with `readPaymentRequired`. */
   paymentRequired: PaymentRequired;
+  /**
+   * The URL of the request that got that 402. Its `resource.url` must be this URL, so the buyer
+   * proof is never made for a URL another endpoint advertised (download.md section 3).
+   */
+  url: string;
   /**
    * The PAY2 header served at `extensions.annon.info.header`; the whole file when the offer says
    * `public`. Checked against the registration before anything is signed (profile section 7).
@@ -143,6 +149,10 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
 
   // The payment request: only its own shape here; its values are compared with the contract below.
   const pr = o.paymentRequired;
+  const named = (pr?.resource as { url?: unknown } | undefined)?.url;
+  if (typeof named !== 'string' || !sameResource(named, o.url)) {
+    fail('bad_requirements', 'resource.url is not the URL that answered with this 402');
+  }
   const offers = (Array.isArray(pr?.accepts) ? pr.accepts : []).filter(
     (a) => a?.scheme === ANNON_EXACT && a?.network === BASE_NETWORK,
   );
@@ -153,6 +163,7 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
     version?: unknown;
     assetTransferMethod?: unknown;
     paymentFlow?: unknown;
+    splits?: unknown;
   };
   // The extension is optional; when present it must name the file being bought.
   const info = pr.extensions?.annon?.info;
@@ -185,9 +196,15 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
   if (method !== undefined && method !== 'eip3009') {
     fail('method_mismatch', `the offer is not a plain Annon transfer`);
   }
-  // x402 v2 section 6.1: never sign for a payment flow the client doesn't know.
-  if (extra.paymentFlow !== undefined && extra.paymentFlow !== 'authorization') {
+  // x402 v2 section 6.1: never sign for a payment flow the client doesn't know. Profile v1.1
+  // (`version: 2`) settles before it serves the file; v1 settled after.
+  const flow = extra.paymentFlow ?? 'authorization';
+  if (flow !== (info?.version === 2 ? 'upfront' : 'authorization')) {
     fail('method_mismatch', `unsupported payment flow ${String(extra.paymentFlow)}`);
+  }
+  // A split in the payment itself would take part of it away from the registered pay_to.
+  if (extra.splits !== undefined && !(Array.isArray(extra.splits) && extra.splits.length === 0)) {
+    fail('method_mismatch', 'the offer splits the payment; Annon pays the registered pay_to only');
   }
   if (lower(req.payTo) !== to) {
     fail('recipient_mismatch', 'the payment request pays an address the registration does not');

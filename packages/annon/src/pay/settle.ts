@@ -74,6 +74,12 @@ export interface SettleOptions extends OfferOptions {
   scope?: string;
   /** How long a facilitator call may take before it is aborted; default 50 s. */
   facilitatorTimeoutMs?: number;
+  /**
+   * Called with a purchase's record key and payer before its record is first written (after the
+   * new-payment checks, or once Base shows the payment), so an index of it is never behind the
+   * record. May run more than once for one purchase.
+   */
+  beforeRecord?: (key: string, payer: string) => Promise<void>;
 }
 
 /** The answer to a payload; `paymentResponse` turns it into the `PAYMENT-RESPONSE` a server sends. */
@@ -92,6 +98,8 @@ export type Settlement =
 /** A facilitator call is aborted after this; the lease outlasts it, so no two overlap. */
 const FACILITATOR_TIMEOUT_MS = 50_000;
 const LEASE_MARGIN_SECONDS = 10;
+/** After a facilitator call that did not settle, the next one waits this long. */
+export const RETRY_SECONDS = 5;
 /** The longest window a payload this seller accepts can have (profile section 4). */
 const MAX_WINDOW_SECONDS = 240;
 
@@ -134,6 +142,10 @@ async function blockAt(url: string, t: number): Promise<number> {
  * purchase that can no longer be paid; `settlement_processing` when it is under way or unclear: send
  * the same payload again later.
  */
+/** Where `settle` keeps a purchase: its identity (profile section 10). */
+export const purchaseRecordKey = (usdc: string, payer: string, nonce: string) =>
+  `annon/seller/purchase/${BASE_NETWORK}/${usdc}/${payer}/${nonce}`;
+
 export async function settle(header: string, o: SettleOptions): Promise<Settlement> {
   const file = await getFile(o.nearRpc, o.contractId, o.fileId);
   if (!file) return fail('unknown_file', 'the file is not registered on the Annon contract');
@@ -150,7 +162,7 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
   if (c.paymentId) await bind(o, `annon/seller/id/${scope}/${c.paymentId}`, header, c);
   const timeout = o.facilitatorTimeoutMs ?? FACILITATOR_TIMEOUT_MS;
   const lease = Math.ceil(timeout / 1000) + LEASE_MARGIN_SECONDS;
-  const key = `annon/seller/purchase/${BASE_NETWORK}/${usdc}/${c.payer}/${c.nonce}`;
+  const key = purchaseRecordKey(usdc, c.payer, c.nonce);
   const payTo = file.payTo;
   const price = file.price;
   const onBase = (r: SellerPurchase) =>
@@ -207,6 +219,8 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
       next = { ...base, state: 'unpaid' };
     }
     next = { ...next, revision: r ? r.revision + 1 : 0, leaseUntil: base.leaseUntil };
+    // A purchase first seen already on Base is recorded here: indexed first, as in the loop.
+    if (!r) await o.beforeRecord?.(key, c.payer);
     if (!(await o.store.compareAndSet(key, r, next))) return null;
     if (next.state === 'unpaid') fail('payment_expired', 'this purchase can no longer be paid');
     return answerOf(next);
@@ -241,7 +255,10 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
     // Another request's facilitator call may be running: not a second one now.
     if (r && r.leaseUntil > now()) return answerFrom(r);
     // A purchase never seen before is a new payment: every check of section 4.
-    if (!r) await verifyPayment(header, o);
+    if (!r) {
+      await verifyPayment(header, o);
+      await o.beforeRecord?.(key, c.payer);
+    }
     const claimed: SellerPurchase = {
       ...base,
       revision: r ? r.revision + 1 : 0,
@@ -288,9 +305,11 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
       if (s.state === 'pending') return answerOf(submitted);
       return (await fromChain(submitted, s, submitted)) ?? winner();
     }
-    // Unclear or refused: the lease is given back, so the next payload reconciles at once. A
-    // purchase already broadcast keeps its answer: pending, with its hash.
-    const released = { ...r, revision: r.revision + 1, leaseUntil: 0 };
+    // Unclear or refused: Base is still read on every request, but the facilitator is called
+    // again only after RETRY_SECONDS, the Retry-After a host sends, so retries and sign-ins can't
+    // turn one purchase into a call per request. A purchase already broadcast keeps its answer:
+    // pending, with its hash.
+    const released = { ...r, revision: r.revision + 1, leaseUntil: now() + RETRY_SECONDS };
     if (!(await o.store.compareAndSet(key, r, released))) return winner();
     return answerFrom(
       released,

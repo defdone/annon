@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { isDeepStrictEqual } from 'node:util';
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
@@ -13,6 +14,17 @@ import { parsePaymentPayload, parsePaymentRequired } from '@x402/core/schemas';
 import type { SettleResponse as X402SettleResponse } from '@x402/core/types';
 import { registerExactEvmScheme } from '@x402/evm/exact/client';
 import { ExactEvmScheme } from '@x402/evm/exact/facilitator';
+import {
+  isValidIconUrl,
+  sanitizeTags,
+  validateDiscoveryExtension,
+  validateDiscoveryExtensionSpec,
+} from '@x402/extensions/bazaar';
+import {
+  BuilderCodeFacilitatorExtension,
+  declareBuilderCodeExtension,
+  parseBuilderCodeSuffixFromCalldata,
+} from '@x402/extensions/builder-code';
 import {
   declarePaymentIdentifierExtension,
   extractPaymentIdentifier,
@@ -34,6 +46,11 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { download } from '../download/download.js';
+import { type HostRecord, serveFile } from '../download/host.js';
+import { nodeHandler } from '../download/http.js';
+import { buyerProof } from '../download/proof.js';
+import { signInHeader, signInMessage } from '../download/siwx.js';
 import { inspect, inspectHeader, publishText, seal } from '../envelope/pay2.js';
 import { blockHeader, type Expected, PayError, paymentLogs } from './base.js';
 import { type Authorization, annonNonce, digest, signer, typedData } from './eip3009.js';
@@ -47,7 +64,13 @@ import {
 import { type PurchaseRecord, purchaseKey } from './purchase.js';
 import { nextStep } from './recover.js';
 import { checkPayment, forFacilitator, offerFor, verifyPayment } from './seller.js';
-import { paymentResponse, type SellerRecord, type SettleResponse, settle } from './settle.js';
+import {
+  paymentResponse,
+  RETRY_SECONDS,
+  type SellerRecord,
+  type SettleResponse,
+  settle,
+} from './settle.js';
 import { memoryStore } from './store.js';
 import { discover, type PaymentRequired, paymentSignature, readPaymentRequired } from './x402.js';
 
@@ -61,6 +84,8 @@ const USDC_ABI = parseAbi([
 ]);
 
 const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+/** The real fetch, for the HTTP tests: the simulated chains replace the global one. */
+const realFetch = globalThis.fetch;
 const buyerAccount = privateKeyToAccount(`0x${'42'.repeat(32)}`);
 const otherAccount = privateKeyToAccount(`0x${'43'.repeat(32)}`);
 const BUYER = buyerAccount.address.toLowerCase();
@@ -452,6 +477,10 @@ const opts = (over: Record<string, unknown> = {}) => ({
   pay2: HEADER,
   maxPrice: 10_000n,
   ...over,
+  url:
+    (over.url as string | undefined) ??
+    (((over.paymentRequired ?? required()) as { resource?: { url?: string } }).resource
+      ?.url as string),
 });
 const codeOf = (p: Promise<unknown>) =>
   p.then(
@@ -461,6 +490,18 @@ const codeOf = (p: Promise<unknown>) =>
   );
 
 describe('preflight', () => {
+  it('takes a 402 only for the URL that answered with it (download.md section 3)', async () => {
+    const at = 'https://seller.example/f/1';
+    expect((await preflight(opts({ url: 'HTTPS://SELLER.EXAMPLE:443/f/1#x' }))).fileId).toBe(FILE);
+    for (const url of ['https://evil.example/f/1', 'https://seller.example/f/2', 'not a url']) {
+      expect(await codeOf(preflight(opts({ url })))).toBe('bad_requirements');
+    }
+    const bare = { ...required(), resource: undefined };
+    expect(await codeOf(preflight(opts({ paymentRequired: bare, url: at })))).toBe(
+      'bad_requirements',
+    );
+  });
+
   it('quotes a file: a transfer to the registered pay_to, at the registered price', async () => {
     const q = await preflight(opts());
     expect(q).toMatchObject({
@@ -608,6 +649,37 @@ describe('preflight', () => {
       () => opts({ paymentRequired: required(offer({}, { paymentFlow: 'escrow' })) }),
     ],
     [
+      'a v1 offer that settles before serving',
+      'method_mismatch',
+      () => opts({ paymentRequired: required(offer({}, { paymentFlow: 'upfront' })) }),
+    ],
+    [
+      'a v1.1 offer without upfront',
+      'method_mismatch',
+      () => opts({ paymentRequired: withInfo(annonInfo({ version: 2 }), offer()) }),
+    ],
+    [
+      'a v1.1 offer that settles after serving',
+      'method_mismatch',
+      () =>
+        opts({
+          paymentRequired: withInfo(
+            annonInfo({ version: 2 }),
+            offer({}, { paymentFlow: 'authorization' }),
+          ),
+        }),
+    ],
+    [
+      'a split in the payment itself',
+      'method_mismatch',
+      () =>
+        opts({
+          paymentRequired: required(
+            offer({}, { splits: [{ payTo: `0x${'99'.repeat(20)}`, bps: 500 }] }),
+          ),
+        }),
+    ],
+    [
       'higher price asked',
       'price_mismatch',
       () => opts({ paymentRequired: required(offer({ amount: '10001' })) }),
@@ -660,6 +732,14 @@ describe('preflight', () => {
       expect(await codeOf(preflight(o))).toBe(code);
     });
   }
+
+  it('takes a v1.1 offer that settles first, and an empty splits list', async () => {
+    const v11 = withInfo(
+      annonInfo({ version: 2 }),
+      offer({}, { paymentFlow: 'upfront', splits: [] }),
+    );
+    expect(await codeOf(preflight(opts({ paymentRequired: v11 })))).toBe('ok');
+  });
 
   it('reads the contract it was given, not the mainnet one', async () => {
     w.contract = 'annon-dev.synthetic.near';
@@ -2083,20 +2163,21 @@ describe('offerFor and checkPayment', () => {
     fileId: FILE,
     url: 'https://seller.example/f/1',
     header: 'https://seller.example/f/1/header',
-    download: 'https://seller.example/f/1/file',
   };
-  it('needs the header and download URLs a buyer uses', async () => {
+  it('needs the header URL and an https file URL', async () => {
     for (const over of [
       { header: undefined },
-      { download: undefined },
+      { url: undefined },
       { header: '/f/1/header' },
-      { download: '' },
-      { download: 'http://seller.example/f/1/file' },
+      { url: '' },
+      { url: 'http://seller.example/f/1' },
     ]) {
       await expect(offerFor({ ...offerOpts, ...over } as never)).rejects.toThrow(TypeError);
     }
-    const info = (await offerFor(offerOpts)).extensions?.annon?.info as Record<string, unknown>;
-    expect(info).toMatchObject({ header: offerOpts.header, download: offerOpts.download });
+    const pr = await offerFor(offerOpts);
+    expect(pr.extensions?.annon?.info).toMatchObject({ header: offerOpts.header });
+    expect(pr.extensions?.annon?.info).not.toHaveProperty('download');
+    expect(pr.resource).toEqual({ url: offerOpts.url });
   });
   const reject = (f: () => unknown) => {
     try {
@@ -2118,17 +2199,12 @@ describe('offerFor and checkPayment', () => {
     }
   });
 
-  it('names the public header and the buyers-only download in the extension', async () => {
+  it('names the public header in the extension; the file is the resource', async () => {
     w.file = file();
-    const pr = await offerFor({
-      ...offerOpts,
-      header: 'https://seller.example/f/1/header',
-      download: 'https://seller.example/f/1/download',
-    });
+    const pr = await offerFor({ ...offerOpts, header: 'https://seller.example/f/1/header' });
     expect(pr.extensions?.annon?.info).toEqual({
       ...annonInfo({ version: 2 }),
       header: 'https://seller.example/f/1/header',
-      download: 'https://seller.example/f/1/download',
     });
     expect(parsePaymentRequired(pr).success).toBe(true);
     expect((await offerFor({ ...offerOpts, public: true })).extensions?.annon?.info).toMatchObject({
@@ -2210,6 +2286,253 @@ describe('offerFor and checkPayment', () => {
       sent.extensions,
     );
     expect(extractPaymentIdentifier(paymentPayload as never)).toBe(extractPaymentIdentifier(sent));
+  });
+
+  it("declares the app's builder code as x402 does, and the client adds the Annon SDK's code", async () => {
+    const pr = await offerFor({ ...offerOpts, appCode: 'partner' });
+    expect(pr.extensions?.['builder-code']).toEqual(declareBuilderCodeExtension('partner'));
+    const q = await preflight(opts({ paymentRequired: pr }));
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
+    const payload = decodePaymentSignatureHeader(header) as unknown as {
+      extensions: Record<string, { info: Record<string, unknown> }>;
+    };
+    expect(payload.extensions['builder-code']?.info).toEqual({ a: 'partner', s: ['bc_lq0mq0v9'] });
+    // x402's own facilitator turns exactly these codes into the ERC-8021 settlement suffix.
+    const { paymentPayload } = forFacilitator(header, pr.accepts[0] as never);
+    const suffix = new BuilderCodeFacilitatorExtension().buildDataSuffix({
+      paymentPayload: paymentPayload as never,
+    } as never);
+    expect(
+      parseBuilderCodeSuffixFromCalldata(
+        `0x${'ab'.repeat(4)}${(suffix as string).slice(2)}` as never,
+      ),
+    ).toMatchObject({
+      a: 'partner',
+      s: ['bc_lq0mq0v9'],
+    });
+    expect(checkPayment(header, pr, NOW).payer).toBe(BUYER);
+    // Without a declared app code the client sends only its service code.
+    const plain = await offerFor(offerOpts);
+    const q2 = await preflight(opts({ paymentRequired: plain }));
+    const h2 = (await authorize(q2, { buyerKey, wallet: wallet(), store: memoryStore() })).header;
+    expect(
+      (
+        decodePaymentSignatureHeader(h2) as unknown as {
+          extensions: Record<string, { info: unknown }>;
+        }
+      ).extensions['builder-code']?.info,
+    ).toEqual({ s: ['bc_lq0mq0v9'] });
+    await expect(offerFor({ ...offerOpts, appCode: 'Not Valid' })).rejects.toThrow(TypeError);
+  });
+
+  it("merges declared service codes as x402's client does, and takes them in that order", async () => {
+    const base = await offerFor({ ...offerOpts, appCode: 'partner' });
+    const declared = { info: { a: 'partner', s: ['server_sdk', 'bc_lq0mq0v9'] } };
+    const pr = { ...base, extensions: { ...base.extensions, 'builder-code': declared } };
+    const q = await preflight(opts({ paymentRequired: pr as never }));
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
+    const sent = (
+      decodePaymentSignatureHeader(header) as unknown as {
+        extensions: Record<string, { info: unknown }>;
+      }
+    ).extensions['builder-code'];
+    const merged = (
+      new x402Client() as unknown as { mergeExtensions(a: object, b: object): unknown }
+    ).mergeExtensions(
+      { 'builder-code': declared },
+      {
+        'builder-code': { info: { s: ['bc_lq0mq0v9'] } },
+      },
+    ) as Record<string, { info: unknown }>;
+    expect(sent?.info).toEqual(merged['builder-code']?.info);
+    expect(sent?.info).toEqual({ a: 'partner', s: ['bc_lq0mq0v9', 'server_sdk'] });
+    expect(checkPayment(header, pr as never, NOW).payer).toBe(BUYER);
+    // A declared code left out is refused.
+    const p = decodePaymentSignatureHeader(header) as unknown as {
+      extensions: Record<string, unknown>;
+    };
+    p.extensions['builder-code'] = { info: { a: 'partner', s: ['bc_lq0mq0v9'] } };
+    expect(
+      reject(() =>
+        checkPayment(Buffer.from(JSON.stringify(p)).toString('base64'), pr as never, NOW),
+      ),
+    ).toMatch(/extension_echo_mismatch/);
+    // The whole extension left out is refused too.
+    delete p.extensions['builder-code'];
+    expect(
+      reject(() =>
+        checkPayment(Buffer.from(JSON.stringify(p)).toString('base64'), pr as never, NOW),
+      ),
+    ).toMatch(/extension_echo_mismatch/);
+  });
+
+  it('keeps a declared service code given as one string, as the extension allows', async () => {
+    const base = await offerFor({ ...offerOpts, appCode: 'partner' });
+    const declared = { info: { a: 'partner', s: 'server_sdk' } };
+    const pr = { ...base, extensions: { ...base.extensions, 'builder-code': declared } };
+    const q = await preflight(opts({ paymentRequired: pr as never }));
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
+    const p = decodePaymentSignatureHeader(header) as unknown as {
+      extensions: Record<string, { info: unknown }>;
+    };
+    const merged = (
+      new x402Client() as unknown as { mergeExtensions(a: object, b: object): unknown }
+    ).mergeExtensions(
+      { 'builder-code': declared },
+      {
+        'builder-code': { info: { s: ['bc_lq0mq0v9'] } },
+      },
+    ) as Record<string, { info: unknown }>;
+    expect(p.extensions['builder-code']?.info).toEqual(merged['builder-code']?.info);
+    expect(p.extensions['builder-code']?.info).toEqual({
+      a: 'partner',
+      s: ['bc_lq0mq0v9', 'server_sdk'],
+    });
+    expect(checkPayment(header, pr as never, NOW).payer).toBe(BUYER);
+    // A scalar echo is the same list; one that drops the declared code is refused.
+    for (const [s, ok] of [
+      ['server_sdk', true],
+      ['bc_lq0mq0v9', false],
+    ] as const) {
+      p.extensions['builder-code'] = { info: { a: 'partner', s } };
+      const h = Buffer.from(JSON.stringify(p)).toString('base64');
+      if (ok) expect(checkPayment(h, pr as never, NOW).payer).toBe(BUYER);
+      else
+        expect(reject(() => checkPayment(h, pr as never, NOW))).toMatch(/extension_echo_mismatch/);
+    }
+  });
+
+  it('refuses a builder code echo that does not match what the server declared', async () => {
+    const pr = await offerFor({ ...offerOpts, appCode: 'partner' });
+    const q = await preflight(opts({ paymentRequired: pr }));
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
+    const edit = (info: Record<string, unknown>) => {
+      const p = decodePaymentSignatureHeader(header) as unknown as {
+        extensions: Record<string, unknown>;
+      };
+      p.extensions['builder-code'] = { info };
+      return Buffer.from(JSON.stringify(p)).toString('base64');
+    };
+    for (const info of [
+      { a: 'other_app', s: ['bc_lq0mq0v9'] },
+      { s: ['bc_lq0mq0v9'] },
+      { a: 'partner', s: ['Bad Code'] },
+      { a: 'partner', s: Array.from({ length: 11 }, (_, i) => `c${i}`) },
+      { a: 'partner', s: 'Bad Code' },
+      { a: 'partner', w: 'wallet', s: [] },
+    ]) {
+      expect(
+        reject(() => checkPayment(edit(info), pr, NOW)),
+        JSON.stringify(info),
+      ).toMatch(/extension_echo_mismatch/);
+    }
+    // An app code the server never declared.
+    const plain = await offerFor(offerOpts);
+    const q2 = await preflight(opts({ paymentRequired: plain }));
+    const h2 = (await authorize(q2, { buyerKey, wallet: wallet(), store: memoryStore() })).header;
+    const p2 = decodePaymentSignatureHeader(h2) as unknown as {
+      extensions: Record<string, unknown>;
+    };
+    p2.extensions['builder-code'] = { info: { a: 'sneaky', s: [] } };
+    expect(
+      reject(() => checkPayment(Buffer.from(JSON.stringify(p2)).toString('base64'), plain, NOW)),
+    ).toMatch(/extension_echo_mismatch/);
+  });
+
+  it("keeps discovery within x402's resource limits: at the limits accepted, past them refused", async () => {
+    const edge = await offerFor({
+      ...offerOpts,
+      discovery: {
+        serviceName: 'n'.repeat(32),
+        tags: ['a', 'b', 'c', 'd', 't'.repeat(32)],
+        iconUrl: `https://i.example/${'x'.repeat(2000)}`,
+      },
+    });
+    expect(parsePaymentRequired(edge).success).toBe(true);
+    for (const discovery of [
+      { serviceName: 'n'.repeat(33) },
+      { serviceName: '' },
+      { tags: ['a', 'b', 'c', 'd', 'e', 'f'] },
+      { tags: ['ż'] },
+      { iconUrl: `https://i.example/${'x'.repeat(2048)}` },
+    ]) {
+      await expect(
+        offerFor({ ...offerOpts, discovery }),
+        JSON.stringify(discovery),
+      ).rejects.toThrow(TypeError);
+      const loose = (await offerFor(offerOpts)) as unknown as { resource: object };
+      loose.resource = { ...loose.resource, ...discovery };
+      expect(parsePaymentRequired(loose).success, JSON.stringify(discovery)).toBe(false);
+    }
+  });
+
+  it('refuses tags bazaar would merge as one, case aside', async () => {
+    expect(sanitizeTags(['File', 'file'])).toEqual(['File']);
+    await expect(offerFor({ ...offerOpts, discovery: { tags: ['File', 'file'] } })).rejects.toThrow(
+      TypeError,
+    );
+    expect(
+      (await offerFor({ ...offerOpts, discovery: { tags: ['File', 'Song'] } })).resource,
+    ).toMatchObject({ tags: ['File', 'Song'] });
+  });
+
+  it("takes an icon URL only where bazaar's own check keeps it, and https only", async () => {
+    const urls = [
+      'https://cdn.example/i.png',
+      'https://bücher.example/i.png',
+      'http://cdn.example/i.png',
+      'file:///etc/passwd',
+      'https://user:pw@cdn.example/i.png',
+      'https://user@cdn.example/i.png',
+      'https://:pw@cdn.example/i.png',
+      'https://0x7g/i.png',
+      'https://[::1]/i.png',
+      'https://localhost/i.png',
+      'https://127.0.0.1/i.png',
+      'https://0x7f000001/i.png',
+      'https://2130706433/i.png',
+      'https://cdn.example/\u0001',
+      'not a url',
+    ];
+    for (const iconUrl of urls) {
+      const ours = await offerFor({ ...offerOpts, discovery: { iconUrl } }).then(
+        () => true,
+        () => false,
+      );
+      // Kept only where bazaar keeps it; http is bazaar's, never an Annon offer's.
+      expect(ours, iconUrl).toBe(isValidIconUrl(iconUrl) && iconUrl.startsWith('https:'));
+    }
+  });
+
+  it('describes the file for x402 discovery as its validators accept, and keeps it from the facilitator', async () => {
+    const pr = await offerFor({
+      ...offerOpts,
+      discovery: {
+        description: 'A song',
+        mimeType: 'audio/mpeg',
+        serviceName: 'Partner',
+        tags: ['music'],
+      },
+    });
+    const bazaar = pr.extensions?.bazaar as never;
+    expect(validateDiscoveryExtension(bazaar)).toMatchObject({ valid: true });
+    expect(validateDiscoveryExtensionSpec(bazaar)).toMatchObject({ valid: true });
+    expect(pr.resource).toMatchObject({
+      description: 'A song',
+      mimeType: 'audio/mpeg',
+      serviceName: 'Partner',
+      tags: ['music'],
+    });
+    const q = await preflight(opts({ paymentRequired: pr }));
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
+    expect(
+      (decodePaymentSignatureHeader(header) as unknown as { extensions: object }).extensions,
+    ).toHaveProperty('bazaar');
+    const { paymentPayload } = forFacilitator(header, pr.accepts[0] as never);
+    const ext = (paymentPayload as unknown as { extensions: Record<string, unknown> }).extensions;
+    expect(ext).not.toHaveProperty('bazaar');
+    expect(ext).toHaveProperty('annon');
+    expect(ext).toHaveProperty('builder-code');
   });
 
   it('advertises profile v1.1: annon version 2, and payment-identifier as the official helper declares it', async () => {
@@ -2539,7 +2862,6 @@ describe('settle (profile section 10)', () => {
     fileId: FILE,
     url: 'https://seller.example/f/1',
     header: 'https://seller.example/f/1/header',
-    download: 'https://seller.example/f/1/file',
   };
   const wallet = () => ({
     address: buyerAccount.address,
@@ -2751,6 +3073,11 @@ describe('settle (profile section 10)', () => {
       throw new Error('connection reset');
     });
     expect(await codeOf(run(header, store, lost))).toBe('settlement_processing');
+    // Within RETRY_SECONDS nobody calls the facilitator again; after it, the next payload does.
+    const early = facilitator();
+    expect(await codeOf(run(header, store, early))).toBe('settlement_processing');
+    expect(early).not.toHaveBeenCalled();
+    vi.mocked(Date.now).mockReturnValue((NOW + RETRY_SECONDS) * 1000);
     const f = facilitator();
     expect(await run(header, store, f)).toMatchObject({ state: 'settled' });
     expect(f).toHaveBeenCalledTimes(1);
@@ -2950,6 +3277,11 @@ describe('settle (profile section 10)', () => {
     const store = sellerStore();
     const refused = facilitator({ success: false, errorReason: 'insufficient_funds' });
     expect(await codeOf(run(header, store, refused))).toBe('settlement_processing');
+    // Within RETRY_SECONDS nobody calls the facilitator again; after it, the next payload does.
+    const early = facilitator();
+    expect(await codeOf(run(header, store, early))).toBe('settlement_processing');
+    expect(early).not.toHaveBeenCalled();
+    vi.mocked(Date.now).mockReturnValue((NOW + RETRY_SECONDS) * 1000);
     const f = facilitator();
     expect(await run(header, store, f)).toMatchObject({ state: 'settled' });
   });
@@ -3008,7 +3340,11 @@ describe('settle (profile section 10)', () => {
       ),
     ).toBe('settlement_processing');
     expect(aborted).toBe(true);
-    // Given up and aborted: the next payload may call again at once.
+    // Given up and aborted: the next payload may call again, after RETRY_SECONDS.
+    const early = facilitator();
+    expect(await codeOf(run(header, store, early))).toBe('settlement_processing');
+    expect(early).not.toHaveBeenCalled();
+    vi.mocked(Date.now).mockReturnValue((NOW + RETRY_SECONDS) * 1000);
     const f = facilitator();
     expect(await run(header, store, f)).toMatchObject({ state: 'settled' });
   });
@@ -3221,5 +3557,825 @@ describe('settle (profile section 10)', () => {
       state: 'settled',
       transaction: TX,
     });
+  });
+});
+
+// ---------- download.md section 1: one URL sells, returns and serves the file ----------
+
+describe('serveFile (download.md section 1)', () => {
+  const URL1 = 'https://seller.example/f/1';
+  const BODY = new Uint8Array(100).map((_, i) => i);
+  const hostOpts = (store = memoryStore<HostRecord>(), f = facilitatorOf()) => ({
+    nearRpc: NEAR,
+    baseRpc: BASE,
+    contractId: CONTRACT,
+    fileId: FILE,
+    url: URL1,
+    header: 'https://seller.example/f/1/header',
+    headerHash: sha256(HEADER),
+    store,
+    facilitator: f,
+    file: {
+      size: BODY.length,
+      read: (start: number) => new Blob([BODY.subarray(start)]).stream(),
+    },
+  });
+  const PAID_AT = SIGNED + 20;
+  const land = () => {
+    const atB = (l: RpcLog) => ({ ...l, blockNumber: `0x${PAID_AT.toString(16)}` });
+    w.getLogs = [atB(used(ANNON))];
+    w.receipt = receipt([used(ANNON), transfer(BUYER, PAY_TO, 10_000n, 4)].map(atB));
+  };
+  function facilitatorOf(answer?: SettleResponse) {
+    return vi.fn(async () => {
+      if (!answer) land();
+      return answer ?? { success: true, transaction: TX, network: 'eip155:8453', payer: BUYER };
+    });
+  }
+  const SECRET = Uint8Array.from(Buffer.from(7n.toString(16).padStart(64, '0'), 'hex'));
+  const paid = async () => {
+    const o = hostOpts();
+    const pr = await offerFor(o);
+    const q = await preflight(opts({ paymentRequired: pr }));
+    const wallet = {
+      address: buyerAccount.address,
+      signTypedData: (t: ReturnType<typeof typedData>) => buyerAccount.signTypedData(asViem(t)),
+    };
+    return (await authorize(q, { buyerKey, wallet, store: memoryStore() })).header;
+  };
+  const req = (h: Record<string, string>) => ({ headers: new Headers(h) });
+  const body = async (r: { body?: ReadableStream<Uint8Array> }) =>
+    new Uint8Array(await new Response(r.body).arrayBuffer());
+  const decode = (h: string) => JSON.parse(Buffer.from(h, 'base64').toString());
+  beforeEach(() => {
+    w.head = at(SIGNED + 50);
+  });
+
+  it('answers a bare request with the offer, upfront, and a stored sign-in challenge', async () => {
+    const o = hostOpts();
+    const r = await serveFile(req({}), o);
+    expect(r.status).toBe(402);
+    const pr = decode(r.headers['PAYMENT-REQUIRED'] as string);
+    expect(pr.resource).toEqual({ url: URL1 });
+    expect(pr.accepts[0].extra.paymentFlow).toBe('upfront');
+    const c = pr.extensions['sign-in-with-x'].info;
+    expect(c).toMatchObject({ domain: 'seller.example', uri: URL1 });
+    expect(await o.store.load(`annon/host/challenge/${c.nonce}`)).toMatchObject({
+      kind: 'challenge',
+    });
+  });
+
+  it('answers 410 for a taken-down file, whatever the request carries', async () => {
+    const header = await paid();
+    w.file = file({ taken_down: 'court_order' });
+    const gone = await serveFile(req({ 'PAYMENT-SIGNATURE': header }), hostOpts());
+    expect(gone.status).toBe(410);
+    expect(gone.headers['Cache-Control']).toBe('no-store');
+    w.file = null as never;
+    const missing = await serveFile(req({}), hostOpts());
+    expect(missing.status).toBe(404);
+    expect(missing.headers['Cache-Control']).toBe('no-store');
+  });
+
+  it('returns the file with the payment to the request that proves the one-time key', async () => {
+    const header = await paid();
+    const o = hostOpts();
+    const r = await serveFile(
+      req({ 'PAYMENT-SIGNATURE': header, 'Annon-Buyer-Proof': buyerProof(SECRET, URL1) }),
+      o,
+    );
+    expect(r.status).toBe(200);
+    expect(decode(r.headers['PAYMENT-RESPONSE'] as string)).toMatchObject({
+      success: true,
+      transaction: TX,
+    });
+    expect(r.headers['Cache-Control']).toBe('private, no-store');
+    expect(await body(r)).toEqual(BODY);
+  });
+
+  it('never returns the body for the payload alone, or a proof for another URL or key', async () => {
+    const header = await paid();
+    const o = hostOpts();
+    const other = Uint8Array.from(Buffer.from(8n.toString(16).padStart(64, '0'), 'hex'));
+    for (const proof of [
+      undefined,
+      buyerProof(SECRET, 'https://other.example/f/1'),
+      buyerProof(other, URL1),
+    ]) {
+      const r = await serveFile(
+        req({ 'PAYMENT-SIGNATURE': header, ...(proof ? { 'Annon-Buyer-Proof': proof } : {}) }),
+        o,
+      );
+      expect(r.status).toBe(402);
+      expect(r.body).toBeUndefined();
+      expect(decode(r.headers['PAYMENT-RESPONSE'] as string)).toMatchObject({ success: true });
+      expect(r.headers['PAYMENT-REQUIRED']).toBeDefined();
+    }
+  });
+
+  it('answers pending with its hash, then the file once settled', async () => {
+    const header = await paid();
+    const store = memoryStore<HostRecord>();
+    const pending = facilitatorOf({
+      success: false,
+      errorReason: 'settlement_pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    const h = { 'PAYMENT-SIGNATURE': header, 'Annon-Buyer-Proof': buyerProof(SECRET, URL1) };
+    const first = await serveFile(req(h), hostOpts(store, pending));
+    expect(first.status).toBe(402);
+    expect(decode(first.headers['PAYMENT-RESPONSE'] as string)).toMatchObject({
+      success: false,
+      errorReason: 'settlement_pending',
+      transaction: TX,
+    });
+    expect(first.body).toBeUndefined();
+    land();
+    const second = await serveFile(req(h), hostOpts(store, pending));
+    expect(second.status).toBe(200);
+    expect(await body(second)).toEqual(BODY);
+  });
+
+  it('answers 503 with Retry-After while settling with no transaction known', async () => {
+    const header = await paid();
+    const lost = vi.fn(async () => {
+      throw new Error('connection reset');
+    });
+    const r = await serveFile(
+      req({ 'PAYMENT-SIGNATURE': header, 'Annon-Buyer-Proof': buyerProof(SECRET, URL1) }),
+      hostOpts(memoryStore(), lost as never),
+    );
+    expect(r.status).toBe(503);
+    expect(r.headers['Retry-After']).toBeDefined();
+    expect(r.headers['PAYMENT-RESPONSE']).toBeUndefined();
+  });
+
+  it('answers 400 for a bad payload and 409 for a payment id reused with another payload', async () => {
+    const o = hostOpts();
+    expect((await serveFile(req({ 'PAYMENT-SIGNATURE': 'e30=' }), o)).status).toBe(400);
+    const header = await paid();
+    await serveFile(req({ 'PAYMENT-SIGNATURE': header }), o);
+    const p = decodePaymentSignatureHeader(header) as unknown as {
+      payload: { signature: string };
+    };
+    p.payload.signature = `0x${'11'.repeat(65)}`;
+    const forged = Buffer.from(JSON.stringify(p)).toString('base64');
+    expect((await serveFile(req({ 'PAYMENT-SIGNATURE': forged }), o)).status).toBe(400);
+  });
+
+  const signIn = async (o: ReturnType<typeof hostOpts>, who = buyerAccount) => {
+    const r = await serveFile(req({}), o);
+    const c = decode(r.headers['PAYMENT-REQUIRED'] as string).extensions['sign-in-with-x'].info;
+    const sig = await who.signMessage({ message: signInMessage(c, who.address) });
+    return signInHeader(c, who.address, sig);
+  };
+
+  it('serves a buyer who signs in, gives a session, and takes each challenge once', async () => {
+    w.isBuyer = true;
+    const o = hostOpts();
+    const proof = await signIn(o);
+    const r = await serveFile(req({ 'SIGN-IN-WITH-X': proof }), o);
+    expect(r.status).toBe(200);
+    expect(await body(r)).toEqual(BODY);
+    const token = r.headers['Annon-Session'] as string;
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    // The same proof again: its challenge is gone.
+    expect((await serveFile(req({ 'SIGN-IN-WITH-X': proof }), o)).status).toBe(402);
+    // The session resumes with Range, for any number of requests.
+    for (let i = 0; i < 2; i++) {
+      const part = await serveFile(
+        req({ Authorization: `Bearer ${token}`, Range: 'bytes=60-' }),
+        o,
+      );
+      expect(part.status).toBe(206);
+      expect(part.headers['Content-Range']).toBe('bytes 60-99/100');
+      expect(await body(part)).toEqual(BODY.subarray(60));
+    }
+    // Two hours later the session is over.
+    vi.mocked(Date.now).mockReturnValue((NOW + 7_200) * 1000);
+    expect((await serveFile(req({ Authorization: `Bearer ${token}` }), o)).status).toBe(402);
+    // The store never holds the token itself.
+    expect(JSON.stringify(await o.store.load(`annon/host/session/${token}`))).toBe('null');
+  });
+
+  it('serves a wallet whose purchase this host settled, before NEAR records it', async () => {
+    const header = await paid();
+    const o = hostOpts();
+    await serveFile(req({ 'PAYMENT-SIGNATURE': header }), o);
+    w.isBuyer = false;
+    const r = await serveFile(req({ 'SIGN-IN-WITH-X': await signIn(o) }), o);
+    expect(r.status).toBe(200);
+  });
+
+  it('asks a signed-in wallet that did not buy to pay while on sale, and says 403 once stopped', async () => {
+    const o = hostOpts();
+    const open = await serveFile(req({ 'SIGN-IN-WITH-X': await signIn(o, otherAccount) }), o);
+    expect(open.status).toBe(402);
+    expect(decode(open.headers['PAYMENT-REQUIRED'] as string).accepts).toHaveLength(1);
+    const proof = await signIn(o, otherAccount);
+    w.file = file({ sales_stopped_at: NOW });
+    const stopped = await serveFile(req({ 'SIGN-IN-WITH-X': proof }), o);
+    expect(stopped.status).toBe(403);
+    // A bare request after a stop: no offer, the sign-in only.
+    const bare = await serveFile(req({}), o);
+    expect(decode(bare.headers['PAYMENT-REQUIRED'] as string).accepts).toEqual([]);
+  });
+
+  it('after a stop, does not tell a wallet with a purchase under way that nothing can be done', async () => {
+    const header = await paid();
+    const store = memoryStore<HostRecord>();
+    const pending = facilitatorOf({
+      success: false,
+      errorReason: 'settlement_pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    await serveFile(req({ 'PAYMENT-SIGNATURE': header }), hostOpts(store, pending));
+    const proof = await signIn(hostOpts(store, pending));
+    w.file = file({ sales_stopped_at: NOW });
+    const r = await serveFile(req({ 'SIGN-IN-WITH-X': proof }), hostOpts(store, pending));
+    // That purchase's answer: pending, with its hash.
+    expect(r.status).toBe(402);
+    expect(decode(r.headers['PAYMENT-RESPONSE'] as string)).toMatchObject({
+      errorReason: 'settlement_pending',
+      transaction: TX,
+    });
+    const token = r.headers['Annon-Session'] as string;
+    // Still so past its validBefore, while Base does not show it yet.
+    vi.mocked(Date.now).mockReturnValue((NOW + 3_000) * 1000);
+    const later = await serveFile(
+      req({ Authorization: `Bearer ${token}` }),
+      hostOpts(store, pending),
+    );
+    expect(later.status).toBe(402);
+    expect(decode(later.headers['PAYMENT-RESPONSE'] as string).transaction).toBe(TX);
+    // Once it lands, the host finds it on Base from the recorded payload: the file, no payload sent.
+    land();
+    const landed = await serveFile(
+      req({ Authorization: `Bearer ${token}` }),
+      hostOpts(store, pending),
+    );
+    expect(landed.status).toBe(200);
+    expect(decode(landed.headers['PAYMENT-RESPONSE'] as string)).toMatchObject({
+      success: true,
+      transaction: TX,
+    });
+  });
+
+  it('after a stop, answers 503 for a purchase still being settled, and 403 once it is unpaid', async () => {
+    const header = await paid();
+    const store = memoryStore<HostRecord>();
+    const lost = vi.fn(async () => {
+      throw new Error('connection reset');
+    });
+    await serveFile(req({ 'PAYMENT-SIGNATURE': header }), hostOpts(store, lost as never));
+    const proof = await signIn(hostOpts(store));
+    w.file = file({ sales_stopped_at: NOW });
+    const r = await serveFile(req({ 'SIGN-IN-WITH-X': proof }), hostOpts(store, lost as never));
+    expect(r.status).toBe(503);
+    expect(r.headers['Retry-After']).toBeDefined();
+    const token = r.headers['Annon-Session'] as string;
+    // Base, finalized past its validBefore, shows no payment: nothing left to do.
+    w.finalized = at(SIGNED + 100_000);
+    w.head = at(SIGNED + 100_000);
+    vi.mocked(Date.now).mockReturnValue((NOW + 3_000) * 1000);
+    expect(
+      (await serveFile(req({ Authorization: `Bearer ${token}` }), hostOpts(store, lost as never)))
+        .status,
+    ).toBe(403);
+    // The payment only: the sign-in came within RETRY_SECONDS, and later Base ruled it out.
+    expect(lost).toHaveBeenCalledTimes(1);
+  });
+
+  it('after a stop, answers 503 to a sign-in while the payment is inside its facilitator call, then serves', async () => {
+    const header = await paid();
+    const store = memoryStore<HostRecord>();
+    let release = () => {};
+    let called = () => {};
+    const inCall = new Promise<void>((r) => {
+      called = r;
+    });
+    const slow = vi.fn(async () => {
+      called();
+      await new Promise<void>((r) => {
+        release = r;
+      });
+      land();
+      return { success: true, transaction: TX, network: 'eip155:8453', payer: BUYER };
+    });
+    const paying = serveFile(req({ 'PAYMENT-SIGNATURE': header }), hostOpts(store, slow as never));
+    await inCall;
+    const proof = await signIn(hostOpts(store, slow as never));
+    w.file = file({ sales_stopped_at: NOW });
+    const r = await serveFile(req({ 'SIGN-IN-WITH-X': proof }), hostOpts(store, slow as never));
+    expect(r.status).toBe(503);
+    expect(slow).toHaveBeenCalledTimes(1);
+    release();
+    expect((await paying).status).toBe(402);
+    // Settled at Base safe: the wallet's session gets the file, NEAR not needed yet.
+    w.isBuyer = false;
+    const token = r.headers['Annon-Session'] as string;
+    const after = await serveFile(
+      req({ Authorization: `Bearer ${token}` }),
+      hostOpts(store, slow as never),
+    );
+    expect(after.status).toBe(200);
+  });
+
+  it('serves a sign-in after a payload the host first saw already paid on Base', async () => {
+    const header = await paid();
+    const store = memoryStore<HostRecord>();
+    const f = facilitatorOf();
+    land();
+    const first = await serveFile(req({ 'PAYMENT-SIGNATURE': header }), hostOpts(store, f));
+    expect(decode(first.headers['PAYMENT-RESPONSE'] as string)).toMatchObject({ success: true });
+    expect(f).not.toHaveBeenCalled();
+    w.isBuyer = false;
+    const r = await serveFile(
+      req({ 'SIGN-IN-WITH-X': await signIn(hostOpts(store, f)) }),
+      hostOpts(store, f),
+    );
+    expect(r.status).toBe(200);
+  });
+
+  it('serves a settled purchase without asking Base again, even when Base is unreachable', async () => {
+    const header = await paid();
+    const store = memoryStore<HostRecord>();
+    await serveFile(req({ 'PAYMENT-SIGNATURE': header }), hostOpts(store));
+    w.isBuyer = false;
+    const proof = await signIn(hostOpts(store));
+    w.onTag = () => {
+      throw new Error('Base is down');
+    };
+    w.calls = [];
+    const r = await serveFile(req({ 'SIGN-IN-WITH-X': proof }), hostOpts(store));
+    // The record decides: no settle again, so only the request's own reads of the file.
+    expect(w.calls.filter((c) => c.method === 'near:get_file')).toHaveLength(1);
+    expect(w.calls.filter((c) => !c.method.startsWith('near:'))).toEqual([]);
+    expect(r.status).toBe(200);
+    expect(decode(r.headers['PAYMENT-RESPONSE'] as string)).toMatchObject({
+      success: true,
+      transaction: TX,
+      payer: BUYER,
+    });
+  });
+
+  it('after a stop, answers 503, not 500, while Base cannot be asked about an open purchase', async () => {
+    const header = await paid();
+    const store = memoryStore<HostRecord>();
+    const lost = vi.fn(async () => {
+      throw new Error('connection reset');
+    });
+    await serveFile(req({ 'PAYMENT-SIGNATURE': header }), hostOpts(store, lost as never));
+    const proof = await signIn(hostOpts(store));
+    w.file = file({ sales_stopped_at: NOW });
+    w.onTag = () => {
+      throw new Error('Base is down');
+    };
+    expect(
+      (await serveFile(req({ 'SIGN-IN-WITH-X': proof }), hostOpts(store, lost as never))).status,
+    ).toBe(503);
+  });
+
+  it('serves a sign-in once a pending payment lands, with sales open and no payload resent', async () => {
+    const header = await paid();
+    const store = memoryStore<HostRecord>();
+    const pending = facilitatorOf({
+      success: false,
+      errorReason: 'settlement_pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    expect(
+      (await serveFile(req({ 'PAYMENT-SIGNATURE': header }), hostOpts(store, pending))).status,
+    ).toBe(402);
+    // Not landed yet: the wallet is asked to pay, as section 1 step 6 says while on sale.
+    const early = await serveFile(
+      req({ 'SIGN-IN-WITH-X': await signIn(hostOpts(store, pending)) }),
+      hostOpts(store, pending),
+    );
+    expect(early.status).toBe(402);
+    land();
+    w.isBuyer = false;
+    const r = await serveFile(
+      req({ 'SIGN-IN-WITH-X': await signIn(hostOpts(store, pending)) }),
+      hostOpts(store, pending),
+    );
+    expect(r.status).toBe(200);
+    expect(decode(r.headers['PAYMENT-RESPONSE'] as string)).toMatchObject({
+      success: true,
+      transaction: TX,
+    });
+    expect(await body(r)).toEqual(BODY);
+  });
+
+  it("serves a buyer's sign-in sent with another wallet's session", async () => {
+    const header = await paid();
+    const o = hostOpts();
+    await serveFile(req({ 'PAYMENT-SIGNATURE': header }), o);
+    w.isBuyer = false;
+    const token = (await serveFile(req({ 'SIGN-IN-WITH-X': await signIn(o, otherAccount) }), o))
+      .headers['Annon-Session'] as string;
+    expect((await serveFile(req({ Authorization: `Bearer ${token}` }), o)).status).toBe(402);
+    const r = await serveFile(
+      req({ Authorization: `Bearer ${token}`, 'SIGN-IN-WITH-X': await signIn(o) }),
+      o,
+    );
+    expect(r.status).toBe(200);
+  });
+
+  it('serves a session buyer even when the payload sent along is still pending', async () => {
+    const header = await paid();
+    w.isBuyer = true;
+    const store = memoryStore<HostRecord>();
+    const o = hostOpts(store);
+    const token = (await serveFile(req({ 'SIGN-IN-WITH-X': await signIn(o) }), o)).headers[
+      'Annon-Session'
+    ] as string;
+    const pending = facilitatorOf({
+      success: false,
+      errorReason: 'settlement_pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    const r = await serveFile(
+      req({ 'PAYMENT-SIGNATURE': header, Authorization: `Bearer ${token}` }),
+      hostOpts(store, pending),
+    );
+    expect(r.status).toBe(200);
+    // Each request asks NEAR again: a session is a wallet, not a standing permission.
+    w.isBuyer = false;
+    expect((await serveFile(req({ Authorization: `Bearer ${token}` }), o)).status).toBe(402);
+  });
+
+  it('never takes a challenge another host issued, even from a shared store', async () => {
+    w.isBuyer = true;
+    const store = memoryStore<HostRecord>();
+    const a = hostOpts(store);
+    const proof = await signIn(a);
+    for (const b of [
+      { ...hostOpts(store), url: 'https://mirror.example/f/1' },
+      { ...hostOpts(store), url: 'https://seller.example/f/2' },
+      { ...hostOpts(store), headerHash: `0x${'99'.repeat(32)}` },
+    ]) {
+      const r = await serveFile(req({ 'SIGN-IN-WITH-X': proof }), b);
+      expect(r.status).toBe(402);
+      expect(r.headers['Annon-Session']).toBeUndefined();
+    }
+    // Still good where it was issued.
+    expect((await serveFile(req({ 'SIGN-IN-WITH-X': proof }), a)).status).toBe(200);
+  });
+
+  it('marks every answer uncached, and treats an empty payment header as a bad payload', async () => {
+    const header = await paid();
+    const pending = facilitatorOf({
+      success: false,
+      errorReason: 'settlement_pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    const r = await serveFile(req({ 'PAYMENT-SIGNATURE': header }), hostOpts(undefined, pending));
+    expect(r.status).toBe(402);
+    expect(r.headers['Cache-Control']).toBe('no-store');
+    w.isBuyer = true;
+    const o = hostOpts();
+    const empty = await serveFile(
+      req({ 'PAYMENT-SIGNATURE': '', 'SIGN-IN-WITH-X': await signIn(o) }),
+      o,
+    );
+    expect(empty.status).toBe(400);
+    expect(empty.headers['Cache-Control']).toBe('no-store');
+  });
+
+  it('answers 416 for a range past the end', async () => {
+    w.isBuyer = true;
+    const o = hostOpts();
+    const r = await serveFile(req({ 'SIGN-IN-WITH-X': await signIn(o), Range: 'bytes=100-' }), o);
+    expect(r.status).toBe(416);
+    expect(r.headers['Content-Range']).toBe('bytes */100');
+  });
+
+  it('answers 410 after a takedown to a signed-in buyer and a session too', async () => {
+    w.isBuyer = true;
+    const o = hostOpts();
+    const proof = await signIn(o);
+    const first = await serveFile(req({ 'SIGN-IN-WITH-X': await signIn(o) }), o);
+    const token = first.headers['Annon-Session'] as string;
+    w.file = file({ taken_down: 'court_order' });
+    for (const h of [{ 'SIGN-IN-WITH-X': proof }, { Authorization: `Bearer ${token}` }, {}]) {
+      expect((await serveFile(req(h), o)).status).toBe(410);
+    }
+  });
+
+  it('takes a session only on the origin that issued it, even with a shared store', async () => {
+    w.isBuyer = true;
+    const store = memoryStore<HostRecord>();
+    const a = hostOpts(store);
+    const token = (await serveFile(req({ 'SIGN-IN-WITH-X': await signIn(a) }), a)).headers[
+      'Annon-Session'
+    ] as string;
+    const b = { ...hostOpts(store), url: 'https://mirror.example/f/1' };
+    expect((await serveFile(req({ Authorization: `Bearer ${token}` }), b)).status).toBe(402);
+    expect((await serveFile(req({ Authorization: `Bearer ${token}` }), a)).status).toBe(200);
+  });
+});
+
+// ---------- profile section 9: the file URL over real HTTP, with the browser rules ----------
+
+describe('the HTTP host (profile section 9)', () => {
+  const PAGE = 'https://market.example';
+  const serve = async (over: Record<string, unknown> = {}) => {
+    const server = createServer();
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    const url = `http://localhost:${port}/f/1`;
+    const store = memoryStore<HostRecord>();
+    server.on(
+      'request',
+      nodeHandler({
+        nearRpc: NEAR,
+        baseRpc: BASE,
+        contractId: CONTRACT,
+        fileId: FILE,
+        url,
+        header: `http://localhost:${port}/h/1`,
+        headerHash: sha256(HEADER),
+        store,
+        facilitator: async () => ({ success: false, errorReason: 'unused' }),
+        file: {
+          size: PAY2.length,
+          read: (start: number) => new Blob([PAY2.subarray(start)]).stream(),
+        },
+        allowedOrigins: [PAGE],
+        ...over,
+      }),
+    );
+    return { url, close: () => new Promise<void>((r) => server.close(() => r())) };
+  };
+
+  it('answers the preflight without payment, for listed origins only', async () => {
+    const { url, close } = await serve();
+    try {
+      const ok = await realFetch(url, { method: 'OPTIONS', headers: { Origin: PAGE } });
+      expect(ok.status).toBe(204);
+      expect(ok.headers.get('access-control-allow-origin')).toBe(PAGE);
+      expect(ok.headers.get('access-control-allow-methods')).toBe('GET');
+      expect(ok.headers.get('access-control-allow-headers')).toBe(
+        'PAYMENT-SIGNATURE, Annon-Buyer-Proof, SIGN-IN-WITH-X, Authorization, Range, Content-Type',
+      );
+      expect(Number(ok.headers.get('access-control-max-age'))).toBeGreaterThan(0);
+      const other = await realFetch(url, {
+        method: 'OPTIONS',
+        headers: { Origin: 'https://evil.example' },
+      });
+      expect(other.headers.get('access-control-allow-origin')).toBeNull();
+      const post = await realFetch(url, { method: 'POST' });
+      expect(post.status).toBe(405);
+      for (const r of [ok, other, post]) expect(r.headers.get('cache-control')).toBe('no-store');
+    } finally {
+      await close();
+    }
+  });
+
+  it('lets a listed page read the 402 and its headers, uncached, never with credentials', async () => {
+    const { url, close } = await serve();
+    try {
+      const r = await realFetch(url, { headers: { Origin: PAGE } });
+      expect(r.status).toBe(402);
+      expect(r.headers.get('access-control-allow-origin')).toBe(PAGE);
+      expect(r.headers.get('access-control-expose-headers')).toContain('PAYMENT-REQUIRED');
+      expect(r.headers.get('access-control-expose-headers')).toContain('Annon-Session');
+      expect(r.headers.get('access-control-expose-headers')).toContain('Retry-After');
+      expect(r.headers.get('vary')).toBe('Origin');
+      expect(r.headers.get('cache-control')).toBe('no-store');
+      expect(r.headers.get('access-control-allow-credentials')).toBeNull();
+      expect(r.headers.get('set-cookie')).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
+  /** A session from the host, by a sign-in over HTTP. */
+  const signInOver = async (url: string) => {
+    const first = await realFetch(url);
+    const c = JSON.parse(
+      Buffer.from(first.headers.get('payment-required') as string, 'base64').toString(),
+    ).extensions['sign-in-with-x'].info;
+    const sig = await buyerAccount.signMessage({
+      message: signInMessage(c, buyerAccount.address),
+    });
+    const r = await realFetch(url, {
+      headers: { 'SIGN-IN-WITH-X': signInHeader(c, buyerAccount.address, sig), Range: 'bytes=0-' },
+    });
+    await r.body?.cancel();
+    return r.headers.get('annon-session') as string;
+  };
+
+  it('answers 500, uncached and with CORS, when the host itself fails', async () => {
+    const { url, close } = await serve({ nearRpc: 'https://unknown-rpc.example' });
+    try {
+      const r = await realFetch(url, { headers: { Origin: PAGE } });
+      expect(r.status).toBe(500);
+      expect(r.headers.get('cache-control')).toBe('no-store');
+      expect(r.headers.get('access-control-allow-origin')).toBe(PAGE);
+    } finally {
+      await close();
+    }
+  });
+
+  it('merges the exposed headers and Vary that middleware set before, never replacing them', async () => {
+    const server = createServer();
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    const url = `http://localhost:${port}/f/1`;
+    const handler = nodeHandler({
+      nearRpc: NEAR,
+      baseRpc: BASE,
+      contractId: CONTRACT,
+      fileId: FILE,
+      url,
+      header: `http://localhost:${port}/h/1`,
+      headerHash: sha256(HEADER),
+      store: memoryStore<HostRecord>(),
+      facilitator: async () => ({ success: false, errorReason: 'unused' }),
+      file: {
+        size: PAY2.length,
+        read: (start: number) => new Blob([PAY2.subarray(start)]).stream(),
+      },
+      allowedOrigins: [PAGE],
+    });
+    server.on('request', (req, res) => {
+      res.setHeader('Access-Control-Expose-Headers', 'X-Trace, payment-required');
+      res.setHeader('Vary', 'Accept-Encoding');
+      return handler(req, res);
+    });
+    try {
+      const r = await realFetch(url, { headers: { Origin: PAGE } });
+      expect(r.status).toBe(402);
+      const exposed = (r.headers.get('access-control-expose-headers') ?? '').split(', ');
+      expect(exposed).toContain('X-Trace');
+      expect(exposed).toContain('Annon-Session');
+      expect(exposed.filter((h) => h.toLowerCase() === 'payment-required')).toHaveLength(1);
+      expect(r.headers.get('vary')).toBe('Accept-Encoding, Origin');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it('says Vary: Origin to a request without one too, so a cache never mixes the two', async () => {
+    const { url, close } = await serve();
+    try {
+      const r = await realFetch(url);
+      expect(r.headers.get('vary')).toBe('Origin');
+      expect(r.headers.get('access-control-allow-origin')).toBeNull();
+    } finally {
+      await close();
+    }
+  });
+
+  it('cuts the response when the file fails mid-read, and the server keeps running', async () => {
+    w.isBuyer = true;
+    const failing = {
+      size: 1_000_000,
+      read: () =>
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(new Uint8Array(1000));
+          },
+          pull() {
+            throw new Error('disk gone');
+          },
+        }),
+    };
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    const { url, close } = await serve({ file: failing });
+    try {
+      const sid = await signInOver(url);
+      const r = await realFetch(url, { headers: { Authorization: `Bearer ${sid}` } });
+      expect(r.status).toBe(200);
+      await expect(r.arrayBuffer()).rejects.toThrow();
+      // The next request is answered: nothing escaped the handler.
+      expect((await realFetch(url)).status).toBe(402);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      await close();
+    }
+  });
+
+  it('reads the file only as fast as the client takes it, and stops when the client goes', async () => {
+    w.isBuyer = true;
+    let pulled = 0;
+    let cancelled = false;
+    const big = {
+      size: 256 * 65536,
+      read: () =>
+        new ReadableStream<Uint8Array>(
+          {
+            pull(c) {
+              if (pulled === 256) return c.close();
+              pulled++;
+              c.enqueue(new Uint8Array(65536));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+    };
+    const { url, close } = await serve({ file: big });
+    try {
+      const sid = await signInOver(url);
+      const abort = new AbortController();
+      const r = await realFetch(url, {
+        headers: { Authorization: `Bearer ${sid}` },
+        signal: abort.signal,
+      });
+      expect(r.status).toBe(200);
+      // The client reads nothing: socket buffers fill and the server stops pulling well short.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(pulled).toBeLessThan(200);
+      abort.abort();
+      await new Promise((r) => setTimeout(r, 200));
+      expect(cancelled).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it('serves a buyer who signs in, end to end, every chunk checked by the client', async () => {
+    w.isBuyer = true;
+    const { url, close } = await serve();
+    try {
+      let token = '';
+      const s = download({
+        url,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        wallet: {
+          address: buyerAccount.address,
+          signMessage: (message) => buyerAccount.signMessage({ message }),
+        },
+        onSession: (t) => {
+          token = t;
+        },
+        fetch: realFetch,
+      });
+      const got = new Uint8Array(await new Response(s).arrayBuffer());
+      expect(Buffer.from(got).equals(Buffer.from(PAY2))).toBe(true);
+      expect(token).toMatch(/^[0-9a-f]{64}$/);
+      // The session over HTTP, from the middle of the file.
+      const part = await realFetch(url, {
+        headers: { Authorization: `Bearer ${token}`, Range: 'bytes=100-' },
+      });
+      expect(part.status).toBe(206);
+      expect(part.headers.get('content-range')).toBe(`bytes 100-${PAY2.length - 1}/${PAY2.length}`);
+      expect(Buffer.from(await part.arrayBuffer()).equals(Buffer.from(PAY2.subarray(100)))).toBe(
+        true,
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it('sells and returns the file in the paid response, end to end over HTTP', async () => {
+    w.head = at(SIGNED + 50);
+    const landed = vi.fn(async () => {
+      const atB = (l: RpcLog) => ({ ...l, blockNumber: `0x${(SIGNED + 20).toString(16)}` });
+      w.getLogs = [atB(used(ANNON))];
+      w.receipt = receipt([used(ANNON), transfer(BUYER, PAY_TO, 10_000n, 4)].map(atB));
+      return { success: true, transaction: TX, network: 'eip155:8453', payer: BUYER };
+    });
+    const { url, close } = await serve({ facilitator: landed });
+    try {
+      // The buyer reads the 402 from the host itself and checks it against the contract.
+      const first = await realFetch(url);
+      const pr = readPaymentRequired(first.headers.get('payment-required') as string);
+      const q = await preflight(opts({ paymentRequired: pr }));
+      const wallet = {
+        address: buyerAccount.address,
+        signTypedData: (t: ReturnType<typeof typedData>) => buyerAccount.signTypedData(asViem(t)),
+      };
+      const { header } = await authorize(q, { buyerKey, wallet, store: memoryStore() });
+      const secret = Uint8Array.from(Buffer.from(7n.toString(16).padStart(64, '0'), 'hex'));
+      const s = download({
+        url,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        payment: { header, secret },
+        fetch: realFetch,
+      });
+      const got = new Uint8Array(await new Response(s).arrayBuffer());
+      expect(Buffer.from(got).equals(Buffer.from(PAY2))).toBe(true);
+      expect(landed).toHaveBeenCalledTimes(1);
+    } finally {
+      await close();
+    }
   });
 });

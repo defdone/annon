@@ -5,14 +5,19 @@
  */
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 import { secureUrl } from '../download/download.js';
-import { getConfig, getFile } from '../near/rpc.js';
+import { type FileInfo, getConfig, getFile } from '../near/rpc.js';
 import { fail, head } from './base.js';
 import { annonNonce, digest, fromHex, signer } from './eip3009.js';
 import { MAX_CLOCK_SKEW_SECONDS, MAX_VALIDITY_SECONDS } from './pay.js';
 import {
   ANNON_EXACT,
   BASE_NETWORK,
+  BAZAAR,
+  BUILDER_CODE,
+  BUILDER_CODE_PATTERN,
+  codes,
   isPaymentId,
+  MAX_ECHOED_SERVICE_CODES,
   type Offer,
   PAYMENT_IDENTIFIER,
   type PaymentRequired,
@@ -23,17 +28,95 @@ export interface OfferOptions {
   nearRpc: string;
   contractId: string;
   fileId: string;
-  /** The URL being paid for (x402 `resource.url`). */
+  /**
+   * The PAY2 file (x402 `resource.url`): the paid request returns it, and buyers sign in there to
+   * get it again (specs/download.md). https only.
+   */
   url: string;
   /** URL of the complete PAY2 header, public (profile section 7): the client checks it first. */
   header: string;
-  /** URL of the PAY2 file for buyers: entitlement on NEAR plus a wallet-signed challenge. */
-  download: string;
   /** The seller publishes the body too: the client then checks the whole file before signing. */
   public?: boolean;
   /** At most this long for the buyer's authorization; the Annon client signs for at most 180. */
   maxTimeoutSeconds?: number;
+  /** The seller app's x402 builder code (`^[a-z0-9_]{1,32}$`), declared as `builder-code`. */
+  appCode?: string;
+  /** Describes the file for x402 discovery (`bazaar`, profile section 11). */
+  discovery?: {
+    description?: string;
+    mimeType?: string;
+    serviceName?: string;
+    tags?: string[];
+    iconUrl?: string;
+  };
 }
+
+/**
+ * An icon URL bazaar keeps (its `isValidIconUrl`), https only: at most 2048 characters, no
+ * credentials, and a host name, not an IP address or loopback.
+ */
+function iconUrl(v: string): boolean {
+  if (v.length > 2048 || /\p{Cc}/u.test(v) || !URL.canParse(v)) return false;
+  const u = new URL(v);
+  const h = u.hostname.toLowerCase();
+  return (
+    u.protocol === 'https:' &&
+    !u.username &&
+    !u.password &&
+    !h.startsWith('[') &&
+    !['localhost', 'localhost.localdomain', 'ip6-localhost', 'ip6-loopback'].includes(h) &&
+    // WHATWG parses an all-digit or 0x host as IPv4, so this covers bazaar's digit and hex rules.
+    !/^\d{1,3}(\.\d{1,3}){3}$/.test(h)
+  );
+}
+
+/** x402's `declareBuilderCodeExtension(appCode)`. */
+const builderCodeDeclaration = (a: string) => {
+  if (!BUILDER_CODE_PATTERN.test(a)) throw new TypeError('appCode must match ^[a-z0-9_]{1,32}$');
+  const code = { type: 'string', pattern: '^[a-z0-9_]{1,32}$' };
+  return {
+    info: { a },
+    schema: {
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: {
+        a: { ...code, description: 'App builder code' },
+        w: { ...code, description: 'Wallet builder code' },
+        s: { type: 'array', maxItems: 11, items: code, description: 'Service builder codes' },
+      },
+      additionalProperties: false,
+    },
+  };
+};
+
+/** x402's `declareDiscoveryExtension` for a file: a GET that returns PAY2 bytes. */
+const discoveryDeclaration = () => ({
+  info: {
+    input: { type: 'http', method: 'GET' },
+    output: { type: 'binary', format: 'application/vnd.annon.pay2' },
+  },
+  schema: {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    type: 'object',
+    properties: {
+      input: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', const: 'http' },
+          method: { type: 'string', enum: ['GET', 'HEAD', 'DELETE'] },
+        },
+        required: ['type', 'method'],
+        additionalProperties: false,
+      },
+      output: {
+        type: 'object',
+        properties: { type: { type: 'string' }, format: { type: 'string' } },
+        required: ['type'],
+      },
+    },
+    required: ['input'],
+  },
+});
 
 /**
  * The `PaymentRequired` for a registered file, every value from the contract. Throws `PayError`
@@ -41,26 +124,34 @@ export interface OfferOptions {
  * `unknown_file` for one that isn't registered.
  */
 export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
-  // An Annon client won't sign without the header, and a buyer can't get the file without a
-  // download, which goes over https only (specs/download.md).
-  if (typeof o.header !== 'string' || !URL.canParse(o.header)) {
-    throw new TypeError('header must be an absolute URL');
-  }
-  if (typeof o.download !== 'string') throw new TypeError('download must be an https URL');
-  secureUrl(o.download);
   const file = await getFile(o.nearRpc, o.contractId, o.fileId);
   if (!file) return fail('unknown_file', 'the file is not registered on the Annon contract');
   if (file.takenDown) fail('taken_down', `the file was taken down (${file.takenDown})`);
   if (file.salesStoppedAt !== null) fail('sales_stopped', 'the seller stopped selling this file');
-  const config = await getConfig(o.nearRpc, o.contractId);
+  return paymentRequired(o, file, (await getConfig(o.nearRpc, o.contractId)).usdc);
+}
+
+/**
+ * The `PaymentRequired` for a registration already read: the offer while sales are open, none once
+ * they are stopped (profile section 2: buyers still sign in to download).
+ */
+export function paymentRequired(o: OfferOptions, file: FileInfo, usdc: string): PaymentRequired {
+  // An Annon client won't sign without the header, and the file itself goes over https only
+  // (specs/download.md).
+  if (typeof o.header !== 'string' || !URL.canParse(o.header)) {
+    throw new TypeError('header must be an absolute URL');
+  }
+  if (typeof o.url !== 'string') throw new TypeError('url must be an https URL');
+  secureUrl(o.url);
   const offer: Offer = {
     scheme: ANNON_EXACT,
     network: BASE_NETWORK,
     amount: file.price.toString(),
-    asset: config.usdc,
+    asset: usdc,
     payTo: file.payTo,
     maxTimeoutSeconds: o.maxTimeoutSeconds ?? 300,
-    extra: { name: 'USD Coin', version: '2' },
+    // Profile v1.1: settled before the file is served (x402 v2 section 6.1).
+    extra: { name: 'USD Coin', version: '2', paymentFlow: 'upfront' },
   };
   const info = {
     version: 2,
@@ -68,16 +159,43 @@ export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
     contract: o.contractId,
     fileId: o.fileId,
     header: o.header,
-    download: o.download,
     ...(o.public ? { public: true } : {}),
   };
+  const d = o.discovery;
+  // Bazaar's service metadata rules: a name and up to five distinct tags (case aside) of 1 to 32
+  // printable ASCII, and an icon an https URL a catalog would keep. Refused, not trimmed.
+  const label = (v: unknown) => typeof v === 'string' && /^[\x20-\x7e]{1,32}$/.test(v);
+  const tags = d?.tags;
+  if (
+    (d?.serviceName !== undefined && !label(d.serviceName)) ||
+    (tags !== undefined &&
+      !(
+        tags.length <= 5 &&
+        tags.every(label) &&
+        new Set(tags.map((t) => t.toLowerCase())).size === tags.length
+      )) ||
+    (d?.iconUrl !== undefined && !iconUrl(d.iconUrl))
+  ) {
+    throw new TypeError(
+      'discovery: serviceName and up to 5 distinct tags of 1-32 printable ASCII, iconUrl a public https URL',
+    );
+  }
   return {
     x402Version: 2,
-    resource: { url: o.url },
-    accepts: [offer],
+    resource: {
+      url: o.url,
+      ...(d?.description ? { description: d.description } : {}),
+      ...(d?.mimeType ? { mimeType: d.mimeType } : {}),
+      ...(d?.serviceName ? { serviceName: d.serviceName } : {}),
+      ...(d?.tags ? { tags: d.tags } : {}),
+      ...(d?.iconUrl ? { iconUrl: d.iconUrl } : {}),
+    },
+    accepts: file.salesStoppedAt === null ? [offer] : [],
     extensions: {
       annon: { info, schema: ANNON_SCHEMA },
       [PAYMENT_IDENTIFIER]: paymentIdentifierDeclaration(),
+      ...(o.appCode ? { [BUILDER_CODE]: builderCodeDeclaration(o.appCode) } : {}),
+      ...(d ? { [BAZAAR]: discoveryDeclaration() } : {}),
     },
   };
 }
@@ -93,7 +211,6 @@ export const ANNON_SCHEMA = {
     contract: { type: 'string' },
     fileId: { type: 'string', pattern: '^0x[0-9a-f]{64}$' },
     header: { type: 'string' },
-    download: { type: 'string' },
     public: { type: 'boolean' },
     buyerKey: { type: 'string', pattern: '^0x[0-9a-f]{96}$' },
   },
@@ -302,6 +419,7 @@ export function checkPayment(
   if (declared?.info?.required === true && !paymentId) {
     fail('bad_requirements', 'this server requires a payment id');
   }
+  checkBuilderCode(pr, p);
   const c = checkSigned(p, String(advertised.contract), String(advertised.fileId), offer);
   // The contract counts a payment up to 300 s after a stop. A buyer's client could sign for longer;
   // this server settles only authorizations short enough to stay inside that, whoever made them.
@@ -309,6 +427,30 @@ export function checkPayment(
     fail('bad_requirements', 'the authorization is valid for too long');
   }
   return { ...c, ...(paymentId ? { paymentId } : {}) };
+}
+
+/** builder-code (profile section 11): the declared app code and every declared service code echoed. */
+function checkBuilderCode(pr: PaymentRequired, p: Payload) {
+  const declared = (pr.extensions?.[BUILDER_CODE] as { info?: { a?: unknown; s?: unknown } })?.info;
+  const sent = p.extensions?.[BUILDER_CODE];
+  const echo = () => fail('bad_requirements', 'extension_echo_mismatch: builder-code');
+  if (sent === undefined) {
+    if (pr.extensions?.[BUILDER_CODE] !== undefined) echo();
+    return;
+  }
+  const info = (sent?.info ?? {}) as { a?: unknown; s?: unknown; w?: unknown };
+  if (info.a !== undefined && info.a !== declared?.a) echo();
+  if (declared?.a !== undefined && info.a !== declared.a) echo();
+  if (info.w !== undefined) echo();
+  const s = codes(info.s);
+  const mine = codes(declared?.s);
+  if (
+    s.length > MAX_ECHOED_SERVICE_CODES ||
+    !s.every((c) => typeof c === 'string' && BUILDER_CODE_PATTERN.test(c)) ||
+    !mine.every((c) => s.includes(c))
+  ) {
+    echo();
+  }
 }
 
 /**
@@ -326,9 +468,16 @@ export function forFacilitator(header: string, offer: Offer) {
   const p = b64json(header) as Record<string, unknown> | null;
   if (!p) return fail('bad_requirements', 'PAYMENT-SIGNATURE is not base64 JSON');
   const paymentRequirements = { ...offer, scheme: 'exact' };
+  // bazaar stays out: a facilitator would catalog the offer renamed `exact`, which an ordinary x402
+  // client cannot pay (profile section 11).
+  const { [BAZAAR]: _, ...extensions } = (p.extensions ?? {}) as Record<string, unknown>;
   return {
     x402Version: 2 as const,
-    paymentPayload: { ...p, accepted: paymentRequirements },
+    paymentPayload: {
+      ...p,
+      accepted: paymentRequirements,
+      ...(p.extensions ? { extensions } : {}),
+    },
     paymentRequirements,
   };
 }

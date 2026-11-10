@@ -33,6 +33,18 @@ export const paymentIdentifierDeclaration = () => ({
   },
 });
 
+/** x402 builder codes (ERC-8021 attribution); the Annon SDK's own service code. */
+export const BUILDER_CODE = 'builder-code';
+export const ANNON_SERVICE_CODE = 'bc_lq0mq0v9';
+export const BUILDER_CODE_PATTERN = /^[a-z0-9_]{1,32}$/;
+/** At most this many service codes echoed by a client: its 5 and the server's 5. */
+export const MAX_ECHOED_SERVICE_CODES = 10;
+/** Service codes as a list: the extension allows one code as a plain string. */
+export const codes = (s: unknown): unknown[] => (s === undefined ? [] : Array.isArray(s) ? s : [s]);
+
+/** x402 discovery (profile section 11); never sent to a facilitator. */
+export const BAZAAR = 'bazaar';
+
 /** A payment id the extension allows: 16 to 128 letters, digits, `-` and `_`. */
 export const isPaymentId = (id: unknown): id is string =>
   typeof id === 'string' && /^[a-zA-Z0-9_-]{16,128}$/.test(id);
@@ -136,6 +148,15 @@ export function paymentSignature(
   paymentId?: string,
 ): string {
   const pid = pr.extensions?.[PAYMENT_IDENTIFIER] as { info?: object } | undefined;
+  // As x402's client merge: the Annon SDK's code first, then the declared codes, no duplicates.
+  const bc = pr.extensions?.[BUILDER_CODE] as
+    | ({ info?: { s?: unknown } } & Record<string, unknown>)
+    | undefined;
+  const declaredS = codes(bc?.info?.s);
+  const builderCode = {
+    ...(bc ?? {}),
+    info: { ...(bc?.info ?? {}), s: [...new Set([ANNON_SERVICE_CODE, ...declaredS])] },
+  };
   const advertised = pr.extensions?.annon;
   const info = {
     ...(advertised?.info ?? {
@@ -168,6 +189,7 @@ export function paymentSignature(
         ...(pid && paymentId
           ? { [PAYMENT_IDENTIFIER]: { ...pid, info: { ...pid.info, id: paymentId } } }
           : {}),
+        [BUILDER_CODE]: builderCode,
       },
     }),
   );
