@@ -18,6 +18,7 @@ mod storage;
 mod tests;
 mod text;
 mod unlock;
+mod v2;
 
 use evm::{bytes, hex0x};
 pub use moderation::{StopSalesArgs, TakedownReason};
