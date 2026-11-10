@@ -1,0 +1,11 @@
+# Only what the relayer image needs leaves this machine; internal/, .env* and the rest never do.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!packages/annon/package.json
+!packages/annon/src
+!apps/relayer/package.json
+!apps/relayer/server.ts
+!apps/relayer/ts-hook.mjs
+**/*.test.ts
