@@ -3,9 +3,9 @@
 use near_sdk::serde::Deserialize;
 use near_sdk::{env, near, AccountId};
 
-use super::identity::{Identity, IdentityJson};
-use super::terms::tagged_hash;
 use crate::evm::hex0x;
+use crate::identity::{Identity, IdentityJson};
+use crate::terms::tagged_hash;
 
 pub const MAX_MSG: usize = 1024;
 const MAX_PREFIX: usize = 160;
@@ -37,7 +37,7 @@ impl Purchase {
 }
 
 /// `keccak256("annon/base-payment/v2" ‖ 0x00 ‖ purchase_id)`: the EIP-3009 nonce of a Base purchase.
-pub fn base_nonce_v2(purchase_id: &[u8; 32]) -> [u8; 32] {
+pub fn base_nonce(purchase_id: &[u8; 32]) -> [u8; 32] {
     let mut b = b"annon/base-payment/v2\0".to_vec();
     b.extend_from_slice(purchase_id);
     env::keccak256_array(&b)
@@ -69,6 +69,8 @@ struct Body {
 }
 
 /// What a delivery's message says.
+// ponytail: short-lived return value, never stored; boxing would only add an allocation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq)]
 pub enum Parsed {
     /// Not an Annon purchase: no refund identity can be read. The contract refuses the tokens.
@@ -182,8 +184,9 @@ const G2_GENERATOR: [u8; 192] = {
     out
 };
 
-/// Reads a delivery's message. `contract`, `network` and `asset` are this deployment's.
-pub fn parse(msg: &str, network: &str, asset: &str) -> Parsed {
+/// Reads a purchase message for `route` (0 NEAR, 1 Base); `network` and `asset` are what this
+/// deployment accepts on that route, the contract is always this one.
+pub fn parse(msg: &str, network: &str, asset: &str, route: u8) -> Parsed {
     let Some(refund) = refund_prefix(msg) else {
         return Parsed::Foreign;
     };
@@ -198,7 +201,7 @@ pub fn parse(msg: &str, network: &str, asset: &str) -> Parsed {
         return bad("not a purchase message");
     };
     let b = m.purchase;
-    let route = match b.route.as_str() {
+    let named_route = match b.route.as_str() {
         "near-usdc" => 0,
         "base-usdc" => 1,
         _ => return bad("unknown route"),
@@ -231,7 +234,7 @@ pub fn parse(msg: &str, network: &str, asset: &str) -> Parsed {
         refund: refund.clone(),
         network: b.network,
         contract,
-        route,
+        route: named_route,
         asset: b.asset,
         file_id,
         terms_hash,
@@ -254,8 +257,8 @@ pub fn parse(msg: &str, network: &str, asset: &str) -> Parsed {
     {
         return bad("message is for another network, contract or asset");
     }
-    if purchase.route != 0 {
-        return bad("not a NEAR purchase");
+    if purchase.route != route {
+        return bad("purchase is for another route");
     }
     if !valid_bls_key(&purchase.buyer_key) {
         return bad("invalid buyer key");
@@ -266,7 +269,7 @@ pub fn parse(msg: &str, network: &str, asset: &str) -> Parsed {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::v2::terms::tests::{ctx, USDC};
+    use crate::terms::tests::{ctx, USDC};
 
     /// A real G1 point: the generator, compressed.
     pub const G1: &str = "97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb";
@@ -294,7 +297,7 @@ pub(crate) mod tests {
     }
 
     fn parse_here(m: &str) -> Parsed {
-        parse(m, "near:mainnet", USDC)
+        parse(m, "near:mainnet", USDC, 0)
     }
 
     #[test]
@@ -425,6 +428,6 @@ pub(crate) mod tests {
         for x in v {
             assert_ne!(x.id(), id);
         }
-        assert_ne!(base_nonce_v2(&id), id);
+        assert_ne!(base_nonce(&id), id);
     }
 }

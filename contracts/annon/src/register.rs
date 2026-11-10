@@ -1,202 +1,304 @@
-//! Listing a file and opening it again. Both take an EIP-191 signature from an EVM wallet over
-//! a text the contract builds itself, so the wallet shows exactly what the contract checks.
+//! Listing a file and giving its seller the key again (specs/near-settlement.md §3, §9). The seller
+//! authorizes a text the contract builds itself, so the wallet shows exactly what the contract
+//! checks: EVM wallets sign it (EIP-191), Solana wallets sign it (Ed25519 over UTF-8), and a NEAR
+//! seller calls the contract from its own account.
 use near_sdk::json_types::U128;
+use near_sdk::serde_json::json;
 use near_sdk::{env, near, require, AccountId};
 
 use crate::events::emit;
-use crate::evm::{bytes, hex0x, recover_eip191};
-use crate::text::{usdc, utc};
-use crate::unlock::buyer_entry;
-use crate::{Annon, AnnonExt, File};
-use near_sdk::serde_json::json;
+use crate::evm::{bytes, hex0x};
+use crate::identity::{Auth, Identity, IdentityJson};
+use crate::state::File;
+use crate::terms::{self, BaseTerms, NearTerms, Terms};
+use crate::text::utc;
+use crate::{Annon, AnnonExt};
 
 #[near(serializers = [json])]
 #[derive(Clone)]
-pub struct RegisterArgs {
-    /// 32 random bytes picked by the seller's client, hex.
-    pub file_id: String,
-    /// The seller's EVM address; must match the signature.
-    pub seller: String,
-    /// USDC base units (6 decimals).
+#[serde(deny_unknown_fields)]
+pub struct RecipientJson {
+    pub identity: IdentityJson,
+    pub bps: u16,
+}
+
+#[near(serializers = [json])]
+#[derive(Clone)]
+#[serde(deny_unknown_fields)]
+pub struct NearTermsJson {
+    pub token: AccountId,
     pub price: U128,
-    /// Where buyers pay: USDC goes to this address. The seller's wallet, a platform's, or any
-    /// contract the seller chose (e.g. an immutable revenue split); the signed text names it.
+    pub recipients: Vec<RecipientJson>,
+    pub remainder: u8,
+}
+
+#[near(serializers = [json])]
+#[derive(Clone)]
+#[serde(deny_unknown_fields)]
+pub struct BaseTermsJson {
+    pub usdc: String,
+    pub price: U128,
     pub pay_to: String,
-    /// The PAY2 `cipherHash` (`specs/pay2.md`, section 3), hex. The contract only stores it;
-    /// clients check the file against it.
+}
+
+#[near(serializers = [json])]
+#[derive(Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TermsJson {
+    pub network: String,
+    pub contract: AccountId,
+    pub file_id: String,
+    pub seller: IdentityJson,
+    pub pay2_version: u8,
     pub cipher_hash: String,
-    /// The only account that can take the file down. The contract can't tell whether the seller
-    /// controls it, so the buyer's client shows it and refuses unknown moderators by default.
     pub moderator: Option<AccountId>,
+    pub near: NearTermsJson,
+    pub base: Option<BaseTermsJson>,
+}
+
+fn identity(j: &IdentityJson) -> Identity {
+    Identity::from_json(j).unwrap_or_else(|| env::panic_str("invalid identity"))
+}
+
+impl TermsJson {
+    pub fn encode(t: &Terms) -> Self {
+        let id = |i: &Identity| IdentityJson::from(i);
+        TermsJson {
+            network: t.network.clone(),
+            contract: t.contract.clone(),
+            file_id: hex0x(&t.file_id),
+            seller: id(&t.seller),
+            pay2_version: t.pay2_version,
+            cipher_hash: hex0x(&t.cipher_hash),
+            moderator: t.moderator.clone(),
+            near: NearTermsJson {
+                token: t.near.token.clone(),
+                price: U128(t.near.price),
+                recipients: t
+                    .near
+                    .recipients
+                    .iter()
+                    .map(|(i, bps)| RecipientJson {
+                        identity: id(i),
+                        bps: *bps,
+                    })
+                    .collect(),
+                remainder: t.near.remainder,
+            },
+            base: t.base.as_ref().map(|b| BaseTermsJson {
+                usdc: hex0x(&b.usdc),
+                price: U128(b.price),
+                pay_to: hex0x(&b.pay_to),
+            }),
+        }
+    }
+
+    pub fn decode(&self) -> Terms {
+        Terms {
+            network: self.network.clone(),
+            contract: self.contract.clone(),
+            file_id: bytes::<32>(&self.file_id, "file_id"),
+            seller: identity(&self.seller),
+            pay2_version: self.pay2_version,
+            cipher_hash: bytes::<32>(&self.cipher_hash, "cipher_hash"),
+            moderator: self.moderator.clone(),
+            near: NearTerms {
+                token: self.near.token.clone(),
+                price: self.near.price.0,
+                recipients: self
+                    .near
+                    .recipients
+                    .iter()
+                    .map(|r| (identity(&r.identity), r.bps))
+                    .collect(),
+                remainder: self.near.remainder,
+            },
+            base: self.base.as_ref().map(|b| BaseTerms {
+                usdc: bytes::<20>(&b.usdc, "usdc"),
+                price: b.price.0,
+                pay_to: bytes::<20>(&b.pay_to, "pay_to"),
+            }),
+        }
+    }
+}
+
+#[near(serializers = [json])]
+#[derive(Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterArgs {
+    pub terms: TermsJson,
     /// The seller's one-time BLS12-381 G1 key (48 bytes compressed, hex) for the file key.
     pub seller_key: String,
-    /// Unix seconds after which the signature is void.
     pub deadline: u64,
 }
 
 #[near(serializers = [json])]
 #[derive(Clone)]
-pub struct ReopenArgs {
+#[serde(deny_unknown_fields)]
+pub struct SellerArgs {
     pub file_id: String,
-    /// The EVM address asking: the seller, or (with `unlock`) a recorded buyer.
-    pub wallet: String,
-    /// A fresh one-time BLS12-381 G1 key (48 bytes compressed, hex).
-    pub key: String,
-    /// Unix seconds after which the signature is void.
+    /// For reopen: a fresh one-time key. Absent for stop.
+    pub key: Option<String>,
     pub deadline: u64,
+}
+
+pub(crate) fn now() -> u64 {
+    env::block_timestamp() / 1_000_000_000
+}
+
+impl Annon {
+    pub(crate) fn file(&self, file_id: &[u8; 32]) -> &File {
+        self.files
+            .get(file_id)
+            .unwrap_or_else(|| env::panic_str("unknown file"))
+    }
+
+    fn seller_authorized(&self, file: &File, text: &str, auth: Option<&Auth>) {
+        require!(
+            file.terms.seller.authorized(text, auth),
+            "not authorized by the seller"
+        );
+    }
 }
 
 #[near]
 impl Annon {
-    /// Lists a file. Anyone may submit it; only the seller's EIP-191 signature over
-    /// `register_message(args)` makes it valid. The caller pays for storage with an attached
-    /// deposit (the rest is refunded) or, attaching nothing, from its prepaid balance.
-    /// Returns MPC's CKD answer (`big_y`, `big_c`): the file key encrypted to `seller_key`.
+    /// Lists a file and returns MPC's CKD answer (`big_y`, `big_c`): the file key encrypted to
+    /// `seller_key`. The seller authorizes `register_text`: EVM and Solana sellers by signature
+    /// (anyone may submit it), a NEAR seller by calling. The caller pays for storage with an
+    /// attached deposit (the rest is refunded) or, attaching nothing, from its prepaid balance.
+    /// If MPC fails the listing stays; the seller gets the key through `reopen_seller`.
     #[payable]
-    pub fn register(&mut self, args: RegisterArgs, sig: String) {
-        let file_id = bytes::<32>(&args.file_id, "file_id");
-        let seller = bytes::<20>(&args.seller, "seller");
-        let cipher_hash = bytes::<32>(&args.cipher_hash, "cipher_hash");
+    pub fn register(&mut self, args: RegisterArgs, auth: Option<Auth>) {
+        let terms = args.terms.decode();
         let seller_key = bytes::<48>(&args.seller_key, "seller_key");
-        let pay_to = bytes::<20>(&args.pay_to, "pay_to");
-        require!(args.price.0 > 0, "price must be above zero");
+        if let Some(why) = terms.problem(&self.network, &self.near_usdc) {
+            env::panic_str(why);
+        }
+        require!(now() <= args.deadline, "signature expired");
         require!(
-            env::block_timestamp() / 1_000_000_000 <= args.deadline,
-            "signature expired"
+            terms.seller.authorized(
+                &terms.register_text(&seller_key, args.deadline),
+                auth.as_ref()
+            ),
+            "not authorized by the seller"
         );
-        require!(
-            recover_eip191(&self.register_message(args.clone()), &sig) == Some(seller),
-            "signature is not from the seller"
-        );
+        let file_id = terms.file_id;
         require!(
             !self.files.contains_key(&file_id),
             "file already registered"
         );
-
         let event = json!({
             "file_id": hex0x(&file_id),
-            "seller": hex0x(&seller),
-            "price": args.price,
-            "pay_to": hex0x(&pay_to),
-            "cipher_hash": hex0x(&cipher_hash),
-            "moderator": args.moderator,
+            "terms_hash": hex0x(&terms.hash()),
+            "seller": terms.seller.text(),
         });
+        let seller = terms.seller.text();
         let before = env::storage_usage();
         self.files.insert(
             file_id,
             File {
-                seller,
-                price: args.price.0,
-                pay_to,
-                cipher_hash,
-                moderator: args.moderator,
+                terms,
+                header_hash: [0; 32],
                 sales_stopped_at: 0,
                 taken_down: 0,
             },
         );
         self.files.flush();
         self.pay_for_storage(env::storage_usage() - before);
-        emit("register", event);
-        // If MPC fails here the listing stays; the seller gets the key again through `reopen`.
-        self.ckd(&file_id, &seller_key, "register", &seller)
+        emit("file_registered", event);
+        self.ckd(&file_id, &seller_key, "register", seller, None)
     }
 
-    /// The exact text the seller signs. The SDK shows this to the wallet, so both sides agree.
-    pub fn register_message(&self, args: RegisterArgs) -> String {
-        let pay_to = hex0x(&bytes::<20>(&args.pay_to, "pay_to"));
-        let moderator = args.moderator.as_ref().map_or("(none)", |m| m.as_str()); // "(" never appears in an account id
-        format!(
-            "Annon: list a file for sale\n\
-             Signing this lets whoever holds the seller key below open the file.\n\
-             contract: {}\n\
-             file: {}\n\
-             seller: {}\n\
-             price: {} USDC\n\
-             pay to: {pay_to}\n\
-             cipher: {}\n\
-             moderator: {moderator}\n\
-             seller key: {}\n\
-             valid until: {}",
-            env::current_account_id(),
-            hex0x(&bytes::<32>(&args.file_id, "file_id")),
-            hex0x(&bytes::<20>(&args.seller, "seller")),
-            usdc(args.price.0),
-            hex0x(&bytes::<32>(&args.cipher_hash, "cipher_hash")),
-            hex0x(&bytes::<48>(&args.seller_key, "seller_key")),
-            utc(args.deadline),
+    /// The exact text the seller authorizes (§3.2). The SDK shows it to the wallet.
+    pub fn register_text(&self, args: RegisterArgs) -> String {
+        args.terms
+            .decode()
+            .register_text(&bytes::<48>(&args.seller_key, "seller_key"), args.deadline)
+    }
+
+    /// The text an EVM or Solana seller signs into a PAY2 header (§3.3).
+    pub fn publish_text(&self, file_id: String, header_hash: String) -> String {
+        terms::publish_text(
+            &env::current_account_id(),
+            &bytes::<32>(&file_id, "file_id"),
+            &bytes::<32>(&header_hash, "header_hash"),
         )
     }
 
-    /// Releases the file key again, to a new one-time key, with no new payment. Needs an EIP-191
-    /// signature from `wallet` over `reopen_message(args)`. The answer is encrypted to `args.key`,
-    /// so replaying the signature only helps whoever holds that key's secret. The signature
-    /// itself can't prove who made the key: the client must make it and build the text itself,
-    /// never accept them from a page or a server.
-    ///
-    /// Runs once per file, wallet and one-time key: a replay is refused, and another release
-    /// needs a new key. The caller pays the marker's storage (under 0.001 NEAR) from the attached
-    /// deposit, the rest coming back, or from its prepaid balance.
-    #[payable]
-    pub fn reopen(&mut self, args: ReopenArgs, sig: String) {
-        let file_id = bytes::<32>(&args.file_id, "file_id");
-        let wallet = bytes::<20>(&args.wallet, "wallet");
-        let key = bytes::<48>(&args.key, "key");
-        require!(
-            env::block_timestamp() / 1_000_000_000 <= args.deadline,
-            "signature expired"
-        );
+    /// A NEAR seller publishes the hash of the finished PAY2 header, once. Nothing is sold on
+    /// the NEAR route before it.
+    pub fn publish_header(&mut self, file_id: String, header_hash: String) {
+        let file_id = bytes::<32>(&file_id, "file_id");
+        let hash = bytes::<32>(&header_hash, "header_hash");
+        require!(hash != [0; 32], "header hash can't be zero");
         let file = self
             .files
-            .get(&file_id)
+            .get_mut(&file_id)
             .unwrap_or_else(|| env::panic_str("unknown file"));
         require!(
-            recover_eip191(&self.reopen_message(args.clone()), &sig) == Some(wallet),
-            "signature is not from the wallet"
+            matches!(&file.terms.seller, Identity::Near(a) if a == &env::predecessor_account_id()),
+            "only a NEAR seller publishes its header, from its own account"
         );
+        if file.header_hash == hash {
+            return;
+        }
+        require!(file.header_hash == [0; 32], "header already published");
+        file.header_hash = hash;
+        emit(
+            "header_published",
+            json!({ "file_id": hex0x(&file_id), "header_hash": hex0x(&hash) }),
+        );
+    }
+
+    /// The seller gets the file key again, for a fresh one-time key; once per key.
+    #[payable]
+    pub fn reopen_seller(&mut self, args: SellerArgs, auth: Option<Auth>) {
+        let file_id = bytes::<32>(&args.file_id, "file_id");
+        let key = bytes::<48>(
+            args.key
+                .as_deref()
+                .unwrap_or_else(|| env::panic_str("key is required")),
+            "key",
+        );
+        require!(now() <= args.deadline, "signature expired");
+        let text = self.reopen_seller_text(args);
+        let file = self.file(&file_id);
+        self.seller_authorized(file, &text, auth.as_ref());
         require!(file.taken_down == 0, "file taken down");
-        require!(
-            file.seller == wallet || self.buyers.contains_key(&buyer_entry(&file_id, &wallet)),
-            "only the seller or a buyer can reopen"
-        );
-        // Once per file, wallet and one-time key: another release needs a new key and signature.
-        let marker = reopen_marker(&file_id, &wallet, &key);
+        let seller = file.terms.seller.text();
+        let mut m = b"annon/reopen-seller/v2\0".to_vec();
+        m.extend_from_slice(&file_id);
+        m.extend_from_slice(&key);
+        let marker = env::sha256_array(&m);
         require!(
             !self.reopened.contains_key(&marker),
-            "this one-time key was already used to reopen the file; reopen with a new one"
+            "this one-time key was already used; reopen with a new one"
         );
         let before = env::storage_usage();
         self.reopened.insert(marker, ());
         self.reopened.flush();
         self.pay_for_storage(env::storage_usage() - before);
-        self.ckd(&file_id, &key, "reopen", &wallet)
+        self.ckd(&file_id, &key, "reopen", seller, None)
     }
 
-    /// The exact text a wallet signs to open a file again.
-    pub fn reopen_message(&self, args: ReopenArgs) -> String {
+    pub fn reopen_seller_text(&self, args: SellerArgs) -> String {
+        let file_id = bytes::<32>(&args.file_id, "file_id");
         format!(
             "Annon: open a file again\n\
              Signing this lets whoever holds the one-time key below open the file.\n\
              contract: {}\n\
              file: {}\n\
-             wallet: {}\n\
+             seller: {}\n\
              one-time key: {}\n\
              valid until: {}",
             env::current_account_id(),
-            hex0x(&bytes::<32>(&args.file_id, "file_id")),
-            hex0x(&bytes::<20>(&args.wallet, "wallet")),
-            hex0x(&bytes::<48>(&args.key, "key")),
+            hex0x(&file_id),
+            self.file(&file_id).terms.seller.text(),
+            hex0x(&bytes::<48>(args.key.as_deref().unwrap_or(""), "key")),
             utc(args.deadline),
         )
     }
-}
-
-/// What marks a `reopen` as tried. The map is this contract's own, so the contract needs no place in it.
-fn reopen_marker(file_id: &[u8; 32], wallet: &[u8; 20], key: &[u8; 48]) -> [u8; 32] {
-    let mut m = b"annon/reopen".to_vec();
-    m.extend_from_slice(file_id);
-    m.extend_from_slice(wallet);
-    m.extend_from_slice(key);
-    env::keccak256_array(&m)
 }
 
 #[cfg(test)]
@@ -206,223 +308,104 @@ mod tests {
     use near_sdk::test_utils::get_created_receipts;
     use near_sdk::NearToken;
 
+    fn seller_args(key: &str) -> SellerArgs {
+        SellerArgs {
+            file_id: FILE.into(),
+            key: Some(format!("0x{}", key.repeat(48))),
+            deadline: NOW_S + 600,
+        }
+    }
+
+    fn reopen_as(c: &mut Annon, seller: &Seller, key: &str) {
+        let r = seller_args(key);
+        let auth = seller.auth(&c.reopen_seller_text(r.clone()));
+        c.reopen_seller(r, auth);
+    }
+
     #[test]
-    fn registers_a_file_signed_by_its_seller() {
+    fn registers_a_file_signed_by_its_evm_seller() {
+        let mut c = contract();
+        let seller = Seller::new(1);
+        let a = registered(&mut c, &seller);
+        let f = c.get_file(FILE.into()).unwrap();
+        assert_eq!(f.terms.seller.id, seller.address());
+        assert_eq!(f.terms.near.price, U128(10_000));
+        assert_eq!(f.terms.base.as_ref().unwrap().pay_to, PAY_TO);
+        assert_eq!(f.terms.cipher_hash, a.terms.cipher_hash);
+        assert_eq!(f.terms.moderator, a.terms.moderator);
+        assert_eq!(f.terms_hash, hex0x(&terms_hash()));
+        assert_eq!(
+            (f.header_hash, f.sales_stopped_at, f.taken_down),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn registers_a_file_signed_by_a_solana_seller() {
+        let mut c = contract();
+        let sol = Sol::new(4);
+        let a = args_for(sol.id());
+        let auth = sol.auth(&c.register_text(a.clone()));
+        c.register(a, auth);
+        assert_eq!(c.get_file(FILE.into()).unwrap().terms.seller.kind, "solana");
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized by the seller")]
+    fn a_solana_signature_over_other_bytes_is_refused() {
+        let mut c = contract();
+        let sol = Sol::new(4);
+        let a = args_for(sol.id());
+        let auth = sol.auth(&(c.register_text(a.clone()) + " "));
+        c.register(a, auth);
+    }
+
+    #[test]
+    fn a_near_seller_registers_by_calling() {
+        let mut c = contract();
+        let a = args_for(near_id("seller.near"));
+        as_caller("seller.near", NearToken::from_millinear(100));
+        c.register(a, None);
+        assert_eq!(
+            c.get_file(FILE.into()).unwrap().terms.seller.id,
+            "seller.near"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized by the seller")]
+    fn nobody_else_registers_for_a_near_seller() {
+        let mut c = contract();
+        c.register(args_for(near_id("seller.near")), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized by the seller")]
+    fn a_signature_of_the_wrong_kind_is_refused() {
         let mut c = contract();
         let seller = Seller::new(1);
         let a = args(&seller);
-        let sig = signed(&c, &seller, &a);
-        c.register(a.clone(), sig);
-
-        let f = c.get_file(a.file_id).unwrap();
-        assert_eq!(f.seller, seller.address());
-        assert_eq!(f.price, U128(10_000));
-        assert_eq!(f.pay_to, PAY_TO);
-        assert_eq!(f.cipher_hash, a.cipher_hash);
-        assert_eq!(f.moderator, a.moderator);
-        assert_eq!(f.sales_stopped_at, None);
-        assert_eq!(f.taken_down, None);
+        let mut auth = signed(&c, &seller, &a).unwrap();
+        auth.kind = "solana".into();
+        c.register(a, Some(auth));
     }
 
     #[test]
-    fn stores_pay_to_in_lowercase_whatever_case_it_was_signed_in() {
-        let mut c = contract();
-        let seller = Seller::new(1);
-        let mut a = args(&seller);
-        a.pay_to = PAY_TO.to_uppercase().replace("0X", "0x");
-        a.moderator = None;
-        let sig = signed(&c, &seller, &a);
-        c.register(a.clone(), sig);
-        assert_eq!(c.get_file(a.file_id).unwrap().pay_to, PAY_TO);
-    }
-
-    #[test]
-    #[should_panic(expected = "pay_to must be 20 bytes of hex")]
-    fn refuses_a_pay_to_that_is_not_an_address() {
-        let mut c = contract();
-        let seller = Seller::new(1);
-        let mut a = args(&seller);
-        a.pay_to = "0x1234".into();
-        c.register(a, "0x00".into());
-    }
-
-    #[test]
-    fn message_names_the_contract_and_the_key_fields() {
+    fn the_text_names_the_contract_and_the_key_fields() {
         let c = contract();
         let seller = Seller::new(1);
-        let m = c.register_message(args(&seller));
+        let m = c.register_text(args(&seller));
         for part in [
             CONTRACT,
             &seller.address(),
-            "\nprice: 0.01 USDC\n",
-            &format!("\npay to: {PAY_TO}\n"),
-            "moderator.sputnik-dao.near",
+            "0.01",
+            PAY_TO,
+            PLATFORM,
+            MODERATOR,
             "\nvalid until: 2026-10-26 07:43:20 UTC",
-            "lets whoever holds the seller key below open the file",
         ] {
-            assert!(m.contains(part), "message is missing {part}:\n{m}");
+            assert!(m.contains(part), "text is missing {part}:\n{m}");
         }
-    }
-
-    /// specs/vectors/texts.json: the exact texts the contract asks wallets to sign, for clients to
-    /// reproduce byte for byte. `ANNON_WRITE_VECTORS=1 cargo test` rewrites the file; otherwise the
-    /// committed file must equal what the contract produces now.
-    #[test]
-    fn texts_match_the_shared_vectors() {
-        use crate::moderation::StopSalesArgs;
-        use near_sdk::serde_json::{to_value, Value};
-        use near_sdk::test_utils::VMContextBuilder;
-        use near_sdk::testing_env;
-
-        let at = |id: &str| {
-            testing_env!(VMContextBuilder::new()
-                .current_account_id(id.parse().unwrap())
-                .predecessor_account_id(id.parse().unwrap())
-                .build());
-            init()
-        };
-        let seller = Seller::new(1).address();
-        let register =
-            |price: u128, pay_to: &str, moderator: Option<&str>, deadline: u64| RegisterArgs {
-                file_id: format!("0x{}", "11".repeat(32)),
-                seller: seller.clone(),
-                price: U128(price),
-                pay_to: pay_to.into(),
-                cipher_hash: format!("0x{}", "22".repeat(32)),
-                moderator: moderator.map(|m| m.parse().unwrap()),
-                seller_key: format!("0x{}", "33".repeat(48)),
-                deadline,
-            };
-        let mixed_case = RegisterArgs {
-            file_id: "AbCdEf".repeat(10) + "0123",
-            seller: seller.to_uppercase().replace("0X", "0x"),
-            cipher_hash: "0x".to_string() + &"Ee".repeat(32),
-            ..register(
-                1,
-                "58DA990A8F4A3A6CA7CB6315D68A140105917352",
-                None,
-                951_782_400,
-            )
-        };
-        let mut cases: Vec<Value> = vec![];
-        let mut add = |id: &str, contract: &str, kind: &str, args: Value, text: String| {
-            cases.push(near_sdk::serde_json::json!({ "id": id, "contractId": contract, "kind": kind, "args": args, "text": text }));
-        };
-        let main = "v1.annon.defdone.near";
-        let dev = "annon-dev.synthetic.near";
-        for (id, contract, a) in [
-            (
-                "register-moderated",
-                main,
-                register(
-                    10_000,
-                    &seller,
-                    Some("moderator.sputnik-dao.near"),
-                    1_793_000_600,
-                ),
-            ),
-            ("register-mixed-case-hex", main, mixed_case),
-            (
-                "register-whole-usdc-epoch",
-                dev,
-                register(1_000_000, PAY_TO, None, 0),
-            ),
-            (
-                "register-fraction-2100",
-                main,
-                register(123_456_789, PAY_TO, None, 4_107_542_400),
-            ),
-            (
-                "register-1.5-end-of-2099",
-                main,
-                register(1_500_000, PAY_TO, None, 4_102_444_799),
-            ),
-            (
-                "register-max-price",
-                main,
-                register(u128::MAX, PAY_TO, None, 1_793_800_706),
-            ),
-        ] {
-            let text = at(contract).register_message(a.clone());
-            add(id, contract, "register", to_value(&a).unwrap(), text);
-        }
-        for (id, contract, a) in [
-            (
-                "reopen",
-                main,
-                ReopenArgs {
-                    file_id: format!("0x{}", "11".repeat(32)),
-                    wallet: seller.clone(),
-                    key: format!("0x{}", "44".repeat(48)),
-                    deadline: 1_793_000_600,
-                },
-            ),
-            (
-                "reopen-dev-no-prefix",
-                dev,
-                ReopenArgs {
-                    file_id: "ab".repeat(32),
-                    wallet: seller[2..].to_uppercase(),
-                    key: "Cd".repeat(48),
-                    deadline: 951_868_799,
-                },
-            ),
-        ] {
-            let text = at(contract).reopen_message(a.clone());
-            add(id, contract, "reopen", to_value(&a).unwrap(), text);
-        }
-        for (id, contract, a) in [
-            (
-                "stop-sales",
-                main,
-                StopSalesArgs {
-                    file_id: format!("0x{}", "11".repeat(32)),
-                    deadline: 1_793_000_600,
-                },
-            ),
-            (
-                "stop-sales-dev",
-                dev,
-                StopSalesArgs {
-                    file_id: "FF".repeat(32),
-                    deadline: 4_102_444_799,
-                },
-            ),
-        ] {
-            let text = at(contract).stop_sales_message(a.clone());
-            add(id, contract, "stop_sales", to_value(&a).unwrap(), text);
-        }
-
-        let file = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../specs/vectors/texts.json"
-        );
-        let json = near_sdk::serde_json::to_string_pretty(&near_sdk::serde_json::json!({
-            "source": "written by contracts/annon/src/register.rs texts_match_the_shared_vectors",
-            "cases": cases,
-        }))
-        .unwrap()
-            + "\n";
-        if std::env::var("ANNON_WRITE_VECTORS").is_ok() {
-            std::fs::write(file, &json).unwrap();
-        }
-        assert_eq!(
-            std::fs::read_to_string(file).unwrap_or_default(),
-            json,
-            "specs/vectors/texts.json is stale: run ANNON_WRITE_VECTORS=1 cargo test"
-        );
-    }
-
-    #[test]
-    fn reopen_message_says_it_gives_access_and_reads_in_utc() {
-        let c = contract();
-        let seller = Seller::new(1);
-        let m = c.reopen_message(reopen_args(&args(&seller).file_id, &seller));
-        assert!(
-            m.contains("lets whoever holds the one-time key below open the file"),
-            "{m}"
-        );
-        assert!(m.ends_with("\nvalid until: 2026-10-26 07:43:20 UTC"), "{m}");
     }
 
     #[test]
@@ -436,7 +419,7 @@ mod tests {
         registered(&mut c, &Seller::new(1));
         let used = before - balance(&c, RELAYER);
         assert!(
-            used > 0 && used < NearToken::from_millinear(5).as_yoctonear(),
+            used > 0 && used < NearToken::from_millinear(10).as_yoctonear(),
             "used {used}"
         );
         assert_eq!(refunded(receipts), 0, "nothing to refund from a balance");
@@ -448,41 +431,52 @@ mod tests {
         as_caller(RELAYER, NearToken::from_millinear(100));
         c.storage_deposit(None);
         let before = balance(&c, RELAYER);
-        as_caller(RELAYER, NearToken::from_millinear(10));
+        as_caller(RELAYER, NearToken::from_millinear(20));
         registered(&mut c, &Seller::new(1));
         assert_eq!(balance(&c, RELAYER), before);
     }
 
     #[test]
-    #[should_panic(expected = "signature is not from the seller")]
+    #[should_panic(expected = "not authorized by the seller")]
     fn rejects_a_signature_from_someone_else() {
         let mut c = contract();
         let a = args(&Seller::new(1));
-        let sig = signed(&c, &Seller::new(2), &a);
-        c.register(a, sig);
+        let auth = signed(&c, &Seller::new(2), &a);
+        c.register(a, auth);
     }
 
     #[test]
-    #[should_panic(expected = "signature is not from the seller")]
+    #[should_panic(expected = "not authorized by the seller")]
     fn rejects_a_field_changed_after_signing() {
         let mut c = contract();
         let seller = Seller::new(1);
         let mut a = args(&seller);
-        let sig = signed(&c, &seller, &a);
-        a.price = U128(1);
-        c.register(a, sig);
+        let auth = signed(&c, &seller, &a);
+        a.terms.near.price = U128(1);
+        c.register(a, auth);
     }
 
     #[test]
-    #[should_panic(expected = "signature is not from the seller")]
+    #[should_panic(expected = "not authorized by the seller")]
+    fn rejects_a_changed_split_after_signing() {
+        let mut c = contract();
+        let seller = Seller::new(1);
+        let mut a = args(&seller);
+        let auth = signed(&c, &seller, &a);
+        a.terms.near.recipients[1].identity = near_id("thief.near");
+        c.register(a, auth);
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized by the seller")]
     fn rejects_a_signature_made_for_another_contract() {
         let mut c = contract();
         let seller = Seller::new(1);
         let a = args(&seller);
         let other = c
-            .register_message(a.clone())
+            .register_text(a.clone())
             .replace(CONTRACT, "v2.annon.defdone.near");
-        c.register(a, seller.sign(&other));
+        c.register(a, seller.auth(&other));
     }
 
     #[test]
@@ -491,10 +485,10 @@ mod tests {
         let mut c = contract();
         let seller = Seller::new(1);
         let a = args(&seller);
-        let sig = signed(&c, &seller, &a);
-        c.register(a.clone(), sig.clone());
+        let auth = signed(&c, &seller, &a);
+        c.register(a.clone(), auth.clone());
         context(NearToken::from_millinear(100));
-        c.register(a, sig);
+        c.register(a, auth);
     }
 
     #[test]
@@ -504,39 +498,78 @@ mod tests {
         let seller = Seller::new(1);
         let mut a = args(&seller);
         a.deadline = NOW_S - 1;
-        let sig = signed(&c, &seller, &a);
-        c.register(a, sig);
+        let auth = signed(&c, &seller, &a);
+        c.register(a, auth);
     }
 
-    #[test]
-    #[should_panic(expected = "price must be above zero")]
-    fn rejects_a_free_file() {
+    /// Each `Terms::problem` (unit-tested in terms.rs) stops `register`, signature or not.
+    fn refused(change: impl FnOnce(&mut RegisterArgs)) {
         let mut c = contract();
         let seller = Seller::new(1);
         let mut a = args(&seller);
-        a.price = U128(0);
-        let sig = signed(&c, &seller, &a);
-        c.register(a, sig);
+        change(&mut a);
+        let auth = signed(&c, &seller, &a);
+        c.register(a, auth);
+    }
+
+    #[test]
+    #[should_panic(expected = "price must be above 0")]
+    fn rejects_a_free_file() {
+        refused(|a| a.terms.near.price = U128(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "terms are for another network or contract")]
+    fn rejects_terms_for_another_network() {
+        refused(|a| a.terms.network = "near:testnet".into());
+    }
+
+    #[test]
+    #[should_panic(expected = "terms are for another network or contract")]
+    fn rejects_terms_for_another_contract() {
+        refused(|a| a.terms.contract = "other.near".parse().unwrap());
+    }
+
+    #[test]
+    #[should_panic(expected = "the NEAR price must be in the configured USDC")]
+    fn rejects_another_token() {
+        refused(|a| a.terms.near.token = "usdt.tether-token.near".parse().unwrap());
+    }
+
+    #[test]
+    #[should_panic(expected = "files use PAY2 version 2")]
+    fn rejects_an_old_pay2_version() {
+        refused(|a| a.terms.pay2_version = 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "split recipients must be distinct and sorted")]
+    fn rejects_an_unsorted_split() {
+        refused(|a| a.terms.near.recipients.reverse());
+    }
+
+    #[test]
+    #[should_panic(expected = "split shares must be above 0 and sum to 10000 bps")]
+    fn rejects_shares_that_do_not_add_up() {
+        refused(|a| a.terms.near.recipients[1].bps = 400);
     }
 
     #[test]
     #[should_panic(expected = "file_id must be 32 bytes")]
     fn rejects_a_short_file_id() {
         let mut c = contract();
-        let seller = Seller::new(1);
-        let mut a = args(&seller);
-        a.file_id = "0x1234".into();
-        c.register(a, "0x00".into());
+        let mut a = args(&Seller::new(1));
+        a.terms.file_id = "0x1234".into();
+        c.register(a, None);
     }
 
     #[test]
     #[should_panic(expected = "seller_key must be 48 bytes")]
     fn rejects_a_wrong_size_one_time_key() {
         let mut c = contract();
-        let seller = Seller::new(1);
-        let mut a = args(&seller);
+        let mut a = args(&Seller::new(1));
         a.seller_key = format!("0x{}", "33".repeat(32));
-        c.register(a, "0x00".into());
+        c.register(a, None);
     }
 
     #[test]
@@ -545,218 +578,119 @@ mod tests {
         let mut c = contract();
         let seller = Seller::new(1);
         let a = args(&seller);
-        let sig = signed(&c, &seller, &a);
+        let auth = signed(&c, &seller, &a);
         context(NearToken::from_yoctonear(0));
-        c.register(a, sig);
+        c.register(a, auth);
     }
 
     #[test]
-    #[should_panic(expected = "signature is not from the seller")]
+    #[should_panic(expected = "not authorized by the seller")]
     fn no_moderator_and_an_account_named_none_sign_differently() {
         let mut c = contract();
         let seller = Seller::new(1);
         let mut a = args(&seller);
-        a.moderator = None;
-        let sig = signed(&c, &seller, &a);
-        a.moderator = Some("none".parse().unwrap());
-        c.register(a, sig);
-    }
-
-    #[test]
-    fn hex_spelling_does_not_change_the_message() {
-        let c = contract();
-        let seller = Seller::new(1);
-        let a = args(&seller);
-        let mut b = a.clone();
-        b.file_id = b.file_id.trim_start_matches("0x").to_uppercase();
-        b.seller = b.seller.to_uppercase().replace("0X", "0x");
-        assert_eq!(c.register_message(a), c.register_message(b));
+        a.terms.moderator = None;
+        let auth = signed(&c, &seller, &a);
+        a.terms.moderator = Some("none".parse().unwrap());
+        c.register(a, auth);
     }
 
     #[test]
     fn asks_mpc_for_the_file_key_encrypted_to_the_seller() {
         let mut c = contract();
-        let seller = Seller::new(1);
-        let a = args(&seller);
-        let sig = signed(&c, &seller, &a);
-        c.register(a, sig);
-
-        let call = get_created_receipts()
-            .into_iter()
-            .filter(|r| r.receiver_id.as_str() == "v1.signer")
-            .flat_map(|r| r.actions)
-            .find_map(|action| match action {
-                near_sdk::mock::MockAction::FunctionCallWeight {
-                    method_name,
-                    args,
-                    attached_deposit,
-                    ..
-                } => Some((method_name, args, attached_deposit)),
-                _ => None,
-            })
-            .expect("no call to v1.signer");
-        assert_eq!(call.0, b"request_app_private_key");
-        assert_eq!(call.2, NearToken::from_yoctonear(1));
-        let json: near_sdk::serde_json::Value = near_sdk::serde_json::from_slice(&call.1).unwrap();
+        let before = get_created_receipts().len();
+        registered(&mut c, &Seller::new(1));
+        let call = calls_to("v1.signer", "request_app_private_key")
+            .pop()
+            .unwrap();
         let key = format!("bls12381g1:{}", bs58::encode([0x33u8; 48]).into_string());
         assert_eq!(
-            json,
+            call,
             near_sdk::serde_json::json!({ "request": {
                 "derivation_path": format!("file/{}", "11".repeat(32)),
                 "app_public_key": { "AppPublicKey": key },
                 "domain_id": 2,
             }})
         );
+        assert_eq!(self_calls(before), vec!["on_key_released"]);
+        let e = &events("file_registered")[0];
+        assert_eq!(e["file_id"], FILE);
+        assert_eq!(e["terms_hash"], hex0x(&terms_hash()));
     }
 
     #[test]
     fn the_seller_can_ask_for_the_key_again() {
         let mut c = contract();
         let seller = Seller::new(1);
-        let a = registered(&mut c, &seller);
+        registered(&mut c, &seller);
         let before = ckd_calls();
-        let r = reopen_args(&a.file_id, &seller);
-        let sig = seller.sign(&c.reopen_message(r.clone()));
-        c.reopen(r, sig);
-        assert_eq!(ckd_calls(), before + 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "this one-time key was already used to reopen the file")]
-    fn the_same_reopen_runs_once() {
-        let mut c = contract();
-        let seller = Seller::new(1);
-        let a = registered(&mut c, &seller);
-        let r = reopen_args(&a.file_id, &seller);
-        let sig = seller.sign(&c.reopen_message(r.clone()));
-        c.reopen(r.clone(), sig.clone());
-        // The same signature again (a replay, or a relayer resending after a lost answer).
-        c.reopen(r, sig);
-    }
-
-    #[test]
-    fn another_one_time_key_reopens_again() {
-        let mut c = contract();
-        let seller = Seller::new(1);
-        let a = registered(&mut c, &seller);
-        let before = ckd_calls();
-        for key in ["44", "55"] {
-            let r = ReopenArgs {
-                key: format!("0x{}", key.repeat(48)),
-                ..reopen_args(&a.file_id, &seller)
-            };
-            let sig = seller.sign(&c.reopen_message(r.clone()));
-            c.reopen(r, sig);
-        }
+        reopen_as(&mut c, &seller, "44");
+        reopen_as(&mut c, &seller, "55");
         assert_eq!(ckd_calls(), before + 2);
     }
 
     #[test]
-    fn the_marker_is_per_file_wallet_and_key() {
-        let k = [4u8; 48];
-        let m = reopen_marker(&[1; 32], &[2; 20], &k);
-        assert_ne!(m, reopen_marker(&[9; 32], &[2; 20], &k));
-        assert_ne!(m, reopen_marker(&[1; 32], &[9; 20], &k));
-        assert_ne!(m, reopen_marker(&[1; 32], &[2; 20], &[9; 48]));
-        assert_eq!(m, reopen_marker(&[1; 32], &[2; 20], &k));
-    }
-
-    #[test]
-    #[should_panic(expected = "only the seller or a buyer can reopen")]
-    fn a_stranger_cannot_reopen() {
-        let mut c = contract();
-        let a = registered(&mut c, &Seller::new(1));
-        let stranger = Seller::new(2);
-        let r = reopen_args(&a.file_id, &stranger);
-        let sig = stranger.sign(&c.reopen_message(r.clone()));
-        c.reopen(r, sig);
-    }
-
-    #[test]
-    #[should_panic(expected = "signature is not from the wallet")]
-    fn reopen_needs_the_wallet_signature() {
+    #[should_panic(expected = "this one-time key was already used")]
+    fn the_same_seller_reopen_runs_once() {
         let mut c = contract();
         let seller = Seller::new(1);
-        let a = registered(&mut c, &seller);
-        let r = reopen_args(&a.file_id, &seller);
-        let sig = Seller::new(2).sign(&c.reopen_message(r.clone()));
-        c.reopen(r, sig);
+        registered(&mut c, &seller);
+        reopen_as(&mut c, &seller, "44");
+        reopen_as(&mut c, &seller, "44");
     }
 
     #[test]
-    #[should_panic(expected = "signature is not from the wallet")]
-    fn a_reopen_signature_cannot_be_moved_to_another_key() {
+    #[should_panic(expected = "not authorized by the seller")]
+    fn a_stranger_cannot_reopen_as_seller() {
         let mut c = contract();
-        let seller = Seller::new(1);
-        let a = registered(&mut c, &seller);
-        let mut r = reopen_args(&a.file_id, &seller);
-        let sig = seller.sign(&c.reopen_message(r.clone()));
-        r.key = format!("0x{}", "55".repeat(48));
-        c.reopen(r, sig);
+        registered(&mut c, &Seller::new(1));
+        reopen_as(&mut c, &Seller::new(2), "44");
     }
 
     #[test]
-    #[should_panic(expected = "signature expired")]
-    fn rejects_an_expired_reopen() {
+    #[should_panic(expected = "not authorized by the seller")]
+    fn a_seller_reopen_cannot_be_moved_to_another_key() {
         let mut c = contract();
         let seller = Seller::new(1);
-        let a = registered(&mut c, &seller);
-        let mut r = reopen_args(&a.file_id, &seller);
-        r.deadline = NOW_S - 1;
-        let sig = seller.sign(&c.reopen_message(r.clone()));
-        c.reopen(r, sig);
+        registered(&mut c, &seller);
+        let r = seller_args("44");
+        let auth = seller.auth(&c.reopen_seller_text(r.clone()));
+        c.reopen_seller(seller_args("55"), auth);
     }
 
     #[test]
     #[should_panic(expected = "unknown file")]
     fn rejects_reopen_of_an_unknown_file() {
         let mut c = contract();
-        let seller = Seller::new(1);
-        let r = reopen_args(&format!("0x{}", "99".repeat(32)), &seller);
-        let sig = seller.sign(&c.reopen_message(r.clone()));
-        c.reopen(r, sig);
+        let r = SellerArgs {
+            file_id: format!("0x{}", "99".repeat(32)),
+            ..seller_args("44")
+        };
+        c.reopen_seller(r, None);
     }
 
     #[test]
-    fn register_and_reopen_messages_have_their_own_prefix() {
-        let c = contract();
-        let seller = Seller::new(1);
-        let m = c.reopen_message(reopen_args(&args(&seller).file_id, &seller));
-        assert!(m.starts_with("Annon: open a file again\n"), "{m}");
-        assert!(c
-            .register_message(args(&seller))
-            .starts_with("Annon: list a file for sale\n"));
-        assert!(m.contains(CONTRACT));
-    }
-
-    #[test]
-    fn register_emits_an_event_and_confirms_the_key_release() {
+    fn a_near_seller_publishes_its_header_once() {
         let mut c = contract();
-        let seller = Seller::new(1);
-        let a = args(&seller);
-        let sig = signed(&c, &seller, &a);
-        let before = get_created_receipts().len();
-        c.register(a.clone(), sig);
-        let e = &events("register")[0];
-        assert_eq!(e["file_id"], a.file_id);
-        assert_eq!(e["seller"], seller.address());
-        assert_eq!(e["price"], "10000");
-        assert_eq!(e["pay_to"], PAY_TO);
-        assert_eq!(e["cipher_hash"], a.cipher_hash);
-        assert_eq!(e["moderator"], "moderator.sputnik-dao.near");
-        assert_eq!(self_calls(before), vec!["on_key_released"]);
+        as_caller("seller.near", NearToken::from_millinear(100));
+        c.register(args_for(near_id("seller.near")), None);
+        let h = format!("0x{}", "ab".repeat(32));
+        c.publish_header(FILE.into(), h.clone());
+        c.publish_header(FILE.into(), h.clone()); // the same hash again is a no-op
+        assert_eq!(c.get_file(FILE.into()).unwrap().header_hash, Some(h));
+        assert_eq!(events("header_published").len(), 1);
+        let other = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            c.publish_header(FILE.into(), format!("0x{}", "cd".repeat(32)))
+        }));
+        assert!(other.is_err(), "a second, different header was accepted");
     }
 
     #[test]
-    fn reopen_confirms_the_key_release_too() {
+    #[should_panic(expected = "only a NEAR seller publishes its header")]
+    fn an_evm_seller_has_no_header_to_publish() {
         let mut c = contract();
-        let seller = Seller::new(1);
-        let a = registered(&mut c, &seller);
-        let r = reopen_args(&a.file_id, &seller);
-        let sig = seller.sign(&c.reopen_message(r.clone()));
-        let before = get_created_receipts().len();
-        c.reopen(r, sig);
-        assert_eq!(self_calls(before), vec!["on_key_released"]);
+        registered(&mut c, &Seller::new(1));
+        c.publish_header(FILE.into(), format!("0x{}", "ab".repeat(32)));
     }
 
     #[test]
@@ -766,16 +700,26 @@ mod tests {
             CKD_ANSWER.as_bytes().to_vec(),
         ));
         c.on_key_released(
-            format!("0x{}", "11".repeat(32)),
-            format!("0x{}", "44".repeat(48)),
-            "reopen".into(),
-            PAYER.into(),
+            FILE.into(),
+            G1.into(),
+            "claim".into(),
+            "EVM 0x00".into(),
+            Some("0x01".into()),
+            Some(3),
         );
         let e = &events("key_released")[0];
-        assert_eq!(e["file_id"], format!("0x{}", "11".repeat(32)));
-        assert_eq!(e["key"], format!("0x{}", "44".repeat(48)));
-        assert_eq!(e["reason"], "reopen");
-        assert_eq!(e["wallet"], PAYER);
+        assert_eq!(
+            (e["file_id"].as_str(), e["key"].as_str()),
+            (Some(FILE), Some(G1))
+        );
+        assert_eq!(
+            (e["reason"].as_str(), e["who"].as_str()),
+            (Some("claim"), Some("EVM 0x00"))
+        );
+        assert_eq!(
+            (e["purchase"].as_str(), e["grant"].as_u64()),
+            (Some("0x01"), Some(3))
+        );
     }
 
     #[test]
@@ -783,15 +727,17 @@ mod tests {
         let mut c = contract();
         ckd_answered(near_sdk::PromiseResult::Failed);
         c.on_key_released(
-            format!("0x{}", "11".repeat(32)),
-            format!("0x{}", "44".repeat(48)),
+            FILE.into(),
+            G1.into(),
             "unlock".into(),
-            PAYER.into(),
+            "x".into(),
+            None,
+            None,
         );
         assert!(events("key_released").is_empty());
         assert!(near_sdk::test_utils::get_logs()
             .iter()
-            .any(|l| l.contains("call reopen")));
+            .any(|l| l.contains("ask again")));
     }
 
     #[test]

@@ -6,9 +6,12 @@ use near_sdk::serde_json::json;
 use near_sdk::{env, near, require, NearToken};
 
 use crate::events::emit;
-use crate::evm::{bytes, hex0x, recover_eip191};
+use crate::evm::{bytes, hex0x};
+use crate::identity::Auth;
+use crate::register::SellerArgs;
+use crate::state::File;
 use crate::text::utc;
-use crate::{Annon, AnnonExt, File};
+use crate::{Annon, AnnonExt};
 
 /// A payment that lands on Base this long after a stop still counts, so an authorization signed
 /// before the stop (the SDK signs for at most 180 s, plus 60 s of clock skew) can't be settled into a payment without a key,
@@ -25,30 +28,23 @@ pub enum TakedownReason {
     RightsHolderNotice,
 }
 
-#[near(serializers = [json])]
-#[derive(Clone)]
-pub struct StopSalesArgs {
-    pub file_id: String,
-    /// Unix seconds after which the signature is void.
-    pub deadline: u64,
-}
-
 #[near]
 impl Annon {
-    /// Stops new sales of a file, signed by its seller (EIP-191 over `stop_sales_message`).
-    /// Payments made before the stop still unlock, and every past buyer can still `reopen`.
-    pub fn stop_sales(&mut self, args: StopSalesArgs, sig: String) {
+    /// Stops new sales of a file for good, authorized by its seller (`stop_sales_text`): by
+    /// signature for EVM and Solana sellers, by calling for a NEAR seller. Payments made before the
+    /// stop still unlock, and every past buyer keeps access.
+    pub fn stop_sales(&mut self, args: SellerArgs, auth: Option<Auth>) {
         let file_id = bytes::<32>(&args.file_id, "file_id");
         require!(now() <= args.deadline, "signature expired");
-        let signer = recover_eip191(&self.stop_sales_message(args), &sig);
-        let file = self
-            .files
-            .get_mut(&file_id)
-            .unwrap_or_else(|| env::panic_str("unknown file"));
+        let text = self.stop_sales_text(args);
         require!(
-            signer == Some(file.seller),
-            "signature is not from the seller"
+            self.file(&file_id)
+                .terms
+                .seller
+                .authorized(&text, auth.as_ref()),
+            "not authorized by the seller"
         );
+        let file = self.files.get_mut(&file_id).unwrap();
         require!(file.sales_stopped_at == 0, "sales already stopped");
         file.sales_stopped_at = now();
         emit(
@@ -57,26 +53,30 @@ impl Annon {
         );
     }
 
-    /// The exact text a seller signs to stop selling a file.
-    pub fn stop_sales_message(&self, args: StopSalesArgs) -> String {
+    /// The exact text a seller authorizes to stop selling a file.
+    pub fn stop_sales_text(&self, args: SellerArgs) -> String {
+        let file_id = bytes::<32>(&args.file_id, "file_id");
         format!(
             "Annon: stop selling a file\n\
              Signing this is final: the file can't be sold again. Past buyers keep access.\n\
              contract: {}\n\
              file: {}\n\
+             seller: {}\n\
              valid until: {}",
             env::current_account_id(),
-            hex0x(&bytes::<32>(&args.file_id, "file_id")),
+            hex0x(&file_id),
+            self.file(&file_id).terms.seller.text(),
             utc(args.deadline),
         )
     }
 
-    /// Blocks `unlock` and `reopen` for a file, with a public reason. Only the moderator named at
+    /// Blocks sales and key releases (`unlock`, `claim_key`, `reopen`, `reopen_seller`) for a
+    /// file, with a public reason. NEAR payments that arrive meanwhile are refunded. Only the moderator named at
     /// `register`, with 1 yoctoNEAR (a full-access key or a DAO proposal, never a function-call key).
     #[payable]
     pub fn takedown(&mut self, file_id: String, reason: TakedownReason) {
         let file_id = bytes::<32>(&file_id, "file_id");
-        self.moderated(&file_id).taken_down = code(&reason);
+        *self.moderated(&file_id) = code(&reason);
         emit(
             "taken_down",
             json!({ "file_id": hex0x(&file_id), "reason": reason, "moderator": env::predecessor_account_id() }),
@@ -87,7 +87,7 @@ impl Annon {
     #[payable]
     pub fn restore(&mut self, file_id: String) {
         let file_id = bytes::<32>(&file_id, "file_id");
-        self.moderated(&file_id).taken_down = 0;
+        *self.moderated(&file_id) = 0;
         emit(
             "restored",
             json!({ "file_id": hex0x(&file_id), "moderator": env::predecessor_account_id() }),
@@ -96,20 +96,22 @@ impl Annon {
 }
 
 impl Annon {
-    fn moderated(&mut self, file_id: &[u8; 32]) -> &mut File {
+    /// The file's takedown flag, after checking the caller is its moderator.
+    fn moderated(&mut self, file_id: &[u8; 32]) -> &mut u8 {
         require!(
             env::attached_deposit() == NearToken::from_yoctonear(1),
             "attach exactly 1 yoctoNEAR"
         );
+        let caller = Some(env::predecessor_account_id());
         let file = self
             .files
             .get_mut(file_id)
             .unwrap_or_else(|| env::panic_str("unknown file"));
         require!(
-            file.moderator.as_ref() == Some(&env::predecessor_account_id()),
+            file.terms.moderator == caller,
             "only this file's moderator can do that"
         );
-        file
+        &mut file.taken_down
     }
 }
 
@@ -158,27 +160,32 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use crate::moderation::STOP_SETTLEMENT_SECONDS;
+    use crate::register::SellerArgs;
     use crate::tests::*;
     use crate::unlock::UNLOCK_DEPOSIT;
     use crate::*;
     use near_sdk::test_utils::get_created_receipts;
     use near_sdk::NearToken;
 
-    const MODERATOR: &str = "moderator.sputnik-dao.near";
-    const FILE: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
     const YEAR: u64 = 365 * 24 * 60 * 60;
 
-    fn stop_args() -> StopSalesArgs {
-        StopSalesArgs {
+    fn stop_args() -> SellerArgs {
+        SellerArgs {
             file_id: FILE.into(),
+            key: None,
             deadline: NOW_S + 600,
         }
     }
 
     fn stop(c: &mut Annon, who: &Seller) {
         let a = stop_args();
-        let sig = who.sign(&c.stop_sales_message(a.clone()));
-        c.stop_sales(a, sig);
+        let auth = who.auth(&c.stop_sales_text(a.clone()));
+        c.stop_sales(a, auth);
+    }
+
+    fn bought(c: &Annon) -> bool {
+        c.get_purchase(format!("0x{}", hex::encode(base_purchase().id())))
+            .is_some()
     }
 
     /// The test payment, landed on Base at `at`, with its block header.
@@ -217,13 +224,13 @@ mod tests {
     #[test]
     fn the_stop_message_says_it_is_final_and_reads_in_utc() {
         let c = listed();
-        let m = c.stop_sales_message(stop_args());
+        let m = c.stop_sales_text(stop_args());
         assert!(m.contains("this is final"), "{m}");
         assert!(m.ends_with("\nvalid until: 2026-10-26 07:43:20 UTC"), "{m}");
     }
 
     #[test]
-    #[should_panic(expected = "signature is not from the seller")]
+    #[should_panic(expected = "not authorized by the seller")]
     fn nobody_else_can_stop_sales() {
         let mut c = listed();
         stop(&mut c, &Seller::new(2));
@@ -235,8 +242,8 @@ mod tests {
         let mut c = listed();
         let mut a = stop_args();
         a.deadline = NOW_S - 1;
-        let sig = Seller::new(1).sign(&c.stop_sales_message(a.clone()));
-        c.stop_sales(a, sig);
+        let auth = Seller::new(1).auth(&c.stop_sales_text(a.clone()));
+        c.stop_sales(a, auth);
     }
 
     #[test]
@@ -346,13 +353,19 @@ mod tests {
     #[test]
     fn past_buyers_can_still_reopen_after_a_stop() {
         let mut c = listed();
-        mpc_answered(verified(X402_PAYLOAD_HASH));
+        mpc_answered(verified(&payload_hash(&x402_logs())));
         callback(&mut c);
         now(NOW_S);
         stop(&mut c, &Seller::new(1));
         let buyer = Seller::new(7);
-        let r = reopen_args(FILE, &buyer);
-        c.reopen(r.clone(), buyer.sign(&c.reopen_message(r)));
+        let r = crate::keys::ReopenArgs {
+            purchase_id: format!("0x{}", hex::encode(base_purchase().id())),
+            fresh_key: G1X2.into(),
+            nonce: format!("0x{}", "77".repeat(32)),
+            deadline: NOW_S + 600,
+        };
+        let auth = buyer.auth(&c.reopen_text(r.clone()));
+        c.reopen(r, auth);
     }
 
     #[test]
@@ -383,9 +396,9 @@ mod tests {
         let mut c = contract();
         let seller = Seller::new(1);
         let mut a = args(&seller);
-        a.moderator = None;
-        let sig = signed(&c, &seller, &a);
-        c.register(a, sig);
+        a.terms.moderator = None;
+        let auth = signed(&c, &seller, &a);
+        c.register(a, auth);
         moderator(1);
         c.takedown(FILE.into(), TakedownReason::IllegalContent);
     }
@@ -416,8 +429,12 @@ mod tests {
         c.takedown(FILE.into(), TakedownReason::IllegalContent);
         now(NOW_S);
         let seller = Seller::new(1);
-        let r = reopen_args(FILE, &seller);
-        c.reopen(r.clone(), seller.sign(&c.reopen_message(r)));
+        let r = SellerArgs {
+            key: Some(G1X2.into()),
+            ..stop_args()
+        };
+        let auth = seller.auth(&c.reopen_seller_text(r.clone()));
+        c.reopen_seller(r, auth);
     }
 
     #[test]
@@ -426,10 +443,10 @@ mod tests {
         c.unlock(unlock_args());
         moderator(1);
         c.takedown(FILE.into(), TakedownReason::IllegalContent);
-        mpc_answered(verified(X402_PAYLOAD_HASH));
+        mpc_answered(verified(&payload_hash(&x402_logs())));
         let before = get_created_receipts().len();
         callback(&mut c);
-        assert!(!c.is_buyer(FILE.into(), PAYER.into()));
+        assert!(!bought(&c));
         assert!(near_sdk::test_utils::get_logs()
             .iter()
             .any(|l| l.contains("file taken down")));
@@ -472,8 +489,11 @@ mod tests {
             vec![verified(&s("payload_hash"))],
         );
         c.on_payment_verified(
+            s("purchase_id"),
             s("file_id"),
+            s("terms_hash"),
             s("buyer_key"),
+            near_sdk::serde_json::from_value(a["recovery"].clone()).unwrap(),
             s("payer"),
             s("payment"),
             s("payload_hash"),
@@ -499,7 +519,7 @@ mod tests {
         unlock_then_stop(&mut c, paid_at(NOW_S + 301));
         // The callback runs in a fresh context: its receipts start at 0.
         run_scheduled_callback(&mut c, NOW_S + 10);
-        assert!(!c.is_buyer(FILE.into(), PAYER.into()));
+        assert!(!bought(&c));
         assert_eq!(refunded(0), UNLOCK_DEPOSIT.as_yoctonear());
         assert!(!get_created_receipts()
             .iter()
@@ -511,7 +531,7 @@ mod tests {
         let mut c = listed();
         unlock_then_stop(&mut c, paid_at(NOW_S + 300));
         run_scheduled_callback(&mut c, NOW_S + YEAR);
-        assert!(c.is_buyer(FILE.into(), PAYER.into()));
+        assert!(bought(&c));
     }
 
     #[test]
@@ -519,7 +539,7 @@ mod tests {
         let mut c = listed();
         unlock_then_stop(&mut c, unlock_args());
         run_scheduled_callback(&mut c, NOW_S + 10);
-        assert!(!c.is_buyer(FILE.into(), PAYER.into()));
+        assert!(!bought(&c));
         assert!(near_sdk::test_utils::get_logs()
             .iter()
             .any(|l| l.contains("send the payment's block header")));
@@ -532,7 +552,7 @@ mod tests {
         now(NOW_S + 20);
         c.unlock(retry);
         run_scheduled_callback(&mut c, NOW_S + 30);
-        assert!(c.is_buyer(FILE.into(), PAYER.into()));
+        assert!(bought(&c));
     }
 
     #[test]

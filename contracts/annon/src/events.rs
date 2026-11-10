@@ -7,6 +7,6 @@ use near_sdk::serde_json::{json, Value};
 pub(crate) fn emit(event: &str, data: Value) {
     env::log_str(&format!(
         "EVENT_JSON:{}",
-        json!({ "standard": "annon", "version": "1.0.0", "event": event, "data": [data] })
+        json!({ "standard": "annon", "version": "2.0.0", "event": event, "data": [data] })
     ));
 }

@@ -4,9 +4,15 @@ import { readFileSync } from 'node:fs';
 
 const allowed = new Set([
   'attached_deposit',
+  // BLS12-381 (NEP-488), for the buyer key check. Present on mainnet (protocol 88 has their costs),
+  // but its config has bls12381_not_in_group_fix = false: behaviour on points outside G1 is being
+  // verified before any mainnet deploy.
+  'bls12381_p1_decompress',
+  'bls12381_pairing_check',
   'block_timestamp',
   'current_account_id',
   'ecrecover',
+  'ed25519_verify',
   'input',
   'keccak256',
   'log_utf8',
@@ -21,6 +27,7 @@ const allowed = new Set([
   'promise_batch_then',
   'read_register',
   'register_len',
+  'sha256',
   'storage_has_key',
   'storage_read',
   'storage_remove',

@@ -1,5 +1,5 @@
 //! Storage money. Callers pay for what they store; a prepaid balance (NEP-145 style) lets a
-//! function-call key `register` and `unlock` without attaching a deposit.
+//! function-call key call `register`, `unlock`, `reopen` and `reopen_seller` without a deposit.
 use near_sdk::json_types::U128;
 use near_sdk::{env, near, require, AccountId, NearToken};
 
@@ -145,15 +145,20 @@ mod tests {
     }
 
     #[test]
-    fn reopen_with_no_deposit_pays_its_marker_from_the_prepaid_balance() {
+    fn a_seller_reopen_with_no_deposit_pays_its_marker_from_the_prepaid_balance() {
         let mut c = listed();
         as_caller(RELAYER, NearToken::from_millinear(100));
         c.storage_deposit(None);
         let before = balance(&c, RELAYER);
         as_caller(RELAYER, NearToken::from_yoctonear(0));
         let seller = Seller::new(1);
-        let r = reopen_args(&format!("0x{}", "11".repeat(32)), &seller);
-        c.reopen(r.clone(), seller.sign(&c.reopen_message(r)));
+        let r = crate::register::SellerArgs {
+            file_id: FILE.into(),
+            key: Some(G1X2.into()),
+            deadline: NOW_S + 600,
+        };
+        let auth = seller.auth(&c.reopen_seller_text(r.clone()));
+        c.reopen_seller(r, auth);
         let paid = before - balance(&c, RELAYER);
         // One marker: a 32-byte key, a prefix, an empty value and the trie's per-record overhead.
         assert!(
@@ -170,7 +175,7 @@ mod tests {
         as_caller(RELAYER, NearToken::from_yoctonear(0));
         c.unlock(unlock_args());
         let reserved = balance(&c, RELAYER);
-        mpc_answered(verified(X402_PAYLOAD_HASH));
+        mpc_answered(verified(&payload_hash(&x402_logs())));
         let receipts = get_created_receipts().len();
         prepaid_callback(&mut c);
         let back = balance(&c, RELAYER) - reserved;

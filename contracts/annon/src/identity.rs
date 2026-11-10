@@ -1,6 +1,5 @@
 //! Who signs or receives, on any chain (specs/near-settlement.md §2): an EVM address, a Solana
 //! ed25519 key or a NEAR account. One type for sellers, split recipients, refunds and recovery.
-use near_sdk::serde::Deserialize;
 use near_sdk::{env, near, AccountId};
 
 use crate::evm::{bytes, hex0x, recover_eip191};
@@ -14,19 +13,35 @@ pub enum Identity {
 }
 
 /// `{"kind":"evm"|"solana"|"near","id":…}` as it travels in JSON.
-#[derive(Deserialize, Clone, Debug)]
-#[serde(crate = "near_sdk::serde", deny_unknown_fields)]
+#[near(serializers = [json])]
+#[derive(Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct IdentityJson {
     pub kind: String,
     pub id: String,
 }
 
 /// A signature over an authoritative text: `{"kind":"evm"|"solana","sig":"0x…"}`.
-#[derive(Deserialize, Clone, Debug)]
-#[serde(crate = "near_sdk::serde", deny_unknown_fields)]
+#[near(serializers = [json])]
+#[derive(Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Auth {
     pub kind: String,
     pub sig: String,
+}
+
+impl From<&Identity> for IdentityJson {
+    fn from(i: &Identity) -> Self {
+        let id = match i {
+            Identity::Evm(a) => hex0x(a),
+            Identity::Solana(k) => hex::encode(k),
+            Identity::Near(a) => a.to_string(),
+        };
+        IdentityJson {
+            kind: i.kind().into(),
+            id,
+        }
+    }
 }
 
 fn lower_hex(s: &str, n: usize) -> bool {
@@ -52,6 +67,14 @@ impl Identity {
 
     pub fn from_json(j: &IdentityJson) -> Option<Self> {
         Self::parse(&j.kind, &j.id)
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Evm(_) => "evm",
+            Self::Solana(_) => "solana",
+            Self::Near(_) => "near",
+        }
     }
 
     /// The Intents account that holds this identity's balance.

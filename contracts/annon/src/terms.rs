@@ -1,9 +1,9 @@
-//! A v2 registration's terms (specs/near-settlement.md §3): the NEAR price and split, the optional
+//! A file's terms (specs/near-settlement.md §3): the NEAR price and split, the optional
 //! Base route, and the text the seller authorizes.
 use near_sdk::{env, near, AccountId};
 
-use super::identity::Identity;
 use crate::evm::hex0x;
+use crate::identity::Identity;
 use crate::text::{usdc, utc};
 
 pub const MAX_RECIPIENTS: usize = 8;
@@ -61,7 +61,7 @@ impl Terms {
             return Some("price must be above 0");
         }
         if self.pay2_version != 2 {
-            return Some("v2 registrations are for PAY2 v2 files");
+            return Some("files use PAY2 version 2");
         }
         if r.is_empty() || r.len() > MAX_RECIPIENTS {
             return Some("the split has 1 to 8 recipients");
@@ -152,7 +152,7 @@ impl Terms {
     }
 }
 
-/// The text an EVM or Solana seller signs to publish a PAY2 v2 header (§3.3).
+/// The text an EVM or Solana seller signs to publish a PAY2 header (§3.3).
 pub fn publish_text(contract: &AccountId, file_id: &[u8; 32], header_hash: &[u8; 32]) -> String {
     format!(
         "Annon: publish a file\ncontract: {contract}\nfile: {}\nheader: {}",

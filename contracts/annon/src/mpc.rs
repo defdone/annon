@@ -27,7 +27,16 @@ impl Annon {
     /// Asks MPC for the key of `file/<file_id>`, encrypted to the one-time key `to`, then
     /// confirms the release in `on_key_released`. The key depends only on this contract's account
     /// and the path, never on `to`. The MPC answer becomes the return value of the calling method.
-    pub(crate) fn ckd(&self, file_id: &[u8; 32], to: &[u8; 48], reason: &str, wallet: &[u8; 20]) {
+    /// `who` names the recipient in the event (an identity's text form); a purchase adds its id
+    /// and grant.
+    pub(crate) fn ckd(
+        &self,
+        file_id: &[u8; 32],
+        to: &[u8; 48],
+        reason: &str,
+        who: String,
+        purchase: Option<(&[u8; 32], u32)>,
+    ) {
         let args = json!({ "request": {
             "derivation_path": format!("file/{}", hex::encode(file_id)),
             "app_public_key": { "AppPublicKey": format!("bls12381g1:{}", bs58::encode(to).into_string()) },
@@ -50,7 +59,9 @@ impl Annon {
                 "file_id": hex0x(file_id),
                 "key": hex0x(to),
                 "reason": reason,
-                "wallet": hex0x(wallet),
+                "who": who,
+                "purchase": purchase.map(|(p, _)| hex0x(p)),
+                "grant": purchase.map(|(_, g)| g),
             })
             .to_string()
             .as_bytes(),
@@ -115,16 +126,20 @@ impl Annon {
         file_id: String,
         key: String,
         reason: String,
-        wallet: String,
+        who: String,
+        purchase: Option<String>,
+        grant: Option<u32>,
     ) {
         let answer = env::promise_result_checked(0, 1024).map_err(|_| ());
         if answer.is_ok() {
-            emit(
-                "key_released",
-                json!({ "file_id": file_id, "key": key, "reason": reason, "wallet": wallet }),
-            );
+            let mut data = json!({ "file_id": file_id, "key": key, "reason": reason, "who": who });
+            if let Some(p) = purchase {
+                data["purchase"] = json!(p);
+                data["grant"] = json!(grant);
+            }
+            emit("key_released", data);
         } else {
-            env::log_str("key release failed: MPC did not answer; call reopen");
+            env::log_str("key release failed: MPC did not answer; ask again");
         }
         env::value_return(release_output(answer));
     }
@@ -133,7 +148,7 @@ impl Annon {
 /// MPC's CKD answer (`big_y`, `big_c`) passed on unchanged, or `{"error": ...}`.
 pub(crate) fn release_output(answer: Result<Vec<u8>, ()>) -> Vec<u8> {
     answer.unwrap_or_else(|_| {
-        json!({ "error": "MPC did not release the key; call reopen" })
+        json!({ "error": "MPC did not release the key; ask again" })
             .to_string()
             .into_bytes()
     })
