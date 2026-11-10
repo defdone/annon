@@ -28,6 +28,7 @@ pub struct ReopenArgs {
 
 #[near(serializers = [json])]
 pub struct PurchaseView {
+    pub purchase_id: String,
     pub file_id: String,
     pub terms_hash: String,
     pub buyer_key: String,
@@ -37,6 +38,13 @@ pub struct PurchaseView {
     pub delivery: Option<u64>,
     pub accepted_at: u64,
     pub grants: u32,
+}
+
+#[near(serializers = [json])]
+pub struct GrantView {
+    pub purchase_id: String,
+    pub grant: u32,
+    pub buyer_key: String,
 }
 
 impl Annon {
@@ -172,33 +180,40 @@ impl Annon {
     }
 
     pub fn get_purchase(&self, purchase_id: String) -> Option<PurchaseView> {
-        self.purchases
-            .get(&bytes::<32>(&purchase_id, "purchase_id"))
-            .map(|r| PurchaseView {
-                file_id: hex0x(&r.file_id),
-                terms_hash: hex0x(&r.terms_hash),
-                buyer_key: hex0x(&r.buyer_key),
-                recovery: IdentityJson::from(&r.recovery),
-                route: if r.route == 0 {
-                    "near-usdc"
-                } else {
-                    "base-usdc"
-                }
-                .into(),
-                delivery: (r.delivery != u64::MAX).then_some(r.delivery),
-                accepted_at: r.accepted_at,
-                grants: r.grants,
-            })
+        let id = bytes::<32>(&purchase_id, "purchase_id");
+        let purchase_id = hex0x(&id);
+        self.purchases.get(&id).map(|r| PurchaseView {
+            purchase_id: purchase_id.clone(),
+            file_id: hex0x(&r.file_id),
+            terms_hash: hex0x(&r.terms_hash),
+            buyer_key: hex0x(&r.buyer_key),
+            recovery: IdentityJson::from(&r.recovery),
+            route: if r.route == 0 {
+                "near-usdc"
+            } else {
+                "base-usdc"
+            }
+            .into(),
+            delivery: (r.delivery != u64::MAX).then_some(r.delivery),
+            accepted_at: r.accepted_at,
+            grants: r.grants,
+        })
     }
 
     /// The one-time key of a grant (0: the key from the purchase).
-    pub fn get_grant(&self, purchase_id: String, grant: u32) -> Option<String> {
+    pub fn get_grant(&self, purchase_id: String, grant: u32) -> Option<GrantView> {
         let id = bytes::<32>(&purchase_id, "purchase_id");
         let rec = self.purchases.get(&id)?;
-        if grant == 0 {
-            return Some(hex0x(&rec.buyer_key));
-        }
-        self.grants.get(&grant_entry(&id, grant)).map(|k| hex0x(k))
+        let key = if grant == 0 {
+            rec.buyer_key
+        } else {
+            *self.grants.get(&grant_entry(&id, grant))?
+        };
+        Some(GrantView {
+            purchase_id: hex0x(&id),
+            grant,
+            buyer_key: hex0x(&key),
+        })
     }
 }
 
@@ -288,7 +303,7 @@ mod tests {
         c.reopen(r.clone(), auth.clone());
         assert_eq!(released_to().0, bls(G1X2));
         assert_eq!(c.get_purchase(id.clone()).unwrap().grants, 2);
-        assert_eq!(c.get_grant(id.clone(), 1), Some(G1X2.into()));
+        assert_eq!(c.get_grant(id.clone(), 1).unwrap().buyer_key, G1X2);
         assert_eq!(events("grant_created")[0]["grant"], 1);
         // The same request again: the same grant, no new one.
         as_caller(RELAYER, NearToken::from_millinear(10));
@@ -306,7 +321,7 @@ mod tests {
         let r = reopen_args(&id, G1X2);
         let auth = sol.auth(&c.reopen_text(r.clone()));
         c.reopen(r, auth);
-        assert_eq!(c.get_grant(id, 1), Some(G1X2.into()));
+        assert_eq!(c.get_grant(id, 1).unwrap().buyer_key, G1X2);
     }
 
     #[test]
@@ -314,7 +329,7 @@ mod tests {
         let (mut c, id) = bought(near_id("buyer.near"));
         as_caller("buyer.near", NearToken::from_millinear(10));
         c.reopen(reopen_args(&id, G1X2), None);
-        assert_eq!(c.get_grant(id, 1), Some(G1X2.into()));
+        assert_eq!(c.get_grant(id, 1).unwrap().buyer_key, G1X2);
     }
 
     #[test]
