@@ -32,26 +32,51 @@ const toBase64 = (s: string) => btoa(String.fromCharCode(...new TextEncoder().en
 const fromBase64 = (s: string) =>
   new TextDecoder().decode(Uint8Array.from(atob(s), (c) => c.charCodeAt(0)));
 
+/** A stalled RPC is given up on after this long, as unreachable. */
+export const RPC_TIMEOUT_MS = 20_000;
 let nextId = 0;
 
-async function rpc(url: string, method: string, params: unknown): Promise<Record<string, unknown>> {
-  const id = `annon-${++nextId}`;
-  let body: {
-    id?: unknown;
-    result?: Record<string, unknown>;
-    error?: { cause?: { name?: string; info?: unknown }; data?: unknown; message?: string };
+export interface RpcReply {
+  result?: unknown;
+  error?: {
+    name?: string;
+    cause?: { name?: string; info?: unknown };
+    data?: unknown;
+    message?: string;
   };
+}
+
+/**
+ * One JSON-RPC call, one fetch: the reply to this request (its id checked), result or error
+ * uninterpreted. Throws `transport` when there is no such reply.
+ */
+export async function rpcReply(url: string, method: string, params: unknown): Promise<RpcReply> {
+  const id = `annon-${++nextId}`;
+  let body: RpcReply & { id?: unknown };
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(new Error('timed out')), RPC_TIMEOUT_MS);
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+      signal: abort.signal,
     });
     body = await res.json();
   } catch (e) {
     return fail('transport', `NEAR RPC unreachable: ${(e as Error).message}`);
+  } finally {
+    clearTimeout(timer);
   }
   if (body?.id !== id) return malformed('a reply to another request');
+  return body;
+}
+
+async function rpc(url: string, method: string, params: unknown): Promise<Record<string, unknown>> {
+  const body = (await rpcReply(url, method, params)) as {
+    result?: Record<string, unknown>;
+    error?: RpcReply['error'];
+  };
   if (body.error) {
     const msg = JSON.stringify(body.error.cause?.info ?? body.error.data ?? body.error.message);
     // A view that panics comes back as an RPC error on some providers.
@@ -213,21 +238,37 @@ type Status = string | { SuccessValue?: string; SuccessReceiptId?: string; Failu
 const succeeded = (s: Status | undefined) =>
   typeof s === 'object' && s !== null && ('SuccessValue' in s || 'SuccessReceiptId' in s);
 
+/** What a caller asked a relayer to send: the outcome must be of exactly this call. */
+export interface ExpectedCall {
+  txHash: string;
+  signer: string;
+  method?: string;
+  /** The call's JSON arguments, compared as values (key order aside). */
+  args?: unknown;
+}
+
+const canonical = (v: unknown): string =>
+  v === null || typeof v !== 'object'
+    ? JSON.stringify(v)
+    : Array.isArray(v)
+      ? `[${v.map(canonical).join(',')}]`
+      : `{${Object.keys(v)
+          .sort()
+          .map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`)
+          .join(',')}}`;
+
 /**
  * Reads an `EXPERIMENTAL_tx_status` / `tx` result. With `expect`, the answer must be about that
- * transaction. Only single-call transactions to `contractId` are read: the SDK sends no batches.
+ * transaction and, when given, that method with those arguments: a relayer can't hand back an
+ * older or another call. Only single-call transactions to `contractId` are read.
  */
-export function readOutcome(
-  result: unknown,
-  contractId: string,
-  expect?: { txHash: string; signer: string },
-): Outcome {
+export function readOutcome(result: unknown, contractId: string, expect?: ExpectedCall): Outcome {
   const r = result as {
     transaction?: {
       hash?: unknown;
       signer_id?: unknown;
       receiver_id?: unknown;
-      actions?: { FunctionCall?: { method_name?: unknown } }[];
+      actions?: { FunctionCall?: { method_name?: unknown; args?: unknown } }[];
     };
     status?: Status;
     receipts_outcome?: { outcome?: { executor_id?: unknown; logs?: unknown; status?: Status } }[];
@@ -243,6 +284,20 @@ export function readOutcome(
   const method = actions[0]?.FunctionCall?.method_name;
   if (actions.length !== 1 || typeof method !== 'string') {
     return malformed('not a single function call');
+  }
+  if (expect?.method !== undefined && method !== expect.method) {
+    return malformed('an outcome of another method');
+  }
+  if (expect?.args !== undefined) {
+    let sent: unknown;
+    try {
+      sent = JSON.parse(fromBase64(String(actions[0]?.FunctionCall?.args)));
+    } catch {
+      return malformed('call arguments are not JSON');
+    }
+    // Compared as JSON would send them: an `undefined` field is no field.
+    const asked = JSON.parse(JSON.stringify(expect.args) ?? 'null');
+    if (canonical(sent) !== canonical(asked)) return malformed('an outcome of another call');
   }
 
   const events: AnnonEvent[] = [];
@@ -302,11 +357,12 @@ export async function txOutcome(
   signer: string,
   contractId: string,
   wait: 'EXECUTED_OPTIMISTIC' | 'FINAL' = 'FINAL',
+  call?: { method: string; args: unknown },
 ): Promise<Outcome> {
   const r = await rpc(url, 'EXPERIMENTAL_tx_status', {
     tx_hash: txHash,
     sender_account_id: signer,
     wait_until: wait,
   });
-  return readOutcome(r, contractId, { txHash, signer });
+  return readOutcome(r, contractId, { txHash, signer, ...call });
 }

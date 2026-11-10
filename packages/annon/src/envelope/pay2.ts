@@ -216,9 +216,18 @@ export const publishText = (contractId: string, fileId: Uint8Array, headerHash: 
  * @internal exported for the tests
  */
 export function signedBy(text: string, sig: Uint8Array, address: string): boolean {
-  if (sig.length !== SIG || (sig[64] !== 27 && sig[64] !== 28)) return false;
+  return signerOf(text, sig) === address.toLowerCase();
+}
+
+/**
+ * The address that signed `text` with EIP-191 (r ‖ s ‖ v, low s, v 27 or 28), lowercase 0x, or
+ * null for a signature that recovers to nobody.
+ * @internal exported for the relayer
+ */
+export function signerOf(text: string, sig: Uint8Array): string | null {
+  if (sig.length !== SIG || (sig[64] !== 27 && sig[64] !== 28)) return null;
   const s = BigInt(`0x${toHex(sig.subarray(32, 64))}`);
-  if (s > secp256k1.Point.Fn.ORDER / 2n) return false;
+  if (s > secp256k1.Point.Fn.ORDER / 2n) return null;
   const t = utf8.encode(text);
   const digest = keccak_256(concat(utf8.encode(`\x19Ethereum Signed Message:\n${t.length}`), t));
   try {
@@ -226,10 +235,9 @@ export function signedBy(text: string, sig: Uint8Array, address: string): boolea
     const pub = secp256k1.Point.fromBytes(
       secp256k1.recoverPublicKey(recovered, digest, { prehash: false }),
     );
-    const signer = keccak_256(pub.toBytes(false).subarray(1)).subarray(12);
-    return `0x${toHex(signer)}` === address.toLowerCase();
+    return `0x${toHex(keccak_256(pub.toBytes(false).subarray(1)).subarray(12))}`;
   } catch {
-    return false;
+    return null;
   }
 }
 

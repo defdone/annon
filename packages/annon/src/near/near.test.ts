@@ -1,6 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getConfig, getFile, isBuyer, isPaymentUsed, NearError, readOutcome, view } from './rpc.js';
+import {
+  getConfig,
+  getFile,
+  isBuyer,
+  isPaymentUsed,
+  NearError,
+  readOutcome,
+  txOutcome,
+  view,
+} from './rpc.js';
 import {
   hex0x,
   type RegisterArgs,
@@ -90,6 +99,29 @@ describe('readOutcome', () => {
     expect(o.state).toBe('released');
     expect(o.state === 'released' && o.answer).toEqual(answer);
     expect(o.events.map((e) => e.event)).toEqual(['payment_verified', 'key_released']);
+  });
+
+  it('with the expected call, refuses an outcome of another method or other arguments', () => {
+    const args = { args: { file_id: '0x11', deadline: 1 }, sig: '0xab' };
+    const sent = tx('stop_sales', { SuccessValue: '' }, []);
+    sent.transaction.actions[0] = { FunctionCall: { method_name: 'stop_sales', args: b64(args) } };
+    const expectCall = { txHash: 'TxHash', signer: 'relayer.annon.defdone.near' };
+    // Same values, keys in another order: the same call.
+    const reordered = { sig: '0xab', args: { deadline: 1, file_id: '0x11' } };
+    expect(
+      readOutcome(sent, CONTRACT, { ...expectCall, method: 'stop_sales', args: reordered }).state,
+    ).toBe('done');
+    // A field left undefined is not sent, as JSON goes: still the same call.
+    const optional = { ...reordered, args: { ...reordered.args, header: undefined } };
+    expect(
+      readOutcome(sent, CONTRACT, { ...expectCall, method: 'stop_sales', args: optional }).state,
+    ).toBe('done');
+    for (const other of [
+      { method: 'reopen', args },
+      { method: 'stop_sales', args: { ...args, args: { file_id: '0x22', deadline: 1 } } },
+    ]) {
+      expect(() => readOutcome(sent, CONTRACT, { ...expectCall, ...other })).toThrow(/another/);
+    }
   });
 
   it('reports every release without a key the same way, so state decides what comes next', () => {
@@ -251,6 +283,18 @@ describe('views', () => {
       respond({ result: { result: bytes(bad) } });
       expect(await codeOf(getConfig('https://rpc', CONTRACT))).toBe('transport');
     }
+  });
+
+  it("txOutcome passes the expected call on, so a relayer can't answer with another", async () => {
+    const args = { args: { file_id: '0x11', deadline: 1 }, sig: '0xab' };
+    const sent = tx('stop_sales', { SuccessValue: '' }, []);
+    sent.transaction.actions[0] = { FunctionCall: { method_name: 'stop_sales', args: b64(args) } };
+    respond({ result: sent });
+    const read = (call: { method: string; args: unknown }) =>
+      txOutcome('https://rpc', 'TxHash', 'relayer.annon.defdone.near', CONTRACT, 'FINAL', call);
+    expect((await read({ method: 'stop_sales', args })).state).toBe('done');
+    respond({ result: sent });
+    expect(await codeOf(read({ method: 'reopen', args }))).toBe('transport');
   });
 
   it('accepts only real booleans for is_buyer and is_payment_used', async () => {

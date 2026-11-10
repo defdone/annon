@@ -4,7 +4,9 @@
  * the logs `unlock` takes. The RPC is trusted to report the chain, as on the NEAR side; a payment
  * it misreports is caught by NEAR MPC, which reads Base itself.
  */
+
 import { keccak_256 } from '@noble/hashes/sha3.js';
+import { RPC_TIMEOUT_MS } from '../near/rpc.js';
 import { type Authorization, addressWord, fromHex, toHex, word } from './eip3009.js';
 
 export type PayErrorCode =
@@ -67,6 +69,7 @@ async function rpc(url: string, method: string, params: unknown[]) {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
     });
     body = await res.json();
   } catch (e) {
@@ -109,8 +112,11 @@ export async function head(url: string): Promise<Head> {
   return block(url, 'latest');
 }
 
-/** A block by number or tag (`latest`, `finalized`). */
-export async function block(url: string, at: number | 'latest' | 'finalized'): Promise<Head> {
+/** A block by number or tag (`latest`, `safe`, `finalized`). */
+export async function block(
+  url: string,
+  at: number | 'latest' | 'safe' | 'finalized',
+): Promise<Head> {
   const b = (await ask(url, 'eth_getBlockByNumber', [
     typeof at === 'number' ? qty(at) : at,
     false,
@@ -120,6 +126,10 @@ export async function block(url: string, at: number | 'latest' | 'finalized'): P
     timestamp: quantity(b?.timestamp, 'timestamp'),
   };
 }
+
+/** A transaction's receipt as the RPC returns it; null while the transaction is unknown. */
+export const getReceipt = (url: string, txHash: string): Promise<unknown> =>
+  ask(url, 'eth_getTransactionReceipt', [txHash]);
 
 /** A view call at `block` that returns one 32-byte word. */
 export async function viewWord(url: string, to: string, data: string, block: number) {
