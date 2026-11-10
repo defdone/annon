@@ -13,6 +13,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import {
   type CheckOptions,
+  keep,
   RelayError,
   type RelayErrorCode,
   relay,
@@ -155,7 +156,8 @@ const CORS = {
 };
 
 /** The HTTP server; nothing a client sends can make the request handler throw. */
-export function serve(c: Config, port: number) {
+export function serve(c: Config, port: number, keeperSeconds = 0) {
+  if (keeperSeconds > 0) keeper(c, keeperSeconds);
   return createServer((req: IncomingMessage, res: ServerResponse) => {
     void respond(c, req, res).catch(() => {
       // An aborted upload or a socket gone: nothing to answer.
@@ -164,6 +166,38 @@ export function serve(c: Config, port: number) {
   }).listen(port, () =>
     console.log(`annon relayer on :${port} for ${c.contractId} as ${c.sender.accountId}`),
   );
+}
+
+/** Keeper passes every `seconds`, one at a time, each starting from the first unpaid delivery. */
+function keeper(c: Config, seconds: number) {
+  let from = 0;
+  const pass = async () => {
+    if (!c.disabled) {
+      try {
+        const r = await keep(c, from);
+        from = r.next;
+        for (const s of r.sent)
+          console.log(
+            JSON.stringify({
+              at: new Date().toISOString(),
+              keeper: s.method,
+              ...s.args,
+              ...s.result,
+            }),
+          );
+      } catch (e) {
+        console.log(
+          JSON.stringify({
+            at: new Date().toISOString(),
+            keeper: 'error',
+            message: (e as Error).message,
+          }),
+        );
+      }
+    }
+    setTimeout(pass, seconds * 1000).unref();
+  };
+  void pass();
 }
 
 async function respond(c: Config, req: IncomingMessage, res: ServerResponse) {
@@ -204,7 +238,11 @@ async function respond(c: Config, req: IncomingMessage, res: ServerResponse) {
 }
 
 /** The settings from the environment (apps/relayer/README.md); throws on a missing or bad one. */
-export function fromEnv(e: Record<string, string | undefined>): { config: Config; port: number } {
+export function fromEnv(e: Record<string, string | undefined>): {
+  config: Config;
+  port: number;
+  keeperSeconds: number;
+} {
   const env = (name: string, fallback?: string) => {
     const v = e[name]?.trim() || fallback;
     if (v === undefined) throw new Error(`${name} is not set`);
@@ -243,10 +281,11 @@ export function fromEnv(e: Record<string, string | undefined>): { config: Config
       ...(e.IP_HEADER?.trim() ? { ipHeader: e.IP_HEADER.trim().toLowerCase() } : {}),
     },
     port: count('PORT', '8080'),
+    keeperSeconds: count('KEEPER_SECONDS', '30'),
   };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const { config, port } = fromEnv(process.env);
-  serve(config, port);
+  const { config, port, keeperSeconds } = fromEnv(process.env);
+  serve(config, port, keeperSeconds);
 }

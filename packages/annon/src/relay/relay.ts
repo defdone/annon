@@ -30,6 +30,7 @@ import {
   purchaseId,
 } from '../settle-near/purchase.js';
 import { type SettlementAssets, termsHash } from '../settle-near/terms.js';
+import { listDeliveries } from './keeper.js';
 
 export type RelayRequest =
   | { method: 'register'; args: RegisterArgs; auth: Authorization }
@@ -564,25 +565,7 @@ export async function relay(
       const scope = `${o.nearRpc}|${o.contractId}|${o.sender.accountId}`;
       const write = r.method !== 'stop_sales';
       if (write) await enoughStorage(o, scope).catch(asRelayError);
-      let account = accounts.get(key);
-      if (!account) {
-        // One account per key, kept: near-api-js numbers its nonces locally across calls.
-        account = new Account(
-          o.sender.accountId,
-          signingProvider(o.nearRpc),
-          o.sender.key as `ed25519:${string}`,
-        );
-        accounts.set(key, account);
-      }
-      const args = contractArgs(r);
-      const tx = await account
-        .createSignedTransaction({
-          receiverId: o.contractId,
-          actions: [actions.functionCall(r.method, args, GAS, 0n)],
-        })
-        .catch((e: Error) => fail('transport', `NEAR RPC: ${e.message}`));
-      const txHash = base58.encode(sha256(tx.transaction.encode()));
-      const signed = base64.encode(encodeTransaction(tx));
+      const { txHash, signed } = await sign(o, key, r.method, contractArgs(r));
       sent = true;
       if (write) writes.get(scope)?.push(Date.now()) ?? writes.set(scope, [Date.now()]);
       return send(o, key, txHash, signed);
@@ -601,6 +584,98 @@ export async function relay(
   } finally {
     waiting--;
   }
+}
+
+/** Signs one function call, no deposit, with the sender's key (one account per key, so near-api-js
+ * numbers its nonces locally across calls). */
+async function sign(
+  o: { nearRpc: string; contractId: string; sender: Sender },
+  key: string,
+  method: string,
+  args: object,
+) {
+  let account = accounts.get(key);
+  if (!account) {
+    account = new Account(
+      o.sender.accountId,
+      signingProvider(o.nearRpc),
+      o.sender.key as `ed25519:${string}`,
+    );
+    accounts.set(key, account);
+  }
+  const tx = await account
+    .createSignedTransaction({
+      receiverId: o.contractId,
+      actions: [actions.functionCall(method, args, GAS, 0n)],
+    })
+    .catch((e: Error) => fail('transport', `NEAR RPC: ${e.message}`));
+  return {
+    txHash: base58.encode(sha256(tx.transaction.encode())),
+    signed: base64.encode(encodeTransaction(tx)),
+  };
+}
+
+/** A keeper call is not sent again for this long: its own callback moves the step on. */
+const KEEP_HOLD = 60_000;
+/** Deliveries per `list_deliveries` page (the contract's maximum). */
+const PAGE = 50;
+
+export interface KeepResult {
+  /** The first delivery not yet fully paid: where the next pass can start. */
+  next: number;
+  sent: { method: 'fund_delivery' | 'pay_slot'; args: object; result: RelayResult }[];
+}
+
+/**
+ * One keeper pass over the deliveries from `from` on: a pending deposit gets `fund_delivery`, a
+ * pending slot of a funded delivery gets `pay_slot`. Steps in flight are never sent again: only
+ * their callback moves them on, so nothing is paid twice. Sent with the relayer's key, in the
+ * same line as relayed requests. Anyone may make these calls; the contract fixes every amount
+ * and destination.
+ */
+export async function keep(
+  o: { nearRpc: string; contractId: string; sender: Sender },
+  from = 0,
+): Promise<KeepResult> {
+  const sent: KeepResult['sent'] = [];
+  const key = senderKey(o);
+  let next: number | undefined;
+  let cursor = from;
+  let after = from;
+  // ponytail: stops at the first empty page; 50 refund leaves in a row (no reserve) would hide
+  // later deliveries from this pass. A delivery count view if that ever happens.
+  for (;;) {
+    const page = await listDeliveries(o.nearRpc, o.contractId, cursor, PAGE);
+    if (page.length === 0) break;
+    for (const d of page) {
+      after = d.id + 1;
+      if (next === undefined && (d.fund.state !== 2 || d.slots.some((x) => x.step.state !== 2)))
+        next = d.id;
+      const due: [KeepResult['sent'][number]['method'], object][] =
+        d.fund.state === 0
+          ? [['fund_delivery', { delivery_id: d.id }]]
+          : d.fund.state === 2
+            ? d.slots.flatMap((x, slot) =>
+                x.step.state === 0
+                  ? [['pay_slot', { delivery_id: d.id, slot }] as ['pay_slot', object]]
+                  : [],
+              )
+            : [];
+      for (const [method, args] of due) {
+        const id = `${o.contractId}|keep:${method}:${JSON.stringify(args)}`;
+        const now = Date.now();
+        if ((held.get(id) ?? 0) > now) continue;
+        held.set(id, now + KEEP_HOLD);
+        const result = await enqueue(async () => {
+          const tx = await sign(o, key, method, args);
+          return send(o, key, tx.txHash, tx.signed);
+        });
+        sent.push({ method, args, result });
+      }
+    }
+    cursor += PAGE;
+  }
+  return { next: next ?? after, sent };
 }
 
 /**
