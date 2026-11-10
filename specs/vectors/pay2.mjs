@@ -43,7 +43,7 @@ function metaPiece(name, mime, size, padTo) {
 
 // Spec 4.1: the EIP-191 text the seller's wallet signs, and the 65-byte r ‖ s ‖ v signature.
 export const publishText = (contractId, fileId, headerHash) =>
-  `Annon: publish a file\nSigning this lets buyers check the file before they pay.\ncontract: ${contractId}\nfile: 0x${hex(fileId)}\nheader: 0x${hex(headerHash)}`;
+  `Annon: publish a file\ncontract: ${contractId}\nfile: 0x${hex(fileId)}\nheader: 0x${hex(headerHash)}`;
 const eip191 = (text) => {
   const t = Buffer.from(text, 'utf8');
   return keccak_256(u8(`\x19Ethereum Signed Message:\n${t.length}`, t));
@@ -102,7 +102,7 @@ export function encode({
   const headerLen = prefixLen + stanza.length + 32 + 65;
   const fixed = u8(
     Buffer.from('PAY2'),
-    [1, chunkLog2, 1, 0],
+    [2, chunkLog2, 1, 0],
     be(headerLen, 4),
     fileId,
     be(metaLen, 2),
@@ -119,7 +119,7 @@ export function encode({
   const file = u8(unsigned, mac, sig, ...wire);
   const cipherHash = sha256(
     'annon/pay2/body',
-    [1, chunkLog2],
+    [2, chunkLog2],
     fileId,
     be(metaLen, 2),
     be(previewLen, 4),
@@ -344,7 +344,7 @@ const invalid = [
   {
     id: 'unknown-version',
     file: edit((f) => {
-      f[4] = 2;
+      f[4] = 1;
     }),
     expect: 'unsupported_version',
   },
@@ -365,7 +365,7 @@ const invalid = [
   {
     id: 'reserved-set',
     file: edit((f) => {
-      f[7] = 1;
+      f[7] = 3;
     }),
     expect: 'bad_header',
   },

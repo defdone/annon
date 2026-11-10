@@ -1,7 +1,7 @@
 /**
  * `serveFile` over HTTP: the browser rules of profile section 9, for Node's `http` server or any
  * framework that can hand over a method, headers and a response writer. CORS only for origins the
- * host lists; the session travels in `Authorization`, so no credentialed CORS is ever needed.
+ * host lists; the grant proof travels in a header, so credentialed CORS is unnecessary.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
@@ -9,10 +9,9 @@ import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { type FileHostOptions, type HostResponse, serveFile } from './host.js';
 
-const ALLOW_HEADERS =
-  'PAYMENT-SIGNATURE, Annon-Buyer-Proof, SIGN-IN-WITH-X, Authorization, Range, Content-Type';
+const ALLOW_HEADERS = 'PAYMENT-SIGNATURE, Annon-Buyer-Proof, Range, Content-Type';
 const EXPOSE_HEADERS =
-  'PAYMENT-REQUIRED, PAYMENT-RESPONSE, Annon-Session, Retry-After, Content-Range, Content-Length';
+  'PAYMENT-REQUIRED, PAYMENT-RESPONSE, Retry-After, Content-Range, Content-Length';
 
 /**
  * The CORS headers for a request from `origin`: `Vary: Origin` always, the rest only for an origin

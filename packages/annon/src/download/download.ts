@@ -1,25 +1,7 @@
-/**
- * Downloading a bought file (`specs/download.md`, profile v1.1 section 7). The file is the offer's
- * `resource.url`. The paid request returns it to the buyer, who proves the purchase's one-time key
- * (`Annon-Buyer-Proof`); later, the buyer's wallet signs in with x402 sign-in-with-x once and the
- * host's session covers every download and resume for two hours.
- *
- * The client checks every chunk against the hash list of the header it checked before paying,
- * and resumes a broken download with a Range request from the last checked chunk.
- */
+/** Download a final purchase grant with Range retries and checked chunks. */
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { type Bytes, copy, equal, parseHeader, sha256, TAG } from '../envelope/pay2.js';
-import { BUYER_PROOF_HEADER, buyerProof, sameResource } from './proof.js';
-import {
-  fileUrn,
-  SIGN_IN_HEADER,
-  SIGN_IN_SECONDS,
-  SIGN_IN_WITH_X,
-  type SignInChallenge,
-  signInHeader,
-  signInMessage,
-} from './siwx.js';
-
+import { BUYER_PROOF_HEADER, purchaseProof, sameResource } from './proof.js';
 export type DownloadErrorCode =
   /** The host answered something this protocol does not allow. */
   | 'bad_response'
@@ -78,17 +60,9 @@ export interface DownloadOptions {
   fileId: string;
   /** The header the buyer checked before paying (`Quote.header`). */
   header: Uint8Array;
-  /**
-   * The paid request (profile section 7): the recorded `PAYMENT-SIGNATURE` and the purchase's
-   * one-time secret, which signs the buyer proof.
-   */
-  payment?: { header: string; secret: Uint8Array };
-  /** A session this host gave earlier (`Annon-Session`). */
-  session?: string;
-  /** Signs in when there is no payment or session that gets the file. */
-  wallet?: { address: string; signMessage(text: string): Promise<string> };
-  /** Gets the session a sign-in returns, to reuse on this host for two hours. */
-  onSession?: (token: string) => void;
+  /** A grant key, obtained from this purchase or wallet recovery. */
+  proof: { secret: Uint8Array; purchase_id: string; grant: number };
+  payment?: { header: string };
   /** Attempts after a broken connection; each resumes from the last checked chunk. */
   retries?: number;
   /** How often a payment that is still settling is asked again (default 40). */
@@ -115,13 +89,7 @@ const b64json = (s: string | null): unknown => {
  * `DownloadError`; a broken connection is retried from the last checked chunk.
  */
 export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
-  const url = secureUrl(o.url);
-  // A browser wallet signs in only for the page's own origin (EIP-4361): the file must be there.
-  const page = (globalThis as { location?: { origin?: string } }).location?.origin;
-  if (o.wallet && page !== undefined && page !== url.origin) {
-    throw new TypeError(`in a browser the file must be on this page's origin (${page})`);
-  }
-  const now = o.now ?? (() => Math.floor(Date.now() / 1000));
+  secureUrl(o.url);
   const wait = o.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const header = copy(o.header);
   const h = parseHeader(header);
@@ -143,10 +111,9 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   let offset = header.length; // its first byte in the file
   let sentHeader = false;
   let retries = o.retries ?? 3;
-  let session = o.session;
   // The buyer proof only for the URL the payment names: never for another host's.
   // It signs the advertised `resource.url` octets, which the host checks, not the request's spelling.
-  let payment = o.payment;
+  const payment = o.payment;
   let named = '';
   if (payment) {
     const u = (b64json(payment.header) as { resource?: { url?: unknown } } | null)?.resource?.url;
@@ -173,90 +140,23 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   };
   const body = (r: Response) => r.body && (r.status === 200 || r.status === 206);
 
-  /** The response that carries the file, from the payment, a session or a sign-in. */
+  /** Every retry proves the same purchase grant to this URL. */
   async function authorized(): Promise<Response> {
-    if (payment) {
-      const p = payment;
-      for (let i = 0; ; i++) {
-        const r = await get({
-          'PAYMENT-SIGNATURE': p.header,
-          [BUYER_PROOF_HEADER]: buyerProof(p.secret, named),
-        });
-        if (body(r)) return r;
-        const pending =
-          r.status === 503 ||
-          (r.status === 402 &&
-            (b64json(r.headers.get('PAYMENT-RESPONSE')) as { errorReason?: unknown } | null)
-              ?.errorReason === 'settlement_pending');
-        await r.body?.cancel().catch(() => {});
-        if (!pending) break;
-        if (i + 1 >= (o.settleTries ?? 40))
-          return fail('settling', 'the payment is still settling');
-        const after = Number(r.headers.get('Retry-After'));
-        await wait(Number.isFinite(after) && after > 0 ? Math.min(after, 30) * 1000 : 3000);
-      }
-      // Settled without the body (another copy of the payload came first): sign in instead.
-      payment = undefined;
-    }
-    if (session) {
-      const r = await get({ authorization: `Bearer ${session}` });
+    const proof = purchaseProof(o.proof.secret, named || o.url, o.proof.purchase_id, o.proof.grant);
+    for (let i = 0; ; i++) {
+      const r = await get({
+        [BUYER_PROOF_HEADER]: proof,
+        ...(payment ? { 'PAYMENT-SIGNATURE': payment.header } : {}),
+      });
       if (body(r)) return r;
+      const pending = r.status === 503 || r.status === 402;
       await r.body?.cancel().catch(() => {});
-      session = undefined;
+      if (!pending) return fail('not_authorized', `the host answered ${r.status}`);
+      if (i + 1 >= (o.settleTries ?? 40))
+        return fail('settling', 'the purchase grant is not available yet');
+      const after = Number(r.headers.get('Retry-After'));
+      await wait(Number.isFinite(after) && after > 0 ? Math.min(after, 30) * 1000 : 3000);
     }
-    if (!o.wallet) return fail('not_authorized', 'no payment, session or wallet gets the file');
-    const bare = await get({});
-    if (body(bare)) return bare;
-    await bare.body?.cancel().catch(() => {});
-    if (bare.status !== 402) return fail('bad_response', `the host answered ${bare.status}`);
-    const pr = b64json(bare.headers.get('PAYMENT-REQUIRED')) as {
-      extensions?: Record<string, { info?: SignInChallenge; supportedChains?: unknown }>;
-    } | null;
-    const ext = pr?.extensions?.[SIGN_IN_WITH_X];
-    const c = ext?.info;
-    // The wallet signs only for a chain the host takes: Base, EIP-191.
-    const base =
-      Array.isArray(ext?.supportedChains) &&
-      ext.supportedChains.some(
-        (x: { chainId?: unknown; type?: unknown }) =>
-          x?.chainId === 'eip155:8453' && x?.type === 'eip191',
-      );
-    const headerHash = `0x${Array.from(await sha256(header), (b) => b.toString(16).padStart(2, '0')).join('')}`;
-    const at = c ? Date.parse(c.issuedAt) / 1000 : Number.NaN;
-    const until = c ? Date.parse(c.expirationTime) / 1000 : Number.NaN;
-    if (
-      !c ||
-      !base ||
-      c.domain !== url.host ||
-      !sameResource(c.uri, o.url) ||
-      c.version !== '1' ||
-      !/^[0-9a-f]{32}$/.test(c.nonce) ||
-      !Array.isArray(c.resources) ||
-      c.resources.length !== 1 ||
-      c.resources[0] !== fileUrn(o.contractId, o.fileId, headerHash) ||
-      !(until > now() && at <= now() + 60 && until - at > 0 && until - at <= SIGN_IN_SECONDS)
-    ) {
-      return fail('bad_response', 'the 402 carries no sign-in challenge for this file');
-    }
-    live();
-    let signature: string;
-    try {
-      signature = await o.wallet.signMessage(signInMessage(c, o.wallet.address));
-    } catch (e) {
-      return fail('wallet_refused', e instanceof Error ? e.message : String(e));
-    }
-    const r = await get({ [SIGN_IN_HEADER]: signInHeader(c, o.wallet.address, signature) });
-    const token = r.headers.get('Annon-Session');
-    if (token && /^[0-9a-f]{64}$/.test(token)) {
-      session = token;
-      o.onSession?.(token);
-    }
-    if (body(r)) return r;
-    await r.body?.cancel().catch(() => {});
-    return fail(
-      'not_authorized',
-      `the host answered ${r.status}: this wallet did not buy the file`,
-    );
   }
 
   async function request(): Promise<{

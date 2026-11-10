@@ -1,14 +1,30 @@
 import { readFileSync } from 'node:fs';
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 import { describe, expect, it } from 'vitest';
-import { BUYER_PROOF_DST, buyerProof, sameResource, verifyBuyerProof } from './proof.js';
+import {
+  BUYER_PROOF_DST,
+  buyerProof,
+  purchaseProof,
+  readPurchaseProof,
+  sameResource,
+  verifyBuyerProof,
+} from './proof.js';
 
 // Written by specs/vectors/buyer-proof.mjs and checked independently with py_ecc.
 const vectors = JSON.parse(
   readFileSync(new URL('../../../../specs/vectors/buyer-proof.json', import.meta.url), 'utf8'),
 ) as {
   dst: string;
-  valid: { id: string; secret: string; buyerKey: string; resourceUrl: string; proof: string }[];
+  valid: {
+    id: string;
+    secret: string;
+    buyerKey: string;
+    resourceUrl: string;
+    proof: string;
+    purchase_id: string;
+    grant: number;
+    header: string;
+  }[];
   invalid: { id: string; buyerKey: string; resourceUrl: string; proof: string }[];
 };
 const bytes = (h: string) => Uint8Array.from(Buffer.from(h.slice(2), 'hex'));
@@ -18,6 +34,13 @@ describe('the buyer proof (download.md section 3)', () => {
     expect(BUYER_PROOF_DST).toBe(vectors.dst);
     for (const v of vectors.valid) {
       expect(buyerProof(bytes(v.secret), v.resourceUrl)).toBe(v.proof);
+      expect(purchaseProof(bytes(v.secret), v.resourceUrl, v.purchase_id, v.grant)).toBe(v.header);
+      expect(readPurchaseProof(v.header)).toEqual({
+        purchase_id: v.purchase_id,
+        grant: v.grant,
+        signature: v.proof,
+      });
+      expect(readPurchaseProof(v.proof)).toBeNull();
       expect(verifyBuyerProof(v.buyerKey, v.resourceUrl, v.proof)).toBe(true);
     }
   });

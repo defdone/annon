@@ -1,0 +1,18 @@
+{
+  "quote": {
+    "amountIn": "202064",
+    "amountInFormatted": "0.202064",
+    "amountInUsd": "0.201981759952",
+    "minAmountIn": "200043",
+    "amountOut": "200000",
+    "amountOutFormatted": "0.2",
+    "amountOutUsd": "0.199918600000",
+    "minAmountOut": "200000",
+    "timeEstimate": 35,
+    "refundFee": "2400",
+    "withdrawFee": "0",
+    "deadline": "2026-11-13T21:02:24.538Z",
+    "timeWhenInactive": "2026-11-13T21:02:24.538Z",
+    "depositAddress": "0x1313131313131313131313131313131313131313"
+  }
+}

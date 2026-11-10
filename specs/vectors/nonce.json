@@ -1,19 +1,25 @@
 {
- "spec": "specs/nonce.md",
- "cases": [
-  {
-   "id": "unit-test-fixture",
-   "contractId": "v1.annon.defdone.near",
-   "fileId": "0x1111111111111111111111111111111111111111111111111111111111111111",
-   "buyerKey": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
-   "annonNonce": "0x52112c22da1c1cb9865e7e136a5162eca47f68141120192b9b448b228fc7c059"
-  },
-  {
-   "id": "mixed-bytes",
-   "contractId": "annon-dev.synthetic.near",
-   "fileId": "0x6a603067aa0b7d8d62a19310c0c00b6f48bb0247ca55bbff66604db1b5508efa",
-   "buyerKey": "0x3ac225168df54212a25c1c01fd35bebfea408fdac2e31ddd6f80a4bbf9a5f1cbb5553de315e0edf504d9150af82dafa5",
-   "annonNonce": "0xf3d33cab98ac2a2c6660ffd7289af0b9d162478de79a198879df1d74c1165915"
-  }
- ]
+  "spec": "specs/nonce.md",
+  "cases": [
+    {
+      "id": "near-evm-refund-solana-recovery",
+      "purchase_id": "0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de",
+      "base_nonce": "0x08e4405179208985dc64481cf86fef35ff8bbff8fac1570fd2cbb6ff4609f75d"
+    },
+    {
+      "id": "near-solana-refund-evm-recovery",
+      "purchase_id": "0x9bd1d620f2603306c1b79786326fc57641a7e0b0577c9e3bac2d625a5946bf8f",
+      "base_nonce": "0x2ec1a699fd3f1bec48e19f58cab9f92e67a27cd22c6eca1a84dfefb68253065f"
+    },
+    {
+      "id": "near-max-accounts",
+      "purchase_id": "0xf25c0007ec8bbd7f91d73210f53c35f5d2b707757638513a5718940fbf142eb6",
+      "base_nonce": "0xd484433ad8110785dd49b3303650c250ccf3edc2d35a51e378c40d2d261021f2"
+    },
+    {
+      "id": "base-near-recovery",
+      "purchase_id": "0x5ff4904fd36e4c7bda270a518acd6d2e54688e7938afb0ee2c4ef3a295bb6682",
+      "base_nonce": "0x30fabf6bfb36316579d6e597b9bdd256613342b75ec090c152549d4d3e39e8f3"
+    }
+  ]
 }

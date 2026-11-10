@@ -1,23 +1,11 @@
-/**
- * The relayer: sends `register`, `unlock`, `reopen` and `stop_sales` to the Annon contract for
- * people and agents without a NEAR account, and pays the NEAR gas. Like an x402 facilitator it is
- * a role, not a service: a platform calls `relay` from its own backend with its own NEAR key, and
- * defdone runs one public instance. It keeps no database: the contract refuses a payment used
- * twice, and the client keeps its purchase job (`nextStep`).
- *
- * Nothing the relayer does can change who gets a key: the contract checks every wallet signature
- * and MPC checks the payment. The checks here exist so that junk costs only RPC reads, never gas,
- * and the limits so that valid but worthless calls can't drain the operator.
- */
-import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
+/** Purchase-based relay checks; RPC retry, budgets and nonce serialization are shared. */
 import { sha256 } from '@noble/hashes/sha2.js';
 import { base58, base64 } from '@scure/base';
 import { Account, actions, encodeTransaction, JsonRpcProvider } from 'near-api-js';
-import { signedBy, signerOf } from '../envelope/pay2.js';
 import {
   getFile,
-  isBuyer,
-  isPaymentUsed,
+  getGrant,
+  getPurchase,
   RPC_TIMEOUT_MS,
   type RpcReply,
   rpcReply,
@@ -27,324 +15,284 @@ import {
   type RegisterArgs,
   type ReopenArgs,
   registerText,
+  reopenSellerText,
   reopenText,
-  type StopSalesArgs,
+  type SellerArgs,
   stopSalesText,
 } from '../near/texts.js';
 import { block, blockHeader, type EvmLog, getReceipt, paymentLogs } from '../pay/base.js';
-import { annonNonce, fromHex } from '../pay/eip3009.js';
+import { bytes, exactKeys, uint } from '../settle-near/codec.js';
+import { type Authorization, identityJson, verifyAuthorization } from '../settle-near/identity.js';
+import {
+  baseNonceV2,
+  buildPurchaseMessage,
+  buyerKey,
+  type Purchase,
+  parsePurchaseMessage,
+  purchaseId,
+} from '../settle-near/purchase.js';
+import { termsHash } from '../settle-near/terms.js';
 
 export type RelayRequest =
-  | { method: 'register'; args: RegisterArgs; sig: string }
-  | { method: 'reopen'; args: ReopenArgs; sig: string }
-  | { method: 'stop_sales'; args: StopSalesArgs; sig: string }
-  | {
-      method: 'unlock';
-      args: { file_id: string; buyer_key: string; logs: EvmLog[]; header?: string };
-    };
-
+  | { method: 'register'; args: RegisterArgs; auth: Authorization }
+  | { method: 'reopen'; args: ReopenArgs; auth: Authorization }
+  | { method: 'stop_sales' | 'reopen_seller'; args: SellerArgs; auth: Authorization }
+  | { method: 'claim_key'; args: { purchase_id: string; grant: number } }
+  | { method: 'unlock'; args: { purchase: Purchase; logs: EvmLog[]; header: string } };
 export type RelayErrorCode =
-  /** The request is malformed or not one the relayer sends. */
   | 'bad_request'
-  /** The wallet signature is not over the contract's text by the right wallet. */
   | 'bad_signature'
-  /** The signature has expired, or is valid for longer than the relayer allows. */
   | 'bad_deadline'
-  /** The operator does not sponsor this (price, seller). */
   | 'not_sponsored'
-  /** A per-seller or per-wallet daily limit is reached. */
   | 'limited'
-  /** The same operation is already on its way (or was just sent). */
   | 'duplicate'
-  /** The relayer can't pay for it now (its prepaid storage is low). */
   | 'unavailable'
   | 'unknown_file'
   | 'already_registered'
   | 'sales_stopped'
   | 'taken_down'
-  /** `reopen` from a wallet that is neither the seller nor a buyer. */
   | 'not_buyer'
-  /** No matching payment on Base, or not yet at Base `safe`. */
   | 'payment_not_found'
   | 'payment_not_safe'
   | 'payment_used'
   | 'bad_header'
-  /** An RPC failed; safe to retry. */
   | 'transport';
-
 export class RelayError extends Error {
-  readonly code: RelayErrorCode;
-  constructor(code: RelayErrorCode, message: string = code) {
+  constructor(
+    readonly code: RelayErrorCode,
+    message: string = code,
+  ) {
     super(message);
-    this.code = code;
     this.name = 'RelayError';
   }
 }
 const fail = (code: RelayErrorCode, message?: string): never => {
   throw new RelayError(code, message);
 };
-
-/** What the operator sponsors. */
 export interface RelayPolicy {
-  /** USDC base units: listings below it are not registered (6 decimals; 10000 = 0.01 USDC). */
   minPrice: bigint;
-  /** A wallet signature may be valid for at most this long ahead (the SDK uses 10 minutes). */
   maxDeadlineSeconds: number;
-  /** Whose files this relayer serves, for every method; omit to serve any seller. */
   sellerAllowed?: (seller: string) => boolean | Promise<boolean>;
-  /** Per day: listings per seller (default 20), reopens per wallet and file (default 10). */
   registrationsPerSeller?: number;
   reopensPerWalletFile?: number;
 }
-
 export interface CheckOptions {
   nearRpc: string;
   baseRpc: string;
   contractId: string;
   usdc: string;
   policy: RelayPolicy;
-  /** Unix seconds; defaults to now. */
   now?: number;
 }
-
-// ---------- the request, rebuilt from checked fields ----------
-
-const ACCOUNT = /^(?=.{2,64}$)(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/;
-const bad = (what: string): never => fail('bad_request', what);
-const hex = (v: unknown, bytes: number, name: string) =>
-  typeof v === 'string' && new RegExp(`^0x[0-9a-fA-F]{${2 * bytes}}$`).test(v)
-    ? v.toLowerCase()
-    : bad(`${name} must be 0x and ${bytes} bytes of hex`);
-/** A one-time key MPC accepts: a compressed G1 point in the group, not the identity. */
-function g1(v: unknown, name: string) {
-  const h = hex(v, 48, name);
-  try {
-    if (!bls.G1.Point.fromBytes(fromHex(h, 48, name)).is0()) return h;
-  } catch {}
-  return bad(`${name} is not a valid one-time key`);
-}
-const seconds = (v: unknown) =>
-  Number.isSafeInteger(v) && (v as number) > 0 && (v as number) <= 253_402_300_799
-    ? (v as number)
-    : bad('deadline must be unix seconds, at most the year 9999');
-const price = (v: unknown) =>
-  typeof v === 'string' && /^[1-9]\d{0,38}$/.test(v) && BigInt(v) < 2n ** 128n
-    ? v
-    : bad('price must be a decimal string of USDC base units');
-const moderator = (v: unknown) =>
-  v === null
-    ? null
-    : typeof v === 'string' && ACCOUNT.test(v)
-      ? v
-      : bad('moderator must be a NEAR account or null');
-
-const LOG_FIELDS = [
-  'address',
-  'block_hash',
-  'block_number',
-  'data',
-  'log_index',
-  'removed',
-  'topics',
-  'transaction_hash',
-  'transaction_index',
-] as const;
-
-/**
- * The request rebuilt from its checked fields only, hex in lowercase: what is checked, signed for
- * and sent is the same object, in the form the contract parses.
- */
 export function canonicalRequest(input: unknown): RelayRequest {
-  const r = input as { method?: unknown; args?: Record<string, unknown>; sig?: unknown } | null;
-  const a = r?.args;
-  if (!a || typeof a !== 'object') return bad('args must be an object');
-  const file_id = hex(a.file_id, 32, 'args.file_id');
-  switch (r.method) {
-    case 'register':
-      return {
-        method: 'register',
-        args: {
-          file_id,
-          seller: hex(a.seller, 20, 'seller'),
-          price: price(a.price),
-          pay_to: hex(a.pay_to, 20, 'pay_to'),
-          cipher_hash: hex(a.cipher_hash, 32, 'cipher_hash'),
-          moderator: moderator(a.moderator),
-          seller_key: g1(a.seller_key, 'seller_key'),
-          deadline: seconds(a.deadline),
-        },
-        sig: hex(r.sig, 65, 'sig'),
-      };
-    case 'reopen':
-      return {
-        method: 'reopen',
-        args: {
-          file_id,
-          wallet: hex(a.wallet, 20, 'wallet'),
-          key: g1(a.key, 'key'),
-          deadline: seconds(a.deadline),
-        },
-        sig: hex(r.sig, 65, 'sig'),
-      };
-    case 'stop_sales':
-      return {
-        method: 'stop_sales',
-        args: { file_id, deadline: seconds(a.deadline) },
-        sig: hex(r.sig, 65, 'sig'),
-      };
-    case 'unlock': {
-      if (
-        !Array.isArray(a.logs) ||
-        a.logs.length !== 2 ||
-        !a.logs.every((l) => l && typeof l === 'object')
-      ) {
-        return bad('logs must be the AuthorizationUsed and Transfer of the payment');
-      }
-      const header = a.header;
-      if (
-        header !== undefined &&
-        (typeof header !== 'string' || !/^0x([0-9a-f]{2})+$/.test(header))
-      ) {
-        return bad('header must be the block header as 0x lowercase hex');
-      }
-      return {
-        method: 'unlock',
-        args: {
-          file_id,
-          buyer_key: g1(a.buyer_key, 'buyer_key'),
-          // Field order as `paymentLogs` builds them, so the comparison with Base is by value.
-          logs: a.logs.map((l) => Object.fromEntries(LOG_FIELDS.map((k) => [k, l[k]]))) as EvmLog[],
-          ...(header === undefined ? {} : { header }),
-        },
-      };
+  try {
+    const r = structuredClone(input) as RelayRequest;
+    if (!r || typeof r !== 'object') throw new Error('expected request');
+    exactKeys(r, ['method', 'args', ...('auth' in r ? ['auth'] : [])]);
+    if ('auth' in r) {
+      exactKeys(r.auth, ['kind', 'sig']);
+      if (!['evm', 'solana'].includes(r.auth.kind)) throw new Error('invalid auth kind');
+      bytes(r.auth.sig, r.auth.kind === 'evm' ? 65 : 64);
     }
-    default:
-      return bad('method must be register, unlock, reopen or stop_sales');
+    const a = r.args;
+    switch (r.method) {
+      case 'register':
+        exactKeys(a, ['terms', 'seller_key', 'deadline']);
+        termsHash(r.args.terms);
+        buyerKey(r.args.seller_key);
+        break;
+      case 'reopen':
+        exactKeys(a, ['purchase_id', 'fresh_key', 'nonce', 'deadline']);
+        bytes(r.args.purchase_id, 32);
+        buyerKey(r.args.fresh_key);
+        bytes(r.args.nonce, 32);
+        break;
+      case 'reopen_seller':
+      case 'stop_sales':
+        exactKeys(a, ['file_id', 'key', 'deadline']);
+        bytes(r.args.file_id, 32);
+        if (r.method === 'reopen_seller') buyerKey(r.args.key ?? '');
+        else if (r.args.key !== null) throw new Error('stop key must be null');
+        break;
+      case 'claim_key':
+        exactKeys(a, ['purchase_id', 'grant']);
+        bytes(r.args.purchase_id, 32);
+        if (!Number.isInteger(r.args.grant) || r.args.grant < 0 || r.args.grant > 0xffffffff)
+          throw new Error('invalid grant');
+        break;
+      case 'unlock':
+        exactKeys(a, ['purchase', 'logs', 'header']);
+        parsePurchaseMessage(buildPurchaseMessage(r.args.purchase));
+        if (
+          !Array.isArray(r.args.logs) ||
+          r.args.logs.length !== 2 ||
+          !/^0x([0-9a-f]{2})+$/.test(r.args.header)
+        )
+          throw new Error('invalid logs/header');
+        r.args.logs = r.args.logs.map((input) => {
+          const fields = [
+            'address',
+            'block_hash',
+            'block_number',
+            'data',
+            'log_index',
+            'removed',
+            'topics',
+            'transaction_hash',
+            'transaction_index',
+          ] as const;
+          exactKeys(input, [...fields]);
+          for (const key of ['address', 'block_hash', 'transaction_hash'] as const)
+            bytes(`0x${input[key]}`, key === 'address' ? 20 : 32);
+          if (!Array.isArray(input.topics) || input.topics.length !== 3)
+            throw new Error('invalid log topics');
+          for (const topic of input.topics) bytes(`0x${topic}`, 32);
+          for (const key of ['block_number', 'log_index', 'transaction_index'] as const)
+            if (!Number.isSafeInteger(input[key]) || (input[key] as number) < 0)
+              throw new Error('invalid log index');
+          if (
+            input.removed !== false ||
+            typeof input.data !== 'string' ||
+            input.data.length > 256 ||
+            !/^0x(?:[0-9a-f]{2})*$/.test(input.data)
+          )
+            throw new Error('invalid log data');
+          return Object.fromEntries(fields.map((k) => [k, input[k]])) as unknown as EvmLog;
+        });
+        break;
+      default:
+        throw new Error('unknown method');
+    }
+    if ('deadline' in a) {
+      if (!Number.isSafeInteger(a.deadline)) throw new Error('invalid deadline');
+      uint(String(a.deadline), 64);
+    }
+    if (['register', 'reopen', 'stop_sales', 'reopen_seller'].includes(r.method) && !('auth' in r))
+      throw new Error('auth required; NEAR identities call directly');
+    return r;
+  } catch (e) {
+    return fail('bad_request', (e as Error).message);
   }
 }
-
-// ---------- checks against the chains ----------
-
-function deadline(d: number, o: CheckOptions) {
-  const now = o.now ?? Math.floor(Date.now() / 1000);
-  if (d < now) fail('bad_deadline', 'the signature has expired');
-  if (d > now + o.policy.maxDeadlineSeconds) {
-    fail('bad_deadline', 'the signature is valid for longer than this relayer allows');
-  }
-}
-
-/** The registration, if the file can still be acted on and this relayer serves its seller. */
-async function liveFile(o: CheckOptions, fileId: string) {
-  const file = await getFile(o.nearRpc, o.contractId, fileId);
-  if (!file) return fail('unknown_file');
-  if (file.takenDown) fail('taken_down', `the file was taken down (${file.takenDown})`);
-  await sponsored(o, file.seller);
-  return file;
-}
-
-async function sponsored(o: CheckOptions, seller: string) {
-  if (o.policy.sellerAllowed && !(await o.policy.sellerAllowed(seller))) {
-    fail('not_sponsored', "this relayer does not serve this seller's files");
-  }
-}
-
-/**
- * Everything the contract and MPC will check that can be checked before sending, read from the
- * operator's own RPCs, on a request from `canonicalRequest`. Throws `RelayError`.
- */
+/** Flat args for claim_key/unlock; wrapped authoritative args for identity operations. */
+export const contractArgs = (r: RelayRequest): object =>
+  'auth' in r ? { args: r.args, auth: r.auth } : r.args;
+const asRelayError = (e: unknown): never => {
+  if (e instanceof RelayError) throw e;
+  return fail(
+    (e as { code?: string })?.code === 'transport' ? 'transport' : 'bad_request',
+    (e as Error).message,
+  );
+};
 export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void> {
   try {
-    switch (r.method) {
-      case 'register': {
-        const a = r.args;
-        deadline(a.deadline, o);
-        if (BigInt(a.price) < o.policy.minPrice) {
-          fail('not_sponsored', 'the price is below what this relayer sponsors');
-        }
-        signedByItsWallet(r, o.contractId);
-        await sponsored(o, a.seller);
-        if (await getFile(o.nearRpc, o.contractId, a.file_id)) fail('already_registered');
-        return;
-      }
-      case 'reopen': {
-        const a = r.args;
-        deadline(a.deadline, o);
-        signedByItsWallet(r, o.contractId);
-        const file = await liveFile(o, a.file_id);
-        if (
-          file.seller !== a.wallet &&
-          !(await isBuyer(o.nearRpc, o.contractId, a.file_id, a.wallet))
-        ) {
-          fail('not_buyer', 'only the seller or a buyer can open the file again');
-        }
-        return;
-      }
-      case 'stop_sales': {
-        const a = r.args;
-        deadline(a.deadline, o);
-        const file = await liveFile(o, a.file_id);
-        if (!signedBy(stopSalesText(o.contractId, a), fromHex(r.sig, 65, 'sig'), file.seller)) {
-          fail('bad_signature', 'the stop is not signed by the seller');
-        }
-        if (file.salesStoppedAt !== null) fail('sales_stopped', 'sales are already stopped');
-        return;
-      }
-      case 'unlock':
-        return await checkUnlock(r.args, o);
+    if ('deadline' in r.args) {
+      const now = o.now ?? Math.floor(Date.now() / 1000);
+      if (r.args.deadline < now || r.args.deadline > now + o.policy.maxDeadlineSeconds)
+        fail('bad_deadline');
     }
+    const fileId =
+      r.method === 'register'
+        ? r.args.terms.file_id
+        : r.method === 'unlock'
+          ? r.args.purchase.file_id
+          : 'file_id' in r.args
+            ? r.args.file_id
+            : undefined;
+    const p =
+      r.method === 'reopen' || r.method === 'claim_key'
+        ? await getPurchase(o.nearRpc, o.contractId, r.args.purchase_id)
+        : null;
+    if ((r.method === 'reopen' || r.method === 'claim_key') && !p) fail('not_buyer');
+    const target = fileId ?? p?.file_id;
+    if (!target) return fail('not_buyer');
+    const file = await getFile(o.nearRpc, o.contractId, target);
+    if (r.method === 'register') {
+      if (
+        r.args.terms.contract !== o.contractId ||
+        BigInt(r.args.terms.near.price) < o.policy.minPrice
+      )
+        fail('not_sponsored');
+      if (file) fail('already_registered');
+      signedByItsWallet(r, o.contractId);
+      if (
+        o.policy.sellerAllowed &&
+        !(await o.policy.sellerAllowed(identityJson(r.args.terms.seller)))
+      )
+        fail('not_sponsored');
+      return;
+    }
+    if (!file) return fail('unknown_file');
+    if (file.takenDown) fail('taken_down');
+    if (o.policy.sellerAllowed && !(await o.policy.sellerAllowed(identityJson(file.seller))))
+      fail('not_sponsored');
+    if (r.method === 'claim_key') {
+      if (!(await getGrant(o.nearRpc, o.contractId, r.args.purchase_id, r.args.grant)))
+        fail('not_buyer');
+      return;
+    }
+    if (r.method === 'reopen') {
+      if (!p) return fail('not_buyer');
+      if (
+        !verifyAuthorization(
+          p.recovery,
+          reopenText({
+            ...r.args,
+            contract: o.contractId,
+            file_id: p.file_id,
+            recovery: p.recovery,
+          }),
+          r.auth,
+        )
+      )
+        fail('bad_signature');
+      return;
+    }
+    if (r.method === 'reopen_seller' || r.method === 'stop_sales') {
+      const text =
+        r.method === 'stop_sales'
+          ? stopSalesText(o.contractId, r.args, file.seller)
+          : reopenSellerText(o.contractId, r.args, file.seller);
+      if (!verifyAuthorization(file.seller, text, r.auth)) fail('bad_signature');
+      if (r.method === 'stop_sales' && file.salesStoppedAt !== null) fail('sales_stopped');
+      return;
+    }
+    if (r.method !== 'unlock') return;
+    const a = r.args;
+    const purchase = a.purchase;
+    const id = purchaseId(purchase);
+    if (
+      purchase.route !== 'base-usdc' ||
+      purchase.contract !== o.contractId ||
+      !file.terms.base ||
+      purchase.terms_hash !== termsHash(file.terms) ||
+      purchase.price !== file.terms.base.price ||
+      purchase.asset !== o.usdc
+    )
+      fail('bad_request');
+    if (await getPurchase(o.nearRpc, o.contractId, id)) fail('payment_used');
+    const auth = a.logs[0];
+    if (!auth) return fail('bad_request');
+    const found = paymentLogs(await getReceipt(o.baseRpc, `0x${auth.transaction_hash}`), {
+      usdc: o.usdc,
+      to: file.payTo,
+      from: `0x${auth.topics[1]?.slice(-40)}`,
+      nonce: baseNonceV2(id),
+      price: BigInt(purchase.price),
+    });
+    if (!found || JSON.stringify(found) !== JSON.stringify(a.logs)) fail('payment_not_found');
+    const safe = await block(o.baseRpc, 'safe');
+    if (
+      safe.number < auth.block_number ||
+      (await block(o.baseRpc, auth.block_number)).hash !== `0x${auth.block_hash}`
+    )
+      fail('payment_not_safe');
+    if ((await blockHeader(o.baseRpc, `0x${auth.block_hash}`)) !== a.header) fail('bad_header');
+    const paidAt = (await block(o.baseRpc, auth.block_number)).timestamp;
+    if (BigInt(paidAt) > BigInt(purchase.expires_at)) fail('bad_deadline');
+    if (file.salesStoppedAt !== null && paidAt > file.salesStoppedAt) fail('sales_stopped');
   } catch (e) {
     asRelayError(e);
-  }
-}
-
-/** An RPC failure as `transport`, anything else unexpected as `bad_request`. */
-function asRelayError(e: unknown): never {
-  if (e instanceof RelayError) throw e;
-  const transport = (e as { code?: unknown })?.code === 'transport';
-  throw new RelayError(transport ? 'transport' : 'bad_request', (e as Error).message);
-}
-
-/** The payment exactly as `unlock` and MPC will check it, from the operator's own Base RPC. */
-async function checkUnlock(
-  a: Extract<RelayRequest, { method: 'unlock' }>['args'],
-  o: CheckOptions,
-) {
-  const file = await liveFile(o, a.file_id);
-  const [auth] = a.logs as [EvmLog, EvmLog];
-  const from = `0x${String(auth.topics?.[1]).slice(-40)}`;
-  const receipt = await getReceipt(o.baseRpc, `0x${String(auth.transaction_hash)}`);
-  const found = receipt
-    ? paymentLogs(receipt, {
-        usdc: o.usdc,
-        to: file.payTo,
-        from,
-        nonce: annonNonce(o.contractId, a.file_id, fromHex(a.buyer_key, 48, 'buyer_key')),
-        price: file.price,
-      })
-    : null;
-  // The logs sent must be the receipt's, field for field: MPC compares them with Base.
-  if (!found || JSON.stringify(found) !== JSON.stringify(a.logs)) {
-    return fail('payment_not_found', 'no payment for this file and key in that transaction');
-  }
-  if ((await block(o.baseRpc, 'safe')).number < auth.block_number) {
-    fail('payment_not_safe', 'the payment is not at Base safe yet; retry shortly');
-  }
-  if (await isPaymentUsed(o.nearRpc, o.contractId, `0x${auth.transaction_hash}`, auth.log_index)) {
-    fail('payment_used', 'this payment already unlocked the file');
-  }
-  if (
-    a.header !== undefined &&
-    (await blockHeader(o.baseRpc, `0x${auth.block_hash}`)) !== a.header
-  ) {
-    fail('bad_header', 'the header is not the payment block');
-  }
-  if (file.salesStoppedAt !== null) {
-    if (a.header === undefined)
-      fail('bad_header', 'sales are stopped: send the payment block header');
-    // The contract's rule (moderation.rs, payment_allowed): paid at most 300 s after the stop.
-    if ((await block(o.baseRpc, auth.block_number)).timestamp > file.salesStoppedAt + 300) {
-      fail('sales_stopped', 'the payment came more than 300 s after sales were stopped');
-    }
   }
 }
 
@@ -353,7 +301,7 @@ async function checkUnlock(
 export interface Sender {
   /** The NEAR account that sends and pays, e.g. `relayer.annon.defdone.near`. */
   accountId: string;
-  /** Its function-call key for the four methods, `ed25519:…`. Only for this contract. */
+  /** Its function-call key for the six methods, `ed25519:…`. Only for this contract. */
   key: string;
 }
 
@@ -507,36 +455,26 @@ function enqueue<T>(job: () => Promise<T>): Promise<T> {
  * by the address that signed, since the seller is known only from the chain), and an unlock
  * includes the buyer's key, which only the buyer knows before it is sent.
  */
-const identity = (r: RelayRequest, contractId: string) =>
-  r.method === 'unlock'
-    ? `unlock:${r.args.logs[0]?.transaction_hash}:${r.args.logs[0]?.log_index}:${r.args.buyer_key}`
-    : r.method === 'reopen'
-      ? `reopen:${r.args.file_id}:${r.args.wallet}:${r.args.key}`
-      : r.method === 'stop_sales'
-        ? `stop_sales:${r.args.file_id}:${signerOf(stopSalesText(contractId, r.args), fromHex(r.sig, 65, 'sig'))}`
-        : `register:${r.args.file_id}`;
-
-/** The wallet signatures that need no chain read, checked before any limit or hold is taken. */
-function signedByItsWallet(r: RelayRequest, contractId: string) {
+const identity = (r: RelayRequest, _contract: string) => {
+  if (r.method === 'unlock') return `unlock:${purchaseId(r.args.purchase)}`;
+  if (r.method === 'claim_key') return `claim:${r.args.purchase_id}:${r.args.grant}`;
+  if (r.method === 'reopen')
+    return `reopen:${r.args.purchase_id}:${r.args.fresh_key}:${r.args.nonce}`;
+  if (r.method === 'register') return `register:${r.args.terms.file_id}`;
+  return `${r.method}:${r.args.file_id}:${r.args.key ?? ''}`;
+};
+const signedByItsWallet = (r: RelayRequest, contract: string) => {
   if (
     r.method === 'register' &&
-    !signedBy(registerText(contractId, r.args), fromHex(r.sig, 65, 'sig'), r.args.seller)
-  ) {
-    fail('bad_signature', 'the listing is not signed by its seller');
-  }
-  if (
-    r.method === 'reopen' &&
-    !signedBy(reopenText(contractId, r.args), fromHex(r.sig, 65, 'sig'), r.args.wallet)
-  ) {
-    fail('bad_signature', 'the reopen is not signed by its wallet');
-  }
-}
-
+    !verifyAuthorization(r.args.terms.seller, registerText(contract, r.args), r.auth)
+  )
+    fail('bad_signature');
+};
 const quota = (r: RelayRequest, p: RelayPolicy): [string, number] | null =>
   r.method === 'register'
-    ? [`register:${r.args.seller}`, p.registrationsPerSeller ?? 20]
+    ? [`register:${identityJson(r.args.terms.seller)}`, p.registrationsPerSeller ?? 20]
     : r.method === 'reopen'
-      ? [`reopen:${r.args.wallet}:${r.args.file_id}`, p.reopensPerWalletFile ?? 10]
+      ? [`reopen:${r.args.purchase_id}`, p.reopensPerWalletFile ?? 10]
       : null;
 
 export interface RelayResult {
@@ -571,6 +509,7 @@ export async function relay(
   const r = canonicalRequest(input);
   // A forged request must not take another wallet's limit or hold its operation.
   signedByItsWallet(r, o.contractId);
+  await checkRelay(r, o);
   const now = Date.now();
   for (const [k, v] of held) if (v <= now) held.delete(k);
   for (const [k, v] of counts) if (v.until <= now) counts.delete(k);
@@ -620,7 +559,7 @@ export async function relay(
         );
         accounts.set(key, account);
       }
-      const args = 'sig' in r ? { args: r.args, sig: r.sig } : { args: r.args };
+      const args = contractArgs(r);
       const tx = await account
         .createSignedTransaction({
           receiverId: o.contractId,

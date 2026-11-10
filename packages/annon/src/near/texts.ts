@@ -1,36 +1,25 @@
-/**
- * The exact texts the Annon contract asks wallets to sign (EIP-191). The client builds them
- * itself, from its own values, so a page or a relayer can't slip a different text in front of the
- * wallet. `specs/vectors/texts.json`, written by the contract's own tests, keeps both in step.
- */
+/** Authoritative contract arguments and texts (near-settlement §§3,9). */
+import { type Identity, identityText } from '../settle-near/identity.js';
+import { buyerKey, type ReopenV2, reopenTextV2 } from '../settle-near/purchase.js';
+import { registerTextV2, type Terms } from '../settle-near/terms.js';
 
 export interface RegisterArgs {
-  file_id: string;
-  seller: string;
-  /** USDC base units (6 decimals), as the contract's `U128`: a decimal string. */
-  price: string;
-  /** Where buyers pay: the seller's wallet, a platform's, or e.g. an immutable revenue split. */
-  pay_to: string;
-  cipher_hash: string;
-  moderator: string | null;
-  /** The seller's one-time G1 key, 48 bytes hex. */
+  terms: Terms;
   seller_key: string;
-  /** Unix seconds. */
   deadline: number;
 }
-
 export interface ReopenArgs {
-  file_id: string;
-  wallet: string;
-  key: string;
+  purchase_id: string;
+  fresh_key: string;
+  nonce: string;
   deadline: number;
 }
-
-export interface StopSalesArgs {
+export interface SellerArgs {
   file_id: string;
+  key: string | null;
   deadline: number;
 }
-
+export type StopSalesArgs = SellerArgs;
 /** The contract's `hex0x(bytes::<N>(s))`: optional lowercase `0x`, any case, printed lowercase. */
 export function hex0x(s: string, bytes: number, name: string): string {
   const h = s.startsWith('0x') ? s.slice(2) : s;
@@ -60,39 +49,30 @@ export function utc(secs: number): string {
 }
 
 export function registerText(contractId: string, a: RegisterArgs): string {
-  return [
-    'Annon: list a file for sale',
-    'Signing this lets whoever holds the seller key below open the file.',
-    `contract: ${contractId}`,
-    `file: ${hex0x(a.file_id, 32, 'file_id')}`,
-    `seller: ${hex0x(a.seller, 20, 'seller')}`,
-    `price: ${usdc(a.price)} USDC`,
-    `pay to: ${hex0x(a.pay_to, 20, 'pay_to')}`,
-    `cipher: ${hex0x(a.cipher_hash, 32, 'cipher_hash')}`,
-    `moderator: ${a.moderator ?? '(none)'}`,
-    `seller key: ${hex0x(a.seller_key, 48, 'seller_key')}`,
-    `valid until: ${utc(a.deadline)}`,
-  ].join('\n');
+  if (contractId !== a.terms.contract) throw new TypeError('terms contract mismatch');
+  buyerKey(a.seller_key);
+  return registerTextV2(a.terms, a.seller_key, a.deadline);
 }
-
-export function reopenText(contractId: string, a: ReopenArgs): string {
+export const reopenText = (a: ReopenV2): string => reopenTextV2(a);
+export function reopenSellerText(contract: string, a: SellerArgs, seller: Identity): string {
+  buyerKey(a.key ?? '');
   return [
     'Annon: open a file again',
     'Signing this lets whoever holds the one-time key below open the file.',
-    `contract: ${contractId}`,
+    `contract: ${contract}`,
     `file: ${hex0x(a.file_id, 32, 'file_id')}`,
-    `wallet: ${hex0x(a.wallet, 20, 'wallet')}`,
-    `one-time key: ${hex0x(a.key, 48, 'key')}`,
+    `seller: ${identityText(seller)}`,
+    `one-time key: ${a.key}`,
     `valid until: ${utc(a.deadline)}`,
   ].join('\n');
 }
-
-export function stopSalesText(contractId: string, a: StopSalesArgs): string {
+export function stopSalesText(contract: string, a: SellerArgs, seller: Identity): string {
   return [
     'Annon: stop selling a file',
     "Signing this is final: the file can't be sold again. Past buyers keep access.",
-    `contract: ${contractId}`,
+    `contract: ${contract}`,
     `file: ${hex0x(a.file_id, 32, 'file_id')}`,
+    `seller: ${identityText(seller)}`,
     `valid until: ${utc(a.deadline)}`,
   ].join('\n');
 }

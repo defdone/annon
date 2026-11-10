@@ -1,0 +1,212 @@
+/** Wallet adapters: authoritative text in, checked authorization out. No browser globals. */
+import { createWalletClient, custom, type EIP1193Provider } from 'viem';
+import { base } from 'viem/chains';
+import type { TypedData } from '../pay/eip3009.js';
+import { hex } from '../settle-near/codec.js';
+import {
+  type Authorization,
+  type Identity,
+  parseIdentity,
+  solanaWalletAuth,
+  verifyAuthorization,
+} from '../settle-near/identity.js';
+import { parsePurchaseMessage } from '../settle-near/purchase.js';
+import { NEAR_USDC } from '../settle-near/terms.js';
+
+export interface IdentityWallet {
+  identity: Identity;
+  authorize(text: string): Promise<Authorization | undefined>;
+}
+export interface EvmWallet extends IdentityWallet {
+  address: string;
+  signTypedData(data: TypedData): Promise<string>;
+}
+/** Accept an EIP-1193 provider or the provider member of an EIP-6963 announcement. */
+export function evmWallet(
+  input:
+    | { request(args: { method: string; params?: unknown }): Promise<unknown> }
+    | { provider: { request(args: { method: string; params?: unknown }): Promise<unknown> } },
+  address: string,
+): EvmWallet {
+  const provider = 'provider' in input ? input.provider : input;
+  const identity = parseIdentity({ kind: 'evm', id: address });
+  const client = createWalletClient({
+    chain: base,
+    transport: custom(provider as EIP1193Provider),
+  });
+  const selected = async () => {
+    const accounts = await provider.request({ method: 'eth_accounts' });
+    if (
+      !Array.isArray(accounts) ||
+      !accounts.some((a) => typeof a === 'string' && a.toLowerCase() === identity.id)
+    )
+      throw new Error('wallet does not control the selected identity');
+  };
+  return {
+    identity,
+    address: identity.id,
+    async authorize(text) {
+      await selected();
+      const sig = await client.signMessage({
+        account: identity.id as `0x${string}`,
+        message: text,
+      });
+      const auth: Authorization = { kind: 'evm', sig };
+      if (!verifyAuthorization(identity, text, auth))
+        throw new Error('wallet signature does not match identity');
+      return auth;
+    },
+    async signTypedData(data) {
+      await selected();
+      return client.signTypedData({
+        ...data,
+        account: identity.id as `0x${string}`,
+      } as unknown as Parameters<typeof client.signTypedData>[0]);
+    },
+  };
+}
+export interface SolanaAccount {
+  publicKey: Uint8Array;
+  address: string;
+}
+export interface SolanaStandard {
+  features: {
+    'solana:signMessage': {
+      signMessage(
+        ...inputs: { account: SolanaAccount; message: Uint8Array }[]
+      ): Promise<readonly { signature: Uint8Array; signedMessage: Uint8Array }[]>;
+    };
+  };
+}
+export function solanaWallet(wallet: SolanaStandard, account: SolanaAccount): IdentityWallet {
+  const identity = parseIdentity({ kind: 'solana', id: hex(account.publicKey).slice(2) });
+  return {
+    identity,
+    async authorize(text) {
+      const results = await wallet.features['solana:signMessage'].signMessage({
+        account,
+        message: new TextEncoder().encode(text),
+      });
+      if (results.length !== 1 || !results[0])
+        throw new Error('wallet returned no single signature');
+      return solanaWalletAuth(identity, text, results[0]);
+    },
+  };
+}
+export interface NearCall {
+  receiverId: string;
+  method: string;
+  args: object;
+  gas?: bigint;
+  deposit?: bigint;
+}
+export interface NearWallet extends IdentityWallet {
+  call(call: NearCall): Promise<unknown>;
+  transferPurchase(message: string): Promise<unknown>;
+  /** Proof supplied by an integration using an account-bound NEAR wallet challenge. Required before using a NEAR identity as recovery. */
+  proveControl?: (text: string) => Promise<void>;
+}
+function nearWallet(
+  accountId: string,
+  selected: () => Promise<void>,
+  call: (call: NearCall) => Promise<unknown>,
+  proveControl?: NearWallet['proveControl'],
+): NearWallet {
+  const identity = parseIdentity({ kind: 'near', id: accountId });
+  return {
+    identity,
+    ...(proveControl ? { proveControl } : {}),
+    async authorize(_text) {
+      await selected();
+      return undefined;
+    },
+    async call(request) {
+      await selected();
+      return call(request);
+    },
+    async transferPurchase(message) {
+      const p = parsePurchaseMessage(message);
+      if (p.route !== 'near-usdc' || p.asset !== NEAR_USDC)
+        throw new TypeError('not a NEAR USDC purchase');
+      if (BigInt(p.expires_at) <= BigInt(Math.floor(Date.now() / 1000)))
+        throw new Error('purchase expired');
+      await selected();
+      return call({
+        receiverId: NEAR_USDC,
+        method: 'ft_transfer_call',
+        args: { receiver_id: p.contract, amount: p.price, msg: message },
+        gas: 150000000000000n,
+        deposit: 1n,
+      });
+    },
+  };
+}
+export interface SelectorWallet {
+  getAccounts(): Promise<readonly { accountId: string }[]>;
+  signAndSendTransaction(tx: {
+    signerId: string;
+    receiverId: string;
+    actions: {
+      type: 'FunctionCall';
+      params: { methodName: string; args: object; gas: string; deposit: string };
+    }[];
+  }): Promise<unknown>;
+}
+export function nearSelectorWallet(
+  wallet: SelectorWallet,
+  accountId: string,
+  proveControl?: NearWallet['proveControl'],
+): NearWallet {
+  return nearWallet(
+    accountId,
+    async () => {
+      if (!(await wallet.getAccounts()).some((a) => a.accountId === accountId))
+        throw new Error('wallet does not control the NEAR account');
+    },
+    (call) =>
+      wallet.signAndSendTransaction({
+        signerId: accountId,
+        receiverId: call.receiverId,
+        actions: [
+          {
+            type: 'FunctionCall',
+            params: {
+              methodName: call.method,
+              args: call.args,
+              gas: String(call.gas ?? 300000000000000n),
+              deposit: String(call.deposit ?? 0n),
+            },
+          },
+        ],
+      }),
+    proveControl,
+  );
+}
+/** Pass a near-api-js Account constructed with a KeyPair signer. The account sends the call itself. */
+export function nearKeyPairWallet(
+  account: {
+    accountId: string;
+    callFunction(args: {
+      contractId: string;
+      methodName: string;
+      args: object;
+      gas: bigint;
+      deposit: bigint;
+    }): Promise<unknown>;
+  },
+  proveControl?: NearWallet['proveControl'],
+): NearWallet {
+  return nearWallet(
+    account.accountId,
+    async () => {},
+    (call) =>
+      account.callFunction({
+        contractId: call.receiverId,
+        methodName: call.method,
+        args: call.args,
+        gas: call.gas ?? 300000000000000n,
+        deposit: call.deposit ?? 0n,
+      }),
+    proveControl,
+  );
+}

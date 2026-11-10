@@ -2,6 +2,9 @@
   "dst": "ANNON-BUYER-PROOF-V1_BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_",
   "valid": [
     {
+      "purchase_id": "0x83f57cf6fd92ada3ad4bf4825cb79314dea7cbba2ce933a0bc823b4bd14cf4c5",
+      "grant": 0,
+      "header": "eyJwdXJjaGFzZV9pZCI6IjB4ODNmNTdjZjZmZDkyYWRhM2FkNGJmNDgyNWNiNzkzMTRkZWE3Y2JiYTJjZTkzM2EwYmM4MjNiNGJkMTRjZjRjNSIsImdyYW50IjowLCJzaWduYXR1cmUiOiJoRGgteFNZckhzQ2trSVlVeVp1d0hNekFKb1pJSlBZQXZ6X0xLMWZLdGR5eDdtTDVrRC1aUHFmcFpqWW56djA1QmJIQ3FlX2EyNFFRUjdvbUpBckZLWkJRNGNqeUkzNXl4Rzl6R3FacTN4RHhtVnUwSTJKZkMzdkx4dmt3bTd2dCJ9",
       "id": "small-scalar",
       "secret": "0x0000000000000000000000000000000000000000000000000000000000000007",
       "buyerKey": "0xb928f3beb93519eecf0145da903b40a4c97dca00b21f12ac0df3be9116ef2ef27b2ae6bcd4c5bc2d54ef5a70627efcb7",
@@ -10,6 +13,9 @@
       "proof": "hDh-xSYrHsCkkIYUyZuwHMzAJoZIJPYAvz_LK1fKtdyx7mL5kD-ZPqfpZjYnzv05BbHCqe_a24QQR7omJArFKZBQ4cjyI35yxG9zGqZq3xDxmVu0I2JfC3vLxvkwm7vt"
     },
     {
+      "purchase_id": "0xa27c997e470c1daa18e704be259986e6a13b6f69d4c9695d097b3d1d9a20078d",
+      "grant": 7,
+      "header": "eyJwdXJjaGFzZV9pZCI6IjB4YTI3Yzk5N2U0NzBjMWRhYTE4ZTcwNGJlMjU5OTg2ZTZhMTNiNmY2OWQ0Yzk2OTVkMDk3YjNkMWQ5YTIwMDc4ZCIsImdyYW50Ijo3LCJzaWduYXR1cmUiOiJsX19JNG9NNXNBRkZUdVo3Z1l1eDk5a2w0enpBNEVNSHBrQVl5Zl83MXNXdFpzRjJ4LXJIblBSSUFIQVhUU2pJREczYlVQUnNGeHc2WjBubktwcFJLb2NFZXFBUGhfdXoyRnBXZGhTUWNBOEJ5Wk1jN2N3dTNHU29hREJYYTBnMiJ9",
       "id": "path-query-port",
       "secret": "0x001f2e3d4c5b6a79880123456789abcdeffedcba9876543210aabbccddeeff00",
       "buyerKey": "0xa4313863387f2e8145a3df6b25dd09a8c7fea11ccd7cab01ed9a89ae3f7e38667000a35def1695a68221ecf02304d82a",
@@ -18,6 +24,9 @@
       "proof": "l__I4oM5sAFFTuZ7gYux99kl4zzA4EMHpkAYyf_71sWtZsF2x-rHnPRIAHAXTSjIDG3bUPRsFxw6Z0nnKppRKocEeqAPh_uz2FpWdhSQcA8ByZMc7cwu3GSoaDBXa0g2"
     },
     {
+      "purchase_id": "0x5ebe5bb12e3e6b427543f94d32d2b8eb635de53f1b3bccb93f972e8278617a3e",
+      "grant": 7,
+      "header": "eyJwdXJjaGFzZV9pZCI6IjB4NWViZTViYjEyZTNlNmI0Mjc1NDNmOTRkMzJkMmI4ZWI2MzVkZTUzZjFiM2JjY2I5M2Y5NzJlODI3ODYxN2EzZSIsImdyYW50Ijo3LCJzaWduYXR1cmUiOiJ1U3Z2OU5IZ1hGX2hDWnplR3Jpa2FMbEtwM2g1eVZ5V0hYQzlqMWtrNTJPR3dsdXZpT3VPY3p6ZEltLU95Sy1rQTFpVldjSG1GX3N3dVY0Z0t0ZnE1amRUR2dEaXFCWU9qTE4yQVZGUTROcGdfWUktb3BOYXpfQkxFOHcyc254byJ9",
       "id": "unicode-path",
       "secret": "0x002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
       "buyerKey": "0x98b020cc2262b762f385addcfee59050c304e4bffd9e0fee013d98b24e0b157a305c04c4654d8ae7c071eac7363139b6",

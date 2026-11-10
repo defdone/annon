@@ -18,7 +18,6 @@ export type PayErrorCode =
   | 'taken_down'
   | 'sales_stopped'
   | 'unknown_moderator'
-  | 'already_bought'
   | 'price_mismatch'
   | 'price_above_max'
   | 'recipient_mismatch'
@@ -388,11 +387,11 @@ export function paymentLogs(receipt: unknown, e: Expected): EvmLog[] | null {
   ) {
     return null;
   }
-  return amount(transfer.data, 0) >= e.price ? [auth, transfer] : null;
+  return amount(transfer.data, 0) === e.price ? [auth, transfer] : null;
 }
 
 export type PaymentStatus =
-  /** On Base: `logs` go to `unlock`; `logIndex` of the first is what `is_payment_used` takes. */
+  /** On Base: `logs` go to `unlock`; `logIndex` identifies its first proved log. */
   | { state: 'paid'; txHash: string; logIndex: number; logs: EvmLog[] }
   /** Not on Base yet and still valid: wait, or send the same header again. */
   | { state: 'pending' }

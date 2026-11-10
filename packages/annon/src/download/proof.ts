@@ -62,3 +62,51 @@ export function sameResource(advertised: string, requested: string): boolean {
   const a = canonical(advertised);
   return a !== null && a === canonical(requested);
 }
+
+export interface PurchaseProof {
+  purchase_id: string;
+  grant: number;
+  signature: string;
+}
+/** The existing URL signature, accompanied by its final contract lookup coordinates. */
+export function purchaseProof(
+  secret: Uint8Array,
+  url: string,
+  purchase_id: string,
+  grant = 0,
+): string {
+  if (
+    !/^0x[0-9a-f]{64}$/.test(purchase_id) ||
+    !Number.isInteger(grant) ||
+    grant < 0 ||
+    grant > 0xffffffff
+  )
+    throw new TypeError('invalid purchase/grant');
+  return b64url(
+    utf8.encode(JSON.stringify({ purchase_id, grant, signature: buyerProof(secret, url) })),
+  );
+}
+export function readPurchaseProof(header: string | null): PurchaseProof | null {
+  try {
+    if (!header || header.length > 512 || !/^[A-Za-z0-9_-]+$/.test(header)) return null;
+    const p = JSON.parse(
+      new TextDecoder('utf-8', { fatal: true }).decode(
+        Uint8Array.from(atob(header.replaceAll('-', '+').replaceAll('_', '/')), (c) =>
+          c.charCodeAt(0),
+        ),
+      ),
+    ) as PurchaseProof;
+    if (
+      Object.keys(p).sort().join() !== 'grant,purchase_id,signature' ||
+      !/^0x[0-9a-f]{64}$/.test(p.purchase_id) ||
+      !Number.isInteger(p.grant) ||
+      p.grant < 0 ||
+      p.grant > 0xffffffff ||
+      !/^[A-Za-z0-9_-]{128}$/.test(p.signature)
+    )
+      return null;
+    return p;
+  } catch {
+    return null;
+  }
+}

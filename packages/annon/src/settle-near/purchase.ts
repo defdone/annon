@@ -22,6 +22,7 @@ import {
   identityText,
   parseIdentity,
 } from './identity.js';
+import { BASE_USDC, NEAR_USDC } from './terms.js';
 
 export interface Purchase {
   version: 2;
@@ -46,13 +47,29 @@ export function buyerKey(key: string): Uint8Array<ArrayBuffer> {
   return raw;
 }
 export function encodePurchase(p: Purchase): Uint8Array<ArrayBuffer> {
+  exactKeys(p, [
+    'version',
+    'refund',
+    'network',
+    'contract',
+    'route',
+    'asset',
+    'file_id',
+    'terms_hash',
+    'price',
+    'nonce',
+    'buyer_key',
+    'recovery',
+    'expires_at',
+  ]);
   if (p.version !== 2 || (p.route !== 'near-usdc' && p.route !== 'base-usdc'))
     throw new TypeError('invalid purchase version/route');
   if (p.route === 'near-usdc') {
     network(p.network);
-    account(p.asset);
+    if (p.asset !== NEAR_USDC) throw new TypeError('invalid NEAR asset');
   } else {
-    if (p.network !== 'eip155:8453') network(p.network);
+    if (p.network !== 'eip155:8453' || p.asset !== BASE_USDC)
+      throw new TypeError('invalid Base network/asset');
     bytes(p.asset, 20);
   }
   account(p.contract);

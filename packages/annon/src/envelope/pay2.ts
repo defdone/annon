@@ -61,12 +61,12 @@ export interface FileMeta {
 export interface Listing {
   fileId: string | Uint8Array;
   cipherHash: string | Uint8Array;
-  /** Legacy EVM address, or the registered v2 identity. */
+  /** Registered seller; an EVM address is accepted as API shorthand. */
   seller: string | Identity;
   /** NEAR v2 only: SHA256(header without its 65-byte trailer), read at finality. */
   publishedHeaderHash?: string | Uint8Array;
-  /** Registered version. Defaults to 1 for legacy address sellers, 2 for identities. */
-  pay2Version?: 1 | 2;
+  /** Registered version, always 2. */
+  pay2Version?: 2;
 }
 
 export interface PreviewPackage {
@@ -173,11 +173,11 @@ export const bodyHash = (
   h: Pick<
     Header,
     'chunkLog2' | 'fileId' | 'metaLen' | 'previewLen' | 'n' | 'commits' | 'hashes'
-  > & { version?: 1 | 2 },
+  > & { version?: 2 },
 ) =>
   sha256(
     utf8.encode('annon/pay2/body'),
-    new Uint8Array([h.version ?? 1, h.chunkLog2]),
+    new Uint8Array([h.version ?? 2, h.chunkLog2]),
     h.fileId,
     int(h.metaLen, 2),
     int(h.previewLen, 4),
@@ -224,7 +224,7 @@ const toHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2,
 
 /** Spec 4.1: the EIP-191 text the seller signs once the header is final. */
 export const publishText = (contractId: string, fileId: Uint8Array, headerHash: Uint8Array) =>
-  `Annon: publish a file\nSigning this lets buyers check the file before they pay.\ncontract: ${contractId}\nfile: 0x${toHex(fileId)}\nheader: 0x${toHex(headerHash)}`;
+  `Annon: publish a file\ncontract: ${contractId}\nfile: 0x${toHex(fileId)}\nheader: 0x${toHex(headerHash)}`;
 
 export { signedBy, signerOf } from './evm.js';
 
@@ -236,7 +236,7 @@ export function sellerAddress(seller: string): string {
 // ---------- header ----------
 
 interface Header {
-  version: 1 | 2;
+  version: 2;
   authKind: 0 | 1 | 2;
   chunkLog2: number;
   fileId: Bytes;
@@ -255,8 +255,8 @@ export function parseHeader(b: Bytes, prefixOnly = false): Header {
   if (b.length < 4 || !MAGIC.every((x, i) => b[i] === x)) fail('bad_magic');
   if (b.length < FIXED) fail('bad_header', 'shorter than the fixed header');
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
-  if (b[4] !== 1 && b[4] !== 2) fail('unsupported_version');
-  const version = b[4] as 1 | 2;
+  if (b[4] !== 2) fail('unsupported_version');
+  const version = b[4] as 2;
   const authKind = b[7] ?? 0;
   const chunkLog2 = b[5] ?? 0;
   if (chunkLog2 < 16 || chunkLog2 > 24) fail('bad_chunk_size');
@@ -274,7 +274,7 @@ export function parseHeader(b: Bytes, prefixOnly = false): Header {
     : stanzaCount >= 1 && stanzaCount <= 8 && headerLen >= prefixLen + MAC + SIG;
   if (
     !stanzasOk ||
-    (version === 1 ? authKind !== 0 : authKind > 2) ||
+    authKind > 2 ||
     metaLen < 256 ||
     metaLen > MAX_META ||
     metaLen % 256 !== 0 ||
@@ -436,7 +436,7 @@ const inspected = async (h: Header, b: Bytes, contractId: string): Promise<Inspe
 /** Spec 6, steps 1 to 3. */
 export async function checkSigned(b: Bytes, listing: Listing, contractId: string): Promise<Header> {
   const parsed = parseHeader(b);
-  const version = listing.pay2Version ?? (typeof listing.seller === 'string' ? 1 : 2);
+  const version = listing.pay2Version ?? 2;
   if (parsed.version !== version) fail('unsupported_version');
   const h = await checkRegistration(parsed, listing);
   const seller =
@@ -445,33 +445,25 @@ export async function checkSigned(b: Bytes, listing: Listing, contractId: string
       : parseIdentity(listing.seller);
   const hash = await sha256(b.subarray(0, h.headerLen - SIG));
   const trailer = b.subarray(h.headerLen - SIG, h.headerLen);
-  if (h.version === 1) {
+  if (identityKind(seller) !== h.authKind) fail('seller_signature_invalid');
+  if (seller.kind === 'near') {
     if (
-      seller.kind !== 'evm' ||
-      !signedBy(publishText(contractId, h.fileId, hash), trailer, seller.id)
+      trailer.some((x) => x !== 0) ||
+      listing.publishedHeaderHash === undefined ||
+      !equal(hash, hexBytes(listing.publishedHeaderHash))
     )
       fail('seller_signature_invalid');
   } else {
-    if (identityKind(seller) !== h.authKind) fail('seller_signature_invalid');
-    if (seller.kind === 'near') {
-      if (
-        trailer.some((x) => x !== 0) ||
-        listing.publishedHeaderHash === undefined ||
-        !equal(hash, hexBytes(listing.publishedHeaderHash))
+    if (seller.kind === 'solana' && trailer[64] !== 0) fail('seller_signature_invalid');
+    const sig = seller.kind === 'solana' ? trailer.subarray(0, 64) : trailer;
+    if (
+      !verifyAuthorization(
+        seller,
+        publishTextV2(contractId, canonicalHex(h.fileId), canonicalHex(hash)),
+        { kind: seller.kind, sig: canonicalHex(sig) },
       )
-        fail('seller_signature_invalid');
-    } else {
-      if (seller.kind === 'solana' && trailer[64] !== 0) fail('seller_signature_invalid');
-      const sig = seller.kind === 'solana' ? trailer.subarray(0, 64) : trailer;
-      if (
-        !verifyAuthorization(
-          seller,
-          publishTextV2(contractId, canonicalHex(h.fileId), canonicalHex(hash)),
-          { kind: seller.kind, sig: canonicalHex(sig) },
-        )
-      )
-        fail('seller_signature_invalid');
-    }
+    )
+      fail('seller_signature_invalid');
   }
   return h;
 }
@@ -578,8 +570,8 @@ export async function open(
 // ---------- seal ----------
 
 export interface SealOptions {
-  /** Defaults to v1. V2 must select the registered seller authentication kind before sealing. */
-  version?: 1 | 2;
+  /** Select the registered seller authentication kind before sealing. Version is always 2. */
+  version?: 2;
   authKind?: 0 | 1 | 2;
   fileId: Uint8Array;
   name: string;
@@ -601,21 +593,17 @@ export interface FinishOptions {
 }
 
 /** @internal Shared by buffered and streaming encoders. */
-export function sealAuth(opts: SealOptions): { version: 1 | 2; authKind: 0 | 1 | 2 } {
-  const version = opts.version ?? 1;
+export function sealAuth(opts: SealOptions): { version: 2; authKind: 0 | 1 | 2 } {
+  const version = opts.version ?? 2;
   const authKind = opts.authKind ?? 0;
-  if (
-    (version !== 1 && version !== 2) ||
-    ![0, 1, 2].includes(authKind) ||
-    (version === 1 && authKind !== 0)
-  )
+  if (version !== 2 || ![0, 1, 2].includes(authKind))
     throw new TypeError('invalid PAY2 version/auth kind');
   return { version, authKind };
 }
 
 /** @internal Build and check the fixed-width authentication trailer. */
 export async function finishTrailer(
-  version: 1 | 2,
+  version: 2,
   authKind: 0 | 1 | 2,
   opts: FinishOptions,
   fileId: Uint8Array,
@@ -625,14 +613,12 @@ export async function finishTrailer(
     typeof opts.seller === 'string'
       ? parseIdentity({ kind: 'evm', id: sellerAddress(opts.seller) })
       : parseIdentity(opts.seller);
-  if (identityKind(seller) !== authKind || (version === 1 && seller.kind !== 'evm'))
+  if (identityKind(seller) !== authKind)
     throw new TypeError('seller identity does not match auth kind');
   if (seller.kind === 'near') return new Uint8Array(SIG);
   if (!opts.sign) throw new TypeError('seller signature required');
-  const text =
-    version === 1
-      ? publishText(opts.contractId, fileId, headerHash)
-      : publishTextV2(opts.contractId, canonicalHex(fileId), canonicalHex(headerHash));
+  if (version !== 2) throw new TypeError('unsupported PAY2 version');
+  const text = publishTextV2(opts.contractId, canonicalHex(fileId), canonicalHex(headerHash));
   const result = await opts.sign(text);
   if (seller.kind === 'solana') {
     if (typeof result === 'string' || result instanceof Uint8Array)
@@ -848,7 +834,7 @@ export async function verifyPreview(
   await checkRegistration(h, listing);
   if (listing.pay2Version !== undefined && listing.pay2Version !== h.version)
     fail('preview_invalid');
-  if (h.version === 2) {
+  {
     if (listing.seller === undefined) fail('preview_invalid');
     const seller = parseIdentity(
       typeof listing.seller === 'string' ? { kind: 'evm', id: listing.seller } : listing.seller,

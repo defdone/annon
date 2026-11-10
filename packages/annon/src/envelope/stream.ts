@@ -1,5 +1,5 @@
 /**
- * Bounded-memory PAY2 v1/v2 using Web Streams and the one-shot encoder's WebCrypto primitives.
+ * Bounded-memory PAY2 version 2 using Web Streams and the one-shot encoder's WebCrypto primitives.
  *
  * The format puts all hashes before the body, and registration precedes the final stanza/MAC/
  * signature. Sealing therefore consumes TWO streams: sealStream's first pass computes the
@@ -324,7 +324,7 @@ async function readHeader(input: ByteReader): Promise<Bytes> {
   if (fixed.length < 4 || !MAGIC.every((byte, i) => fixed[i] === byte))
     throw new Pay2Error('bad_magic');
   if (fixed.length < FIXED) throw new Pay2Error('bad_header');
-  if (fixed[4] !== 1 && fixed[4] !== 2) throw new Pay2Error('unsupported_version');
+  if (fixed[4] !== 2) throw new Pay2Error('unsupported_version');
   const chunkLog2 = fixed[5] ?? 0;
   if (chunkLog2 < 16 || chunkLog2 > 24) throw new Pay2Error('bad_chunk_size');
   const dv = new DataView(fixed.buffer);

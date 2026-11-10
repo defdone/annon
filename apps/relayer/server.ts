@@ -18,6 +18,7 @@ import {
   relay,
   type Sender,
 } from '../../packages/annon/src/relay/relay.ts';
+import { identityJson, parseIdentity } from '../../packages/annon/src/settle-near/identity.ts';
 
 export interface Config extends Omit<CheckOptions, 'now'> {
   sender: Sender;
@@ -88,7 +89,7 @@ export async function handle(
         network: 'near:mainnet',
         contract: c.contractId,
         relayer: c.sender.accountId,
-        methods: ['register', 'unlock', 'reopen', 'stop_sales'],
+        methods: ['register', 'unlock', 'claim_key', 'reopen', 'reopen_seller', 'stop_sales'],
         minPrice: c.policy.minPrice.toString(),
         maxDeadlineSeconds: c.policy.maxDeadlineSeconds,
         disabled: c.disabled,
@@ -216,8 +217,14 @@ export function fromEnv(e: Record<string, string | undefined>): { config: Config
     return n;
   };
   const sellers = e.SELLERS?.split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      const separator = s.indexOf(':');
+      return identityJson(
+        parseIdentity({ kind: s.slice(0, separator), id: s.slice(separator + 1) }),
+      );
+    });
   return {
     config: {
       nearRpc: env('NEAR_RPC', 'https://rpc.mainnet.fastnear.com'),

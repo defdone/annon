@@ -5,11 +5,20 @@
  * Every value the buyer signs comes from the Annon contract, never from the payment request: the
  * request is only compared against it. The host can make the purchase fail, not misdirect it.
  */
-import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
+
 import { sha256 } from '@noble/hashes/sha2.js';
 import { sameResource } from '../download/proof.js';
 import { type Inspected, inspect, inspectHeader, Pay2Error } from '../envelope/pay2.js';
-import { type FileInfo, getConfig, getFile, isBuyer } from '../near/rpc.js';
+import { keyFromSecret } from '../keys/near-ckd.js';
+import { type FileInfo, getConfig, getFile } from '../near/rpc.js';
+import type { Identity } from '../settle-near/identity.js';
+import {
+  baseNonceV2,
+  buildPurchaseMessage,
+  type Purchase,
+  purchaseId,
+} from '../settle-near/purchase.js';
+import { termsHash } from '../settle-near/terms.js';
 import {
   balanceOf,
   block,
@@ -23,7 +32,6 @@ import {
 } from './base.js';
 import {
   type Authorization,
-  annonNonce,
   digest,
   signer as recover,
   type TypedData,
@@ -47,11 +55,7 @@ import {
   paymentSignature,
 } from './x402.js';
 
-/**
- * Signatures stay valid at most this long, whatever the request allows. With the clock margin
- * below it stays inside the contract's 300 s after a stop (`STOP_SETTLEMENT_SECONDS`), so an
- * authorization made while the file was on sale can't be settled into a payment without a key.
- */
+/** Bound the lifetime of an outstanding payment authorization. */
 export const MAX_VALIDITY_SECONDS = 180;
 /** How far the Base RPC's clock may be from ours. */
 export const MAX_CLOCK_SKEW_SECONDS = 60;
@@ -90,7 +94,7 @@ export interface Quote {
   contractId: string;
   fileId: string;
   buyer: string;
-  seller: string;
+  seller: Identity;
   /** The registered `pay_to`. */
   to: string;
   usdc: string;
@@ -118,7 +122,12 @@ async function checkPay2(
   fileId: string,
   file: FileInfo,
 ): Promise<Inspected> {
-  const listing = { fileId, cipherHash: file.cipherHash, seller: file.seller };
+  const listing = {
+    fileId,
+    cipherHash: file.cipherHash,
+    seller: file.seller,
+    ...(file.headerHash ? { publishedHeaderHash: file.headerHash } : {}),
+  };
   let r: Inspected;
   try {
     r = await (wholeFile ? inspect : inspectHeader)(pay2, listing, contractId);
@@ -187,6 +196,7 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
   if (!(o.pay2 instanceof Uint8Array)) throw new TypeError('pay2 must be the PAY2 header bytes');
   const checked = await checkPay2(o.pay2, info?.public === true, o.contractId, o.fileId, file);
 
+  if (!file.terms.base) fail('method_mismatch', 'the file has no Base route');
   const to = file.payTo;
   // Facilitators take the EIP-712 domain from the offer, so it must be there and be USDC's.
   if (lower(req.asset) !== config.usdc || extra.name !== 'USD Coin' || extra.version !== '2') {
@@ -196,10 +206,9 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
   if (method !== undefined && method !== 'eip3009') {
     fail('method_mismatch', `the offer is not a plain Annon transfer`);
   }
-  // x402 v2 section 6.1: never sign for a payment flow the client doesn't know. Profile v1.1
-  // (`version: 2`) settles before it serves the file; v1 settled after.
-  const flow = extra.paymentFlow ?? 'authorization';
-  if (flow !== (info?.version === 2 ? 'upfront' : 'authorization')) {
+  // Extension v3 settles before serving and accepts only the commitment nonce.
+  const flow = extra.paymentFlow;
+  if (info?.version !== 3 || req.extra?.nonceVersion !== 2 || flow !== 'upfront') {
     fail('method_mismatch', `unsupported payment flow ${String(extra.paymentFlow)}`);
   }
   // A split in the payment itself would take part of it away from the registered pay_to.
@@ -213,10 +222,6 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
     fail('price_mismatch', 'the payment request asks a different price than the registration');
   }
   if (file.price > o.maxPrice) fail('price_above_max', 'the price is above your limit');
-  if (await isBuyer(o.nearRpc, o.contractId, o.fileId, buyer)) {
-    fail('already_bought', 'this wallet already bought the file; open it again instead');
-  }
-
   // The buyer's wallet on Base.
   const h = await head(o.baseRpc);
   if (await hasCode(o.baseRpc, buyer, h.number)) {
@@ -255,7 +260,8 @@ export interface Wallet {
 
 export interface AuthorizeOptions {
   /** The buyer's one-time G1 key (`OneTimeKey.publicKeyBytes`). */
-  buyerKey: Uint8Array;
+  purchase: Purchase;
+  buyerSecret: Uint8Array;
   wallet: Wallet;
   /** Where the purchase is recorded (profile section 10): one open purchase per wallet and file. */
   store: Store<PurchaseRecord>;
@@ -286,18 +292,23 @@ export async function authorize(
 ): Promise<{ header: string; purchase: PurchaseRecord }> {
   if (lower(o.wallet.address) !== q.buyer)
     throw new TypeError('the wallet is not the buyer the quote was made for');
-  // Exactly the 48-byte compressed form `unlock` takes: the nonce hashes these bytes. The
-  // identity would make NEAR's answer the key itself, readable by anyone in the transaction.
-  let point: InstanceType<typeof bls.G1.Point> | undefined;
-  try {
-    if (o.buyerKey.length === 48) point = bls.G1.Point.fromBytes(o.buyerKey);
-  } catch {}
-  if (!point || point.is0()) {
-    throw new TypeError('buyerKey must be a one-time G1 key, 48 bytes compressed');
-  }
+  const p = o.purchase;
+  const id = purchaseId(p);
+  const message = buildPurchaseMessage(p);
+  if (
+    p.route !== 'base-usdc' ||
+    p.contract !== q.contractId ||
+    p.file_id !== q.fileId ||
+    p.terms_hash !== termsHash(q.file.terms) ||
+    p.price !== q.price.toString() ||
+    p.asset !== q.usdc ||
+    toHex(keyFromSecret(o.buyerSecret).publicKeyBytes) !== p.buyer_key ||
+    BigInt(p.expires_at) <= BigInt(Math.floor(Date.now() / 1000))
+  )
+    throw new TypeError('purchase does not match the checked quote/key');
   // Both clocks are read, and checked against each other, before the registration: however long the
   // reads below stall, and even if a clock is corrected meanwhile, the deadline stays within 180 s
-  // of a moment the file was still on sale (the contract allows 300 after a stop).
+  // of a moment the file was still on sale (a stop must be checked again before settlement).
   const h = await head(q.baseRpc);
   const local = Math.floor(Date.now() / 1000);
   if (Math.abs(h.timestamp - local) > MAX_CLOCK_SKEW_SECONDS) {
@@ -306,7 +317,7 @@ export async function authorize(
   // The quote may be old: the file must still be for sale on the same terms.
   const now = await forSale(q.nearRpc, q.contractId, q.fileId);
   if (
-    now.seller !== q.seller ||
+    termsHash(now.terms) !== termsHash(q.file.terms) ||
     now.price !== q.price ||
     now.payTo !== q.file.payTo ||
     now.moderator !== q.file.moderator ||
@@ -321,8 +332,14 @@ export async function authorize(
   const final = await block(q.baseRpc, 'finalized');
   const start = Math.min(h.timestamp, local);
   const created: PurchaseRecord = {
-    schemaVersion: 1,
-    id: randomHex(16),
+    schemaVersion: 2,
+    id,
+    purchase: p,
+    message,
+    buyerSecret: toHex(o.buyerSecret),
+    quote: q.paymentRequired,
+    recovery: p.recovery,
+    checkedHeaderHash: toHex(sha256(q.header)),
     revision: 0,
     terms: {
       network: BASE_NETWORK,
@@ -333,8 +350,8 @@ export async function authorize(
       to: q.to,
       usdc: q.usdc,
       price: q.price.toString(),
-      buyerKey: toHex(o.buyerKey),
-      nonce: annonNonce(q.contractId, q.fileId, o.buyerKey),
+      buyerKey: p.buyer_key,
+      nonce: baseNonceV2(id),
       headerHash: toHex(sha256(q.header)),
       cipherHash: q.file.cipherHash,
       moderator: q.file.moderator,
@@ -348,36 +365,22 @@ export async function authorize(
         preparedAt: start,
         searchFromBlock: Math.min(final.number, h.number),
         // The earliest reading: no clock and no stall can stretch the window.
-        validBefore: (start + q.validity).toString(),
+        validBefore: Math.min(start + q.validity, Number(p.expires_at)).toString(),
         paymentRequired: q.paymentRequired,
       },
     ],
   };
-  const key = purchaseKey(q.contractId, q.fileId, q.buyer);
+  const key = purchaseKey(id);
   if (!(await o.store.compareAndSet(key, null, created))) {
     fail('purchase_open', 'this wallet has an open purchase of this file: follow its nextStep');
   }
-  // A quote may predate this wallet being recorded on NEAR (another tab). Checked while this tab
-  // holds the slot, so no other tab can finish a purchase between the check and the signature.
-  if (await isBuyer(q.nearRpc, q.contractId, q.fileId, q.buyer)) {
-    await o.store.compareAndSet(key, created, null);
-    fail('already_bought', 'this wallet already bought the file; open it again instead');
-  }
-
   const attempt = created.attempts[0] as PaymentAttempt;
   const a = authorizationOf(created);
   const signature = await o.wallet.signTypedData(typedData(q.usdc, a));
   if (typeof signature !== 'string' || recover(digest(q.usdc, a), signature) !== q.buyer) {
     fail('bad_signature', 'the wallet did not return a plain signature from the buyer');
   }
-  const header = paymentSignature(
-    q.paymentRequired,
-    q.offer,
-    a,
-    signature,
-    { contractId: q.contractId, fileId: q.fileId, buyerKey: created.terms.buyerKey },
-    attempt.paymentId,
-  );
+  const header = paymentSignature(q.paymentRequired, q.offer, a, signature, p, attempt.paymentId);
   // Recorded before any RPC sees it: a crash from here on can only resend this payload.
   const purchase: PurchaseRecord = {
     ...created,

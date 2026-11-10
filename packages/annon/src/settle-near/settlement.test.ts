@@ -356,7 +356,12 @@ describe('purchase wire protocol', () => {
       { ...purchase, contract: 'other.near' },
       { ...purchase, price: '1' },
       { ...purchase, expires_at: '1' },
-      { ...purchase, route: 'base-usdc' as const, asset: h(8, 20) },
+      {
+        ...purchase,
+        route: 'base-usdc' as const,
+        network: 'eip155:8453',
+        asset: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
+      },
     ])
       expect(purchaseId(p)).not.toBe(purchaseId(purchase));
   });

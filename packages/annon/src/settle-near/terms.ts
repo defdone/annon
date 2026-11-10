@@ -1,8 +1,20 @@
 /** Borsh commitments and seller texts, near-settlement.md §3. */
 import { usdc, utc } from '../near/texts.js';
-import { account, bytes, compare, concat, hash, le, network, str, uint } from './codec.js';
+import {
+  account,
+  bytes,
+  compare,
+  concat,
+  exactKeys,
+  hash,
+  le,
+  network,
+  str,
+  uint,
+} from './codec.js';
 import { encodeIdentity, type Identity, identityText } from './identity.js';
 
+export const BASE_USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
 export const NEAR_USDC = '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1';
 export interface NearTerms {
   token: string;
@@ -20,7 +32,7 @@ export interface Terms {
   contract: string;
   file_id: string;
   seller: Identity;
-  pay2_version: 1 | 2;
+  pay2_version: 2;
   cipher_hash: string;
   moderator: string | null;
   near: NearTerms;
@@ -32,9 +44,25 @@ const price = (p: string) => {
   return le(n, 16);
 };
 export function encodeTerms(t: Terms): Uint8Array<ArrayBuffer> {
+  exactKeys(t, [
+    'network',
+    'contract',
+    'file_id',
+    'seller',
+    'pay2_version',
+    'cipher_hash',
+    'moderator',
+    'near',
+    'base',
+  ]);
+  exactKeys(t.near, ['token', 'price', 'recipients', 'remainder']);
+  if (t.base !== null) {
+    exactKeys(t.base, ['usdc', 'price', 'pay_to']);
+    if (t.base.usdc !== BASE_USDC) throw new TypeError('invalid Base USDC');
+  }
   network(t.network);
   account(t.contract);
-  if (t.pay2_version !== 1 && t.pay2_version !== 2) throw new TypeError('unsupported PAY2 version');
+  if (t.pay2_version !== 2) throw new TypeError('unsupported PAY2 version');
   const n = t.near;
   if (
     n.token !== NEAR_USDC ||
@@ -48,6 +76,7 @@ export function encodeTerms(t: Terms): Uint8Array<ArrayBuffer> {
   let prev: Uint8Array | undefined;
   let sum = 0;
   const recipients = n.recipients.map((r) => {
+    exactKeys(r, ['identity', 'bps']);
     const id = encodeIdentity(r.identity);
     if (prev && compare(prev, id) >= 0)
       throw new TypeError('recipients must be distinct and Borsh sorted');

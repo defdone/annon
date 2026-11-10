@@ -104,16 +104,11 @@ for (const authKind of [0, 1, 2] as const)
         verifyPreview(pkg, { fileId: listing.fileId, cipherHash: listing.cipherHash }),
       ).rejects.toHaveProperty('code', 'preview_invalid');
     });
-    it('keeps legacy listings on v1 and accepts explicitly selected v2 EVM listings', async () => {
+    it('EVM address shorthand still selects the single version 2 model', async () => {
       if (authKind !== 0) return;
       const { file, listing, openOpts } = await make();
-      const legacy = { ...listing, seller: account.address };
-      await expect(open(file, { ...openOpts, listing: legacy })).rejects.toHaveProperty(
-        'code',
-        'unsupported_version',
-      );
       expect(
-        (await open(file, { ...openOpts, listing: { ...legacy, pay2Version: 2 } })).data,
+        (await open(file, { ...openOpts, listing: { ...listing, seller: account.address } })).data,
       ).toEqual(data);
     });
     it('refuses kind mismatches, unknown kinds, relabelling and nonzero padding', async () => {

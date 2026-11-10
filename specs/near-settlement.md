@@ -107,14 +107,14 @@ The PAY2 v2 header is authenticated after CKD (the finished header needs the CKD
 
 ## 4. PAY2 (version 2)
 
-The layout of `specs/pay2.md` with these bytes changed; version 1 is no longer produced or
+The layout in `specs/pay2.md` is PAY2 version 2. Version 1 is no longer produced or
 accepted (byte 4 = 1 fails as an unsupported version):
 
-| Byte | `pay2.md` | here |
-|---|---|---|
-| 4 (version) | 1 | 2 |
-| 7 | reserved 0 | auth kind: 0 EVM, 1 Solana, 2 NEAR |
-| trailer (65 bytes) | EIP-191 sig | kind 0: EIP-191 sig; kind 1: 64-byte Ed25519 sig + 1 zero byte; kind 2: 65 zero bytes, authenticated by the published hash (§3.3) |
+| Field | Rule |
+|---|---|
+| Byte 4 | 2 |
+| Byte 7 | auth kind: 0 EVM, 1 Solana, 2 NEAR |
+| Trailer (65 bytes) | kind 0: EIP-191 sig; kind 1: 64-byte Ed25519 sig + 1 zero byte; kind 2: 65 zero bytes, authenticated by the published hash (§3.3) |
 
 The kind must match the registered seller identity; unknown kinds and non-zero padding fail. The
 body hash covers the version byte. Previews keep package `v: 1`; checking a preview needs the

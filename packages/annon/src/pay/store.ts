@@ -1,8 +1,6 @@
 /**
  * Where a purchase in progress is kept (profile section 10): by the buyer's client, and by a seller
- * for the payments it settles. A store has two operations; `compareAndSet` is what keeps one open
- * purchase per wallet and file, and what stops a stale tab or process from overwriting a newer
- * record. Ready-made stores: `memoryStore` (one process), `indexedDbStore` (a browser), `fileStore`
+ * for the payments it settles. A store has two operations; `compareAndSet` stops a stale tab or process from overwriting a newer record. Ready-made stores: `memoryStore` (one process), `indexedDbStore` (a browser), `fileStore`
  * in `store-node.ts` (Node, CLI, agents), and `fromKeyValue` for a store you already have.
  */
 
