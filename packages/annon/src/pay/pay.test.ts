@@ -3653,6 +3653,32 @@ describe('serveFile (download.md section 1)', () => {
     expect(await body(r)).toEqual(BODY);
   });
 
+  it("calls the integrator's beforeRecord before the purchase record exists, and fails with it", async () => {
+    const header = await paid();
+    const store = memoryStore<HostRecord>();
+    const seen: [string, string, boolean][] = [];
+    const ok = await serveFile(req({ 'PAYMENT-SIGNATURE': header }), {
+      ...hostOpts(store),
+      beforeRecord: async (key: string, payer: string) => {
+        seen.push([key, payer, (await store.load(key)) !== null]);
+      },
+    });
+    expect(ok.status).not.toBe(500);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen[0]?.[1]).toBe(BUYER.toLowerCase());
+    expect(seen[0]?.[2]).toBe(false);
+    // A hook that fails stops the purchase from being recorded; the payload can be sent again.
+    const store2 = memoryStore<HostRecord>();
+    const failing = await serveFile(req({ 'PAYMENT-SIGNATURE': header }), {
+      ...hostOpts(store2),
+      beforeRecord: async () => {
+        throw new Error('db down');
+      },
+    }).catch(() => ({ status: 500 }));
+    expect(failing.status).toBeGreaterThanOrEqual(500);
+    expect(await store2.load(seen[0]?.[0] as string)).toBeNull();
+  });
+
   it('never returns the body for the payload alone, or a proof for another URL or key', async () => {
     const header = await paid();
     const o = hostOpts();

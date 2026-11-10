@@ -105,7 +105,11 @@ export async function serveFile(req: HostRequest, o: FileHostOptions): Promise<H
   const settleOptions = {
     ...o,
     store: o.store as Store<SellerRecord>,
-    beforeRecord: (key: string, payer: string) => remember(payer, key),
+    // The wallet's index first, then the integrator's own hook (e.g. a payout to schedule).
+    beforeRecord: async (key: string, payer: string) => {
+      await remember(payer, key);
+      await o.beforeRecord?.(key, payer);
+    },
   };
   /** Adds a purchase to the wallet's index. */
   const remember = async (wallet: string, purchase: string) => {
