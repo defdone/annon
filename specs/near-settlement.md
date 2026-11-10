@@ -1,10 +1,13 @@
-# NEAR settlement (draft v2)
+# NEAR settlement (draft 3)
 
 How a file is sold for native USDC on NEAR, paid directly from a NEAR account or from any chain
 NEAR Intents 1Click supports, with a per-file split to recipients on EVM, Solana or NEAR, wallet
-based recovery, and no human power over money. The Base route (`specs/x402-annon.md`,
-`specs/nonce.md`) stays; this document adds a second route next to it and a common purchase
-commitment for both.
+based recovery, and no human power over money. Every file has the NEAR route and,
+optionally, the Base route (`specs/x402-annon.md`); both use the purchase commitment of §5.
+
+One model (decision 10 Nov 2026): this document replaces the earlier registration, unlock, reopen
+and PAY2 version 1. The contract has one set of entry points (no `_v2` names) and accepts nothing
+in the old formats; there is no backward compatibility, as nothing was in production.
 
 Status: draft for implementation (11 Nov 2026). Byte layouts, texts and hashes here are normative:
 the contract (Rust) and the SDK (TypeScript) must produce identical vectors
@@ -47,7 +50,7 @@ newline):
 Signatures travel as `{"kind":"evm"|"solana","sig":"0x…"}`; `near` sends no auth object.
 Smart-contract wallets (Safe, ERC-1271, PDAs) cannot authorize; they can still pay (§5).
 
-## 3. Registration (`register_v2`)
+## 3. Registration (`register`)
 
 ### 3.1 Terms
 
@@ -74,7 +77,7 @@ Signing this lets whoever holds the seller key below open the file.
 contract: <contract>
 file: 0x<file_id>
 seller: <seller text form>
-price: <price as USDC, e.g. 0.20> USDC on NEAR
+price: <price as USDC, minimal decimals: 0.2, 1, 0.000001> USDC on NEAR
 split: <recipient text form> <bps/100 with 2 decimals>%   (one line per recipient, sorted)
 remainder: <recipient text form>
 base: <price> USDC on Base to 0x<pay_to> | base: none
@@ -85,8 +88,8 @@ seller key: 0x<48-byte BLS key>
 valid until: <UTC, YYYY-MM-DD HH:MM:SS UTC>
 ```
 
-`register_v2(args, auth)`; `near` sellers call it themselves; EVM and Solana sellers sign and may
-use the relayer. It stores the terms and requests CKD for the seller key as `register` does today.
+`register(args, auth)`; `near` sellers call it themselves; EVM and Solana sellers sign and may
+use the relayer. It stores the terms and requests CKD for the seller key.
 
 ### 3.3 Header publication
 
@@ -99,22 +102,23 @@ The PAY2 v2 header is authenticated after CKD (the finished header needs the CKD
   file: 0x<file_id>
   header: 0x<SHA256(header[0 .. headerLen-65])>
   ```
-- NEAR: `publish_header_v2(file_id, header_hash)` called by the seller; stored once (same hash is a
+- NEAR: `publish_header(file_id, header_hash)` called by the seller; stored once (same hash is a
   no-op, another fails). The NEAR route sells nothing for a NEAR seller's file before this.
 
-## 4. PAY2 v2
+## 4. PAY2 (version 2)
 
-Same as PAY2 v1 (`specs/pay2.md`) except:
+The layout of `specs/pay2.md` with these bytes changed; version 1 is no longer produced or
+accepted (byte 4 = 1 fails as an unsupported version):
 
-| Byte | v1 | v2 |
+| Byte | `pay2.md` | here |
 |---|---|---|
 | 4 (version) | 1 | 2 |
 | 7 | reserved 0 | auth kind: 0 EVM, 1 Solana, 2 NEAR |
 | trailer (65 bytes) | EIP-191 sig | kind 0: EIP-191 sig; kind 1: 64-byte Ed25519 sig + 1 zero byte; kind 2: 65 zero bytes, authenticated by the published hash (§3.3) |
 
-The kind must match the registered seller identity; unknown kinds and non-zero padding fail. v1
-files, vectors and texts stay byte-identical. The body hash already covers the version byte, so a
-file is never relabelled between versions.
+The kind must match the registered seller identity; unknown kinds and non-zero padding fail. The
+body hash covers the version byte. Previews keep package `v: 1`; checking a preview needs the
+registered seller to check the kind.
 
 ## 5. Purchase
 
@@ -154,13 +158,14 @@ expiry: 1 hour after the quote. Anyone may pay for anyone's purchase.
 For `route = base-usdc` the buyer signs EIP-3009 (`x402-annon.md`) with
 
 ```
-base_nonce_v2 = keccak256("annon/base-payment/v2" ‖ 0x00 ‖ purchase_id)
+base_nonce = keccak256("annon/base-payment/v2" ‖ 0x00 ‖ purchase_id)
 ```
 
-`unlock_v2(purchase, logs, header)` verifies the Base logs through MPC as `unlock` does, against
+For this route the commitment's `network` is exactly `eip155:8453` and `asset` the lowercase `0x`
+address of Base USDC configured in the contract; anything else is refused.
+`unlock(purchase, logs, header)` verifies the Base logs through MPC (Safe finality) against
 `terms.base` and this nonce, and records the purchase with its recovery identity. `refund` is
-carried but unused on Base (EIP-3009 moves exactly the price). `unlock` and `annon/v1` nonces stay
-for v1 registrations.
+carried but unused on Base (EIP-3009 moves exactly the price).
 
 ## 6. Receiving USDC (`ft_on_transfer`)
 
@@ -224,6 +229,10 @@ leaf  = SHA256("annon/refund-leaf/v1" ‖ 0x00 ‖ Borsh({ network: String, cont
 node  = SHA256(0x01 ‖ left ‖ right);  empty subtree of height h: zero[0] = [0;32], zero[h+1] = SHA256(0x01 ‖ zero[h] ‖ zero[h])
 ```
 
+Leaf indexes start at 0 and are appended left to right. A proof lists siblings from height 0 to
+31; bit `h` of the index (least significant first) says whether the node at height `h` is a right
+child. The empty root is `zero[32]`.
+
 `materialize_refund(leaf_fields, index, proof: Vec<[u8;32]>)`, payable (the caller funds storage):
 checks inclusion under the current root and a one-time marker, then creates an ordinary refund
 obligation (§7). Events carry every leaf so anyone (the keeper) can build proofs.
@@ -233,7 +242,7 @@ obligation (§7). Events carry every leaf so anyone (the keeper) can build proof
 - `claim_key(purchase_id, grant: u32 = 0)`: anyone; requests CKD to the grant's buyer key for the
   file's unchanged derivation path; refused while taken down; repeatable. Grant 0 is the key from
   the purchase.
-- `reopen_v2({purchase_id, fresh_key, nonce, deadline}, auth)`: authorized by the purchase's
+- `reopen({purchase_id, fresh_key, nonce, deadline}, auth)`: authorized by the purchase's
   `recovery` identity over
   ```
   Annon: open a purchased file again
@@ -246,8 +255,9 @@ obligation (§7). Events carry every leaf so anyone (the keeper) can build proof
   valid until: <UTC>
   ```
   creates the next grant (identical request → same grant) and requests CKD. Earlier grants stay.
-- Seller: `reopen_seller_v2` and `stop_sales_v2` with the same identity authorization (texts as
-  `reopen_seller`/`stop_sales` today with `seller: <identity text form>`). Stop is final.
+- Seller: `reopen_seller` and `stop_sales` with the same identity authorization (texts in the
+  contract's `reopen_seller_text` / `stop_sales_text`, ending with `seller: <identity text form>`).
+  Stop is final.
 - `purchases_of(recovery: Identity, from, limit)` finds purchases on a fresh device.
 - Downloads: the existing buyer proof (`specs/download.md`) plus `purchase_id` and `grant`; the
   host checks the proof against that grant's key at finality.
@@ -256,18 +266,18 @@ obligation (§7). Events carry every leaf so anyone (the keeper) can build proof
 
 ## 10. Events and views
 
-Events (`standard: "annon"`, `version: "2.0.0"`): `file_registered_v2`, `header_published`,
+Events (`standard: "annon"`, `version: "2.0.0"`): `file_registered`, `header_published`,
 `delivery_received`, `purchase_accepted`, `refund_due`, `refund_leaf`, `delivery_refused` (log only),
 `funded`, `slot_paid`, `key_requested`, `key_released`, `grant_created`, `sales_stopped`. Never log
 secrets.
 
-Views: `get_file_v2`, `get_terms(file_id)`, `get_purchase(purchase_id)`, `get_grant`,
+Views: `get_file`, `get_terms(file_id)`, `get_purchase(purchase_id)`, `get_grant`,
 `get_delivery(delivery_id)`, `list_deliveries(from, limit)`, `purchases_of(...)`,
-`refund_root()`, existing views unchanged.
+`refund_root()`, `get_config`, `storage_balance_of`.
 
 ## 11. Offer (x402 extension v3)
 
-The 402 for a v2 file lists `annon-near-usdc` (settlement on NEAR at this contract, `asset` NEAR USDC,
+The 402 for a file lists `annon-near-usdc` (settlement on NEAR at this contract, `asset` NEAR USDC,
 `amount` = NEAR price, extra: `contract`, `file_id`, `terms_hash`) and, when `base` is present,
 `annon-exact` on Base with `extra.nonceVersion: 2`. 1Click is a way to pay `annon-near-usdc`, not a
 separate offer. Details in `x402-annon.md` §11 (to be updated).

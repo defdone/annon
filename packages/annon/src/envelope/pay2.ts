@@ -6,8 +6,16 @@
  * desktop; switch `open` to a ReadableStream (spec section 6 allows it) when phones need more.
  */
 
-import { secp256k1 } from '@noble/curves/secp256k1.js';
-import { keccak_256 } from '@noble/hashes/sha3.js';
+import { hex as canonicalHex } from '../settle-near/codec.js';
+import {
+  type Identity,
+  identityKind,
+  parseIdentity,
+  solanaWalletAuth,
+  verifyAuthorization,
+} from '../settle-near/identity.js';
+import { publishTextV2 } from '../settle-near/terms.js';
+import { signedBy } from './evm.js';
 
 export type Bytes = Uint8Array<ArrayBuffer>;
 
@@ -53,8 +61,12 @@ export interface FileMeta {
 export interface Listing {
   fileId: string | Uint8Array;
   cipherHash: string | Uint8Array;
-  /** The seller's EVM address. */
-  seller: string;
+  /** Legacy EVM address, or the registered v2 identity. */
+  seller: string | Identity;
+  /** NEAR v2 only: SHA256(header without its 65-byte trailer), read at finality. */
+  publishedHeaderHash?: string | Uint8Array;
+  /** Registered version. Defaults to 1 for legacy address sellers, 2 for identities. */
+  pay2Version?: 1 | 2;
 }
 
 export interface PreviewPackage {
@@ -158,11 +170,14 @@ export const wrapKeyFor = async (ckdSecret: Uint8Array, fileId: Uint8Array, usag
 
 /** Spec 3: binds the layout fields known before `register`, the commitments and the hash list. */
 export const bodyHash = (
-  h: Pick<Header, 'chunkLog2' | 'fileId' | 'metaLen' | 'previewLen' | 'n' | 'commits' | 'hashes'>,
+  h: Pick<
+    Header,
+    'chunkLog2' | 'fileId' | 'metaLen' | 'previewLen' | 'n' | 'commits' | 'hashes'
+  > & { version?: 1 | 2 },
 ) =>
   sha256(
     utf8.encode('annon/pay2/body'),
-    new Uint8Array([1, h.chunkLog2]),
+    new Uint8Array([h.version ?? 1, h.chunkLog2]),
     h.fileId,
     int(h.metaLen, 2),
     int(h.previewLen, 4),
@@ -211,35 +226,7 @@ const toHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2,
 export const publishText = (contractId: string, fileId: Uint8Array, headerHash: Uint8Array) =>
   `Annon: publish a file\nSigning this lets buyers check the file before they pay.\ncontract: ${contractId}\nfile: 0x${toHex(fileId)}\nheader: 0x${toHex(headerHash)}`;
 
-/**
- * Whether `sig` (r ‖ s ‖ v, low s, v 27 or 28) is `address` signing `text` with EIP-191.
- * @internal exported for the tests
- */
-export function signedBy(text: string, sig: Uint8Array, address: string): boolean {
-  return signerOf(text, sig) === address.toLowerCase();
-}
-
-/**
- * The address that signed `text` with EIP-191 (r ‖ s ‖ v, low s, v 27 or 28), lowercase 0x, or
- * null for a signature that recovers to nobody.
- * @internal exported for the relayer
- */
-export function signerOf(text: string, sig: Uint8Array): string | null {
-  if (sig.length !== SIG || (sig[64] !== 27 && sig[64] !== 28)) return null;
-  const s = BigInt(`0x${toHex(sig.subarray(32, 64))}`);
-  if (s > secp256k1.Point.Fn.ORDER / 2n) return null;
-  const t = utf8.encode(text);
-  const digest = keccak_256(concat(utf8.encode(`\x19Ethereum Signed Message:\n${t.length}`), t));
-  try {
-    const recovered = concat(new Uint8Array([(sig[64] ?? 27) - 27]), sig.subarray(0, 64));
-    const pub = secp256k1.Point.fromBytes(
-      secp256k1.recoverPublicKey(recovered, digest, { prehash: false }),
-    );
-    return `0x${toHex(keccak_256(pub.toBytes(false).subarray(1)).subarray(12))}`;
-  } catch {
-    return null;
-  }
-}
+export { signedBy, signerOf } from './evm.js';
 
 export function sellerAddress(seller: string): string {
   if (!/^0x[0-9a-f]{40}$/i.test(seller)) throw new TypeError('seller must be a 0x EVM address');
@@ -249,6 +236,8 @@ export function sellerAddress(seller: string): string {
 // ---------- header ----------
 
 interface Header {
+  version: 1 | 2;
+  authKind: 0 | 1 | 2;
   chunkLog2: number;
   fileId: Bytes;
   metaLen: number;
@@ -266,7 +255,9 @@ export function parseHeader(b: Bytes, prefixOnly = false): Header {
   if (b.length < 4 || !MAGIC.every((x, i) => b[i] === x)) fail('bad_magic');
   if (b.length < FIXED) fail('bad_header', 'shorter than the fixed header');
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
-  if (b[4] !== 1) fail('unsupported_version');
+  if (b[4] !== 1 && b[4] !== 2) fail('unsupported_version');
+  const version = b[4] as 1 | 2;
+  const authKind = b[7] ?? 0;
   const chunkLog2 = b[5] ?? 0;
   if (chunkLog2 < 16 || chunkLog2 > 24) fail('bad_chunk_size');
   const headerLen = dv.getUint32(8);
@@ -283,7 +274,7 @@ export function parseHeader(b: Bytes, prefixOnly = false): Header {
     : stanzaCount >= 1 && stanzaCount <= 8 && headerLen >= prefixLen + MAC + SIG;
   if (
     !stanzasOk ||
-    b[7] !== 0 ||
+    (version === 1 ? authKind !== 0 : authKind > 2) ||
     metaLen < 256 ||
     metaLen > MAX_META ||
     metaLen % 256 !== 0 ||
@@ -297,6 +288,8 @@ export function parseHeader(b: Bytes, prefixOnly = false): Header {
   }
   const at32 = (i: number) => b.slice(FIXED + 32 * i, FIXED + 32 * (i + 1));
   const header: Header = {
+    version,
+    authKind: authKind as 0 | 1 | 2,
     chunkLog2,
     fileId: b.slice(12, 44),
     metaLen,
@@ -441,13 +434,44 @@ const inspected = async (h: Header, b: Bytes, contractId: string): Promise<Inspe
 };
 
 /** Spec 6, steps 1 to 3. */
-async function checkSigned(b: Bytes, listing: Listing, contractId: string): Promise<Header> {
-  const seller = sellerAddress(listing.seller);
-  const h = await checkRegistration(parseHeader(b), listing);
-  const signed = b.subarray(0, h.headerLen - SIG);
-  const text = publishText(contractId, h.fileId, await sha256(signed));
-  if (!signedBy(text, b.subarray(h.headerLen - SIG, h.headerLen), seller)) {
-    fail('seller_signature_invalid');
+export async function checkSigned(b: Bytes, listing: Listing, contractId: string): Promise<Header> {
+  const parsed = parseHeader(b);
+  const version = listing.pay2Version ?? (typeof listing.seller === 'string' ? 1 : 2);
+  if (parsed.version !== version) fail('unsupported_version');
+  const h = await checkRegistration(parsed, listing);
+  const seller =
+    typeof listing.seller === 'string'
+      ? parseIdentity({ kind: 'evm', id: sellerAddress(listing.seller) })
+      : parseIdentity(listing.seller);
+  const hash = await sha256(b.subarray(0, h.headerLen - SIG));
+  const trailer = b.subarray(h.headerLen - SIG, h.headerLen);
+  if (h.version === 1) {
+    if (
+      seller.kind !== 'evm' ||
+      !signedBy(publishText(contractId, h.fileId, hash), trailer, seller.id)
+    )
+      fail('seller_signature_invalid');
+  } else {
+    if (identityKind(seller) !== h.authKind) fail('seller_signature_invalid');
+    if (seller.kind === 'near') {
+      if (
+        trailer.some((x) => x !== 0) ||
+        listing.publishedHeaderHash === undefined ||
+        !equal(hash, hexBytes(listing.publishedHeaderHash))
+      )
+        fail('seller_signature_invalid');
+    } else {
+      if (seller.kind === 'solana' && trailer[64] !== 0) fail('seller_signature_invalid');
+      const sig = seller.kind === 'solana' ? trailer.subarray(0, 64) : trailer;
+      if (
+        !verifyAuthorization(
+          seller,
+          publishTextV2(contractId, canonicalHex(h.fileId), canonicalHex(hash)),
+          { kind: seller.kind, sig: canonicalHex(sig) },
+        )
+      )
+        fail('seller_signature_invalid');
+    }
   }
   return h;
 }
@@ -554,6 +578,9 @@ export async function open(
 // ---------- seal ----------
 
 export interface SealOptions {
+  /** Defaults to v1. V2 must select the registered seller authentication kind before sealing. */
+  version?: 1 | 2;
+  authKind?: 0 | 1 | 2;
   fileId: Uint8Array;
   name: string;
   mime: string;
@@ -566,10 +593,58 @@ export interface SealOptions {
 export interface FinishOptions {
   contractId: string;
   ckdSecret: Uint8Array;
-  /** The seller's EVM address, as registered. */
-  seller: string;
-  /** EIP-191 `personal_sign` by the seller's wallet: 65 bytes, as bytes or 0x hex. */
-  sign: (text: string) => Promise<string | Uint8Array>;
+  seller: string | Identity;
+  /** EVM: EIP-191; Solana: Wallet Standard result including the exact signed message. */
+  sign?: (
+    text: string,
+  ) => Promise<string | Uint8Array | { signature: Uint8Array; signedMessage: Uint8Array }>;
+}
+
+/** @internal Shared by buffered and streaming encoders. */
+export function sealAuth(opts: SealOptions): { version: 1 | 2; authKind: 0 | 1 | 2 } {
+  const version = opts.version ?? 1;
+  const authKind = opts.authKind ?? 0;
+  if (
+    (version !== 1 && version !== 2) ||
+    ![0, 1, 2].includes(authKind) ||
+    (version === 1 && authKind !== 0)
+  )
+    throw new TypeError('invalid PAY2 version/auth kind');
+  return { version, authKind };
+}
+
+/** @internal Build and check the fixed-width authentication trailer. */
+export async function finishTrailer(
+  version: 1 | 2,
+  authKind: 0 | 1 | 2,
+  opts: FinishOptions,
+  fileId: Uint8Array,
+  headerHash: Uint8Array,
+): Promise<Uint8Array> {
+  const seller =
+    typeof opts.seller === 'string'
+      ? parseIdentity({ kind: 'evm', id: sellerAddress(opts.seller) })
+      : parseIdentity(opts.seller);
+  if (identityKind(seller) !== authKind || (version === 1 && seller.kind !== 'evm'))
+    throw new TypeError('seller identity does not match auth kind');
+  if (seller.kind === 'near') return new Uint8Array(SIG);
+  if (!opts.sign) throw new TypeError('seller signature required');
+  const text =
+    version === 1
+      ? publishText(opts.contractId, fileId, headerHash)
+      : publishTextV2(opts.contractId, canonicalHex(fileId), canonicalHex(headerHash));
+  const result = await opts.sign(text);
+  if (seller.kind === 'solana') {
+    if (typeof result === 'string' || result instanceof Uint8Array)
+      throw new TypeError('Solana wallet must return signed bytes');
+    const auth = solanaWalletAuth(seller, text, result);
+    return concat(hexBytes(auth.sig, 64), new Uint8Array([0]));
+  }
+  if (typeof result !== 'string' && !(result instanceof Uint8Array))
+    throw new TypeError('expected EVM signature bytes');
+  const sig = hexBytes(result, SIG);
+  if (!signedBy(text, sig, seller.id)) throw new Error('the signature is not from the seller');
+  return sig;
 }
 
 export interface Sealed {
@@ -601,6 +676,7 @@ export async function sealWithKey(
 ): Promise<Sealed> {
   if (opts.fileId.length !== 32 || K.length !== 32)
     throw new TypeError('fileId and K are 32 bytes');
+  const { version, authKind } = sealAuth(opts);
   const fileId = copy(opts.fileId);
   const previewLen = opts.previewLen ?? 0;
   if (
@@ -653,7 +729,7 @@ export async function sealWithKey(
   const hashes = await Promise.all(wire.map((w) => sha256(w)));
   const prefix = concat(
     new Uint8Array(MAGIC),
-    new Uint8Array([1, chunkLog2, 1, 0]),
+    new Uint8Array([version, chunkLog2, 1, authKind]),
     new Uint8Array(4), // headerLen, set in finish
     fileId,
     int(metaLen, 2),
@@ -666,9 +742,18 @@ export async function sealWithKey(
   let finished: Bytes | undefined;
   return {
     fileId,
-    cipherHash: await bodyHash({ chunkLog2, fileId, metaLen, previewLen, n, commits, hashes }),
-    async finish({ contractId, ckdSecret, seller, sign }) {
-      const address = sellerAddress(seller);
+    cipherHash: await bodyHash({
+      version,
+      chunkLog2,
+      fileId,
+      metaLen,
+      previewLen,
+      n,
+      commits,
+      hashes,
+    }),
+    async finish(finishOpts) {
+      const { contractId, ckdSecret } = finishOpts;
       if (!/^[a-z0-9._-]{2,64}$/.test(contractId)) throw new TypeError('bad NEAR account id');
       const kw = await wrapKeyFor(ckdSecret, fileId, 'wrapKey');
       const fileKey = await subtle.importKey('raw', copy(K), 'AES-GCM', true, ['encrypt']);
@@ -686,9 +771,13 @@ export async function sealWithKey(
         ['sign'],
       );
       const mac = new Uint8Array(await subtle.sign('HMAC', macKey, header));
-      const text = publishText(contractId, fileId, await sha256(header, mac));
-      const sig = hexBytes(await sign(text), SIG);
-      if (!signedBy(text, sig, address)) throw new Error('the signature is not from the seller');
+      const sig = await finishTrailer(
+        version,
+        authKind,
+        finishOpts,
+        fileId,
+        await sha256(header, mac),
+      );
       finished = header;
       return concat(header, mac, sig, ...wire);
     },
@@ -741,7 +830,8 @@ export function previewLengthForLines(data: Uint8Array, lines: number): number {
 /** Spec 7. Throws `Pay2Error`; returns only what the seller chose to show. */
 export async function verifyPreview(
   pkg: PreviewPackage,
-  listing: Pick<Listing, 'fileId' | 'cipherHash'>,
+  listing: Pick<Listing, 'fileId' | 'cipherHash'> &
+    Partial<Pick<Listing, 'seller' | 'pay2Version'>>,
 ): Promise<{ meta?: FileMeta; preview?: Bytes }> {
   if (
     pkg?.v !== 1 ||
@@ -756,6 +846,15 @@ export async function verifyPreview(
   const h = parseHeader(prefix, true);
   if (prefix.length !== h.prefixLen) fail('preview_invalid');
   await checkRegistration(h, listing);
+  if (listing.pay2Version !== undefined && listing.pay2Version !== h.version)
+    fail('preview_invalid');
+  if (h.version === 2) {
+    if (listing.seller === undefined) fail('preview_invalid');
+    const seller = parseIdentity(
+      typeof listing.seller === 'string' ? { kind: 'evm', id: listing.seller } : listing.seller,
+    );
+    if (identityKind(seller) !== h.authKind) fail('preview_invalid');
+  }
 
   // Every chunk is checked before any metadata is read, so the error doesn't depend on order.
   const pieces = new Map<number, Bytes>();

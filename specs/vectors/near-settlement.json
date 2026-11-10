@@ -1,0 +1,1214 @@
+{
+  "spec": "near-settlement.md draft v2",
+  "encoding": "All binary hex uses 0x; Solana JSON id is lowercase hex without prefix. Merkle proofs are bottom-up, indexed from zero. PUBLIC test fixtures only.",
+  "fixtures": {
+    "evm_private_key": "0x0101010101010101010101010101010101010101010101010101010101010101",
+    "solana_seed": "0x0707070707070707070707070707070707070707070707070707070707070707"
+  },
+  "identities": [
+    {
+      "identity": {
+        "kind": "evm",
+        "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+      },
+      "borsh": "0x001a642f0e3c3af545e7acbd38b07251b3990914f1",
+      "json": "{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"}",
+      "text": "EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
+      "intents_account": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+    },
+    {
+      "identity": {
+        "kind": "evm",
+        "id": "0x0000000000000000000000000000000000000000"
+      },
+      "borsh": "0x000000000000000000000000000000000000000000",
+      "json": "{\"kind\":\"evm\",\"id\":\"0x0000000000000000000000000000000000000000\"}",
+      "text": "EVM 0x0000000000000000000000000000000000000000",
+      "intents_account": "0x0000000000000000000000000000000000000000"
+    },
+    {
+      "identity": {
+        "kind": "solana",
+        "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+      },
+      "borsh": "0x01ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "json": "{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"}",
+      "text": "Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
+      "intents_account": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+      "base58": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+    },
+    {
+      "identity": {
+        "kind": "solana",
+        "id": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "borsh": "0x010000000000000000000000000000000000000000000000000000000000000000",
+      "json": "{\"kind\":\"solana\",\"id\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
+      "text": "Solana 11111111111111111111111111111111",
+      "intents_account": "0000000000000000000000000000000000000000000000000000000000000000",
+      "base58": "11111111111111111111111111111111"
+    },
+    {
+      "identity": {
+        "kind": "near",
+        "id": "seller.near"
+      },
+      "borsh": "0x020b00000073656c6c65722e6e656172",
+      "json": "{\"kind\":\"near\",\"id\":\"seller.near\"}",
+      "text": "NEAR seller.near",
+      "intents_account": "seller.near"
+    },
+    {
+      "identity": {
+        "kind": "near",
+        "id": "ab"
+      },
+      "borsh": "0x02020000006162",
+      "json": "{\"kind\":\"near\",\"id\":\"ab\"}",
+      "text": "NEAR ab",
+      "intents_account": "ab"
+    },
+    {
+      "identity": {
+        "kind": "near",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "borsh": "0x024000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "json": "{\"kind\":\"near\",\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "text": "NEAR aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "intents_account": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "identity": {
+        "kind": "near",
+        "id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "borsh": "0x024000000066666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666",
+      "json": "{\"kind\":\"near\",\"id\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}",
+      "text": "NEAR ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "intents_account": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "terms": [
+    {
+      "id": "one-evm-base",
+      "terms": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "seller": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "pay2_version": 2,
+        "cipher_hash": "0x0404040404040404040404040404040404040404040404040404040404040404",
+        "moderator": null,
+        "near": {
+          "token": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+          "price": "200000",
+          "recipients": [
+            {
+              "identity": {
+                "kind": "evm",
+                "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+              },
+              "bps": 10000
+            }
+          ],
+          "remainder": 0
+        },
+        "base": {
+          "usdc": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "price": "200000",
+          "pay_to": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        }
+      },
+      "borsh": "0x0c0000006e6561723a6d61696e6e65741500000076322e616e6e6f6e2e646566646f6e652e6e6561720303030303030303030303030303030303030303030303030303030303030303001a642f0e3c3af545e7acbd38b07251b3990914f1020404040404040404040404040404040404040404040404040404040404040404004000000031373230383632386638346635643661643333663064613362626265623237666663623339386561633530316133316264366164323031316533363133336131400d030000000000000000000000000001000000001a642f0e3c3af545e7acbd38b07251b3990914f110270001833589fcd6edb6e08f4c7c32d4f71b54bda02913400d03000000000000000000000000001a642f0e3c3af545e7acbd38b07251b3990914f1",
+      "terms_hash": "0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818",
+      "seller_key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+      "deadline": 1794350000,
+      "register_text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 0.2 USDC on NEAR\nsplit: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1 100.00%\nremainder: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nbase: 0.2 USDC on Base to 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\ncipher: 0x0404040404040404040404040404040404040404040404040404040404040404\nmoderator: (none)\nterms: 0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\nseller key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "eight-mixed-solana",
+      "terms": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "seller": {
+          "kind": "solana",
+          "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        "pay2_version": 2,
+        "cipher_hash": "0x0404040404040404040404040404040404040404040404040404040404040404",
+        "moderator": "moderator.near",
+        "near": {
+          "token": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+          "price": "200000",
+          "recipients": [
+            {
+              "identity": {
+                "kind": "evm",
+                "id": "0x0000000000000000000000000000000000000000"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "evm",
+                "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "solana",
+                "id": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "solana",
+                "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "near",
+                "id": "ab"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "near",
+                "id": "seller.near"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "near",
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "near",
+                "id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+              },
+              "bps": 1250
+            }
+          ],
+          "remainder": 7
+        },
+        "base": null
+      },
+      "borsh": "0x0c0000006e6561723a6d61696e6e65741500000076322e616e6e6f6e2e646566646f6e652e6e656172030303030303030303030303030303030303030303030303030303030303030301ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c020404040404040404040404040404040404040404040404040404040404040404010e0000006d6f64657261746f722e6e6561724000000031373230383632386638346635643661643333663064613362626265623237666663623339386561633530316133316264366164323031316533363133336131400d030000000000000000000000000008000000000000000000000000000000000000000000000000e204001a642f0e3c3af545e7acbd38b07251b3990914f1e204010000000000000000000000000000000000000000000000000000000000000000e20401ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22ce20402020000006162e204020b00000073656c6c65722e6e656172e204024000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161e204024000000066666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666e2040700",
+      "terms_hash": "0x291e0e4288ea97141e03dcf590c805256c6c629c5814099662b4db8310d02d98",
+      "seller_key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+      "deadline": 1794350000,
+      "register_text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB\nprice: 0.2 USDC on NEAR\nsplit: EVM 0x0000000000000000000000000000000000000000 12.50%\nsplit: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1 12.50%\nsplit: Solana 11111111111111111111111111111111 12.50%\nsplit: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB 12.50%\nsplit: NEAR ab 12.50%\nsplit: NEAR seller.near 12.50%\nsplit: NEAR aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 12.50%\nsplit: NEAR ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff 12.50%\nremainder: NEAR ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\nbase: none\ncipher: 0x0404040404040404040404040404040404040404040404040404040404040404\nmoderator: moderator.near\nterms: 0x291e0e4288ea97141e03dcf590c805256c6c629c5814099662b4db8310d02d98\nseller key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "one-max-near",
+      "terms": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "seller": {
+          "kind": "near",
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "pay2_version": 2,
+        "cipher_hash": "0x0404040404040404040404040404040404040404040404040404040404040404",
+        "moderator": null,
+        "near": {
+          "token": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+          "price": "340282366920938463463374607431768211455",
+          "recipients": [
+            {
+              "identity": {
+                "kind": "near",
+                "id": "seller.near"
+              },
+              "bps": 10000
+            }
+          ],
+          "remainder": 0
+        },
+        "base": null
+      },
+      "borsh": "0x0c0000006e6561723a6d61696e6e65741500000076322e616e6e6f6e2e646566646f6e652e6e6561720303030303030303030303030303030303030303030303030303030303030303024000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161020404040404040404040404040404040404040404040404040404040404040404004000000031373230383632386638346635643661643333663064613362626265623237666663623339386561633530316133316264366164323031316533363133336131ffffffffffffffffffffffffffffffff01000000020b00000073656c6c65722e6e65617210270000",
+      "terms_hash": "0x8d8308ab811eaff10b927eacb61f50bc1763062e1bfc88fdbfe3eb3c363ecc68",
+      "seller_key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+      "deadline": 1794350000,
+      "register_text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: NEAR aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nprice: 340282366920938463463374607431768.211455 USDC on NEAR\nsplit: NEAR seller.near 100.00%\nremainder: NEAR seller.near\nbase: none\ncipher: 0x0404040404040404040404040404040404040404040404040404040404040404\nmoderator: (none)\nterms: 0x8d8308ab811eaff10b927eacb61f50bc1763062e1bfc88fdbfe3eb3c363ecc68\nseller key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC"
+    }
+  ],
+  "purchases": [
+    {
+      "id": "near-evm-refund-solana-recovery",
+      "purchase": {
+        "version": 2,
+        "refund": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "route": "near-usdc",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "terms_hash": "0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818",
+        "price": "200000",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "buyer_key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "recovery": {
+          "kind": "solana",
+          "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        "expires_at": "1794350000"
+      },
+      "borsh": "0x02001a642f0e3c3af545e7acbd38b07251b3990914f10c0000006e6561723a6d61696e6e65741500000076322e616e6e6f6e2e646566646f6e652e6e65617200400000003137323038363238663834663564366164333366306461336262626562323766666362333938656163353031613331626436616432303131653336313333613103030303030303030303030303030303030303030303030303030303030303039c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818400d0300000000000000000000000000060606060606060606060606060606060606060606060606060606060606060697f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb01ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22cb09bf36a00000000",
+      "purchase_id": "0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de",
+      "message": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\"}}",
+      "message_bytes": 831,
+      "base_nonce_v2": "0x08e4405179208985dc64481cf86fef35ff8bbff8fac1570fd2cbb6ff4609f75d",
+      "reopen": {
+        "contract": "v2.annon.defdone.near",
+        "purchase_id": "0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "recovery": {
+          "kind": "solana",
+          "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        "fresh_key": "0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "deadline": 1794350000
+      },
+      "reopen_text": "Annon: open a purchased file again\ncontract: v2.annon.defdone.near\npurchase: 0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "near-solana-refund-evm-recovery",
+      "purchase": {
+        "version": 2,
+        "refund": {
+          "kind": "solana",
+          "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "route": "near-usdc",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "terms_hash": "0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818",
+        "price": "200000",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "buyer_key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "recovery": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "expires_at": "1794350000"
+      },
+      "borsh": "0x0201ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c0c0000006e6561723a6d61696e6e65741500000076322e616e6e6f6e2e646566646f6e652e6e65617200400000003137323038363238663834663564366164333366306461336262626562323766666362333938656163353031613331626436616432303131653336313333613103030303030303030303030303030303030303030303030303030303030303039c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818400d0300000000000000000000000000060606060606060606060606060606060606060606060606060606060606060697f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb001a642f0e3c3af545e7acbd38b07251b3990914f1b09bf36a00000000",
+      "purchase_id": "0x9bd1d620f2603306c1b79786326fc57641a7e0b0577c9e3bac2d625a5946bf8f",
+      "message": "{\"annon\":2,\"refund\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0x9bd1d620f2603306c1b79786326fc57641a7e0b0577c9e3bac2d625a5946bf8f\"}}",
+      "message_bytes": 831,
+      "base_nonce_v2": "0x2ec1a699fd3f1bec48e19f58cab9f92e67a27cd22c6eca1a84dfefb68253065f",
+      "reopen": {
+        "contract": "v2.annon.defdone.near",
+        "purchase_id": "0x9bd1d620f2603306c1b79786326fc57641a7e0b0577c9e3bac2d625a5946bf8f",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "recovery": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "fresh_key": "0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "deadline": 1794350000
+      },
+      "reopen_text": "Annon: open a purchased file again\ncontract: v2.annon.defdone.near\npurchase: 0x9bd1d620f2603306c1b79786326fc57641a7e0b0577c9e3bac2d625a5946bf8f\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "near-max-accounts",
+      "purchase": {
+        "version": 2,
+        "refund": {
+          "kind": "near",
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "network": "near:mainnet",
+        "contract": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "route": "near-usdc",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "terms_hash": "0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818",
+        "price": "200000",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "buyer_key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "recovery": {
+          "kind": "near",
+          "id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "expires_at": "1794350000"
+      },
+      "borsh": "0x020240000000616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610c0000006e6561723a6d61696e6e6574400000006363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636363636300400000003137323038363238663834663564366164333366306461336262626562323766666362333938656163353031613331626436616432303131653336313333613103030303030303030303030303030303030303030303030303030303030303039c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818400d0300000000000000000000000000060606060606060606060606060606060606060606060606060606060606060697f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb024000000066666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666666b09bf36a00000000",
+      "purchase_id": "0xf25c0007ec8bbd7f91d73210f53c35f5d2b707757638513a5718940fbf142eb6",
+      "message": "{\"annon\":2,\"refund\":{\"kind\":\"near\",\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"near\",\"id\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xf25c0007ec8bbd7f91d73210f53c35f5d2b707757638513a5718940fbf142eb6\"}}",
+      "message_bytes": 895,
+      "base_nonce_v2": "0xd484433ad8110785dd49b3303650c250ccf3edc2d35a51e378c40d2d261021f2",
+      "reopen": {
+        "contract": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "purchase_id": "0xf25c0007ec8bbd7f91d73210f53c35f5d2b707757638513a5718940fbf142eb6",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "recovery": {
+          "kind": "near",
+          "id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "fresh_key": "0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "deadline": 1794350000
+      },
+      "reopen_text": "Annon: open a purchased file again\ncontract: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\npurchase: 0xf25c0007ec8bbd7f91d73210f53c35f5d2b707757638513a5718940fbf142eb6\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: NEAR ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "base-near-recovery",
+      "purchase": {
+        "version": 2,
+        "refund": {
+          "kind": "solana",
+          "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        "network": "eip155:8453",
+        "contract": "v2.annon.defdone.near",
+        "route": "base-usdc",
+        "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "terms_hash": "0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818",
+        "price": "200000",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "buyer_key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "recovery": {
+          "kind": "near",
+          "id": "seller.near"
+        },
+        "expires_at": "1794350000"
+      },
+      "borsh": "0x0201ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c0b0000006569703135353a383435331500000076322e616e6e6f6e2e646566646f6e652e6e656172012a00000030783833333538396663643665646236653038663463376333326434663731623534626461303239313303030303030303030303030303030303030303030303030303030303030303039c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818400d0300000000000000000000000000060606060606060606060606060606060606060606060606060606060606060697f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb020b00000073656c6c65722e6e656172b09bf36a00000000",
+      "purchase_id": "0x5ff4904fd36e4c7bda270a518acd6d2e54688e7938afb0ee2c4ef3a295bb6682",
+      "message": "{\"annon\":2,\"refund\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"purchase\":{\"network\":\"eip155:8453\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"base-usdc\",\"asset\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"near\",\"id\":\"seller.near\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0x5ff4904fd36e4c7bda270a518acd6d2e54688e7938afb0ee2c4ef3a295bb6682\"}}",
+      "message_bytes": 778,
+      "base_nonce_v2": "0x30fabf6bfb36316579d6e597b9bdd256613342b75ec090c152549d4d3e39e8f3",
+      "reopen": {
+        "contract": "v2.annon.defdone.near",
+        "purchase_id": "0x5ff4904fd36e4c7bda270a518acd6d2e54688e7938afb0ee2c4ef3a295bb6682",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "recovery": {
+          "kind": "near",
+          "id": "seller.near"
+        },
+        "fresh_key": "0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "deadline": 1794350000
+      },
+      "reopen_text": "Annon: open a purchased file again\ncontract: v2.annon.defdone.near\npurchase: 0x5ff4904fd36e4c7bda270a518acd6d2e54688e7938afb0ee2c4ef3a295bb6682\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: NEAR seller.near\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC"
+    }
+  ],
+  "refunds": [
+    {
+      "fields": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "delivery_id": "0",
+        "refund": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "amount": "200000"
+      },
+      "borsh": "0x0c0000006e6561723a6d61696e6e65741500000076322e616e6e6f6e2e646566646f6e652e6e6561720000000000000000001a642f0e3c3af545e7acbd38b07251b3990914f1400d0300000000000000000000000000",
+      "leaf": "0xf043908c07e6e1f0082a706a6bced99fe5c786e38b0d026a40df1daf6d8ae3ca"
+    },
+    {
+      "fields": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "delivery_id": "1",
+        "refund": {
+          "kind": "solana",
+          "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        "amount": "200001"
+      },
+      "borsh": "0x0c0000006e6561723a6d61696e6e65741500000076322e616e6e6f6e2e646566646f6e652e6e656172010000000000000001ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c410d0300000000000000000000000000",
+      "leaf": "0xdb99f71f7b15b7b808749fbe7d3baa17a1b1bc988f9997a111db169dcac9740c"
+    },
+    {
+      "fields": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "delivery_id": "2",
+        "refund": {
+          "kind": "near",
+          "id": "seller.near"
+        },
+        "amount": "200002"
+      },
+      "borsh": "0x0c0000006e6561723a6d61696e6e65741500000076322e616e6e6f6e2e646566646f6e652e6e6561720200000000000000020b00000073656c6c65722e6e656172420d0300000000000000000000000000",
+      "leaf": "0x9b25dc4ef1760fff4c7f779fd7076765811b9fe64a9f86ebe29ba8bf5bc65a2d"
+    },
+    {
+      "fields": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "delivery_id": "3",
+        "refund": {
+          "kind": "near",
+          "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "amount": "200003"
+      },
+      "borsh": "0x0c0000006e6561723a6d61696e6e65741500000076322e616e6e6f6e2e646566646f6e652e6e6561720300000000000000024000000061616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161430d0300000000000000000000000000",
+      "leaf": "0xcc250e024cefff4aee4afaea72bb0d54d150cac37869c1c6c3bebca8036f6af3"
+    },
+    {
+      "fields": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "delivery_id": "18446744073709551615",
+        "refund": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "amount": "340282366920938463463374607431768211455"
+      },
+      "borsh": "0x0c0000006e6561723a6d61696e6e65741500000076322e616e6e6f6e2e646566646f6e652e6e656172ffffffffffffffff001a642f0e3c3af545e7acbd38b07251b3990914f1ffffffffffffffffffffffffffffffff",
+      "leaf": "0xa4beef55b68ac43a01aa3d20254431b051690843131ab4f1b86234635c838478"
+    }
+  ],
+  "merkle": [
+    {
+      "count": 0,
+      "leaves": [],
+      "frontier": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "root": "0x782d35b1fdad7d54e7a1b36a2ab1021e872c7692bb80fdd12bfc321e9e420409",
+      "proofs": []
+    },
+    {
+      "count": 1,
+      "leaves": [
+        "0xf043908c07e6e1f0082a706a6bced99fe5c786e38b0d026a40df1daf6d8ae3ca"
+      ],
+      "frontier": [
+        "0xf043908c07e6e1f0082a706a6bced99fe5c786e38b0d026a40df1daf6d8ae3ca",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "root": "0x55003afc1b2ad3fb52e94baf454054b61400d7a562dff0c123740c30cc313e04",
+      "proofs": [
+        {
+          "index": 0,
+          "proof": [
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "0xae0798d0ecaed2b778eddebf18f071a561c53658c05e76cedecc27cafbdbc577",
+            "0x90534fe0aff6db9edb29eee74e78a386916a581c8e6465349493e1a6c87241e1",
+            "0xbea16162721bca4b6e1782cbdc695a471522157c6716f508db47c599195340f4",
+            "0x30765fef341bdfe749c391bf956a9f03d363941b2eb8f85ab16bb6eb0d3c4def",
+            "0xf1a0a71a6550c41bc8d4dac4f186b6d274a839f2f95ad9e3bb651d45810c5a1f",
+            "0xc6984907d2e534964351393bc85f04374065b63870cc859c68192def090c1017",
+            "0xdc0606b906238dd157e69cb261e75696007e4d9a3f707a7ce10ce410d08bcfec",
+            "0x8e4b3745e5f2f7d48e36b192cb39242fa0f7a76fac1e36a519d8ebe00f3e21fb",
+            "0xbd752b8e76f5f891e5d3a10352dbf3ac25123b6eb48a3ad154020cd0c84d2176",
+            "0x29398d48e1a1a9f3c8e0f97b0f8c066d2beaf88a319baef02a5482d6157ebd2b",
+            "0x76dc94f187362590f6fd2f1e2b1b8c8f06d7439080b4a499ae6b267ab1b5cc31",
+            "0xd100399f607ba956d68737045ea9eb3e75475dfa633b7cabecf0afa05c9f3af8",
+            "0x3e46222c092b9baa5a16df1dc2864c7cb5fb79609d096ac2a10d64f824d1c73a",
+            "0x8cf2c9bd2369a3b9e0bbdd2cee634605440adb2d70b15263dbe7d0d16ebfc03d",
+            "0xfbbb942587ef256738d2bbb0506423880206cfbfa2ed4d340d796b0f7e290980",
+            "0xbbc84bb1eca9b98b546708cadcf829983dd03da168f65aeae21724003072c21a",
+            "0x669b03f8ec7153d9f9db779449f504489942359aab734d938417889394394b09",
+            "0xa3f6714a23c8f9b91fb3dd6e311bd1cf5f8bcb3618dee8ae5cd7ab0ec40c0876",
+            "0x0bd2118fbd68fa6bb6733596bb879f571bd648821f7437419dcf49f5078f1db8",
+            "0x51c20d66008024c04cf114564a998e49ef8f6e044e2d13a03a66521d6e200503",
+            "0xb29e665a5be928c888cae79638ea9f6febb5e0da9c0adb8eef892895fdeb34f3",
+            "0xe39d25ebb3238dd9c246e22cceeffe7a6def739037e7ddb41889d3ed2bdb54cb",
+            "0xc39d9328c5e0bef02e859ce63d15d3a5240a4c52ee34bb87ac5ba231910bf5f0",
+            "0xfd153e6be1763177c1d43f43661a359214d26256cf62b811d8442382dbca7470",
+            "0xe8123d755c5a32140ea87605c18ef7f342dc7461e1fd470a158356eaed68503d",
+            "0x16022e1fc087982698d7861ece2506bc8f21626c03a30c424259d3f7fde28633",
+            "0x655542f14a719ca624255c59096d3afb83ccef5bb29ce05d37d540e939a3d7d1",
+            "0x259debd0f2289401c7da9aeb0057abb1d4a8c7a2cffe0af3ec42910497936a75",
+            "0xdd363ae2d13611d37dac77e653436745bcda1f4e2d76b04b2723930947d94602",
+            "0x5a62aaa41541242cf12e482743eedf403c08e920330f6736825bfe27f2da8237",
+            "0xe69e674ae78b120925d53f10daccf990ddd831c025415bdf41b4d594157d23cf"
+          ]
+        }
+      ]
+    },
+    {
+      "count": 3,
+      "leaves": [
+        "0xf043908c07e6e1f0082a706a6bced99fe5c786e38b0d026a40df1daf6d8ae3ca",
+        "0xdb99f71f7b15b7b808749fbe7d3baa17a1b1bc988f9997a111db169dcac9740c",
+        "0x9b25dc4ef1760fff4c7f779fd7076765811b9fe64a9f86ebe29ba8bf5bc65a2d"
+      ],
+      "frontier": [
+        "0x9b25dc4ef1760fff4c7f779fd7076765811b9fe64a9f86ebe29ba8bf5bc65a2d",
+        "0x0074eba7928f1d0d5f2be8dc8fb233568235b6e97063bcf6f16b10250140ea67",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "root": "0x0381a4349149735749f49bd228cd328bb7f6fa5bc4c39bea7a96af834e68bd82",
+      "proofs": [
+        {
+          "index": 0,
+          "proof": [
+            "0xdb99f71f7b15b7b808749fbe7d3baa17a1b1bc988f9997a111db169dcac9740c",
+            "0x45db1207e7f5c13a712be13e2a5ac863b867b51e457b2df1e3be18d61954043e",
+            "0x90534fe0aff6db9edb29eee74e78a386916a581c8e6465349493e1a6c87241e1",
+            "0xbea16162721bca4b6e1782cbdc695a471522157c6716f508db47c599195340f4",
+            "0x30765fef341bdfe749c391bf956a9f03d363941b2eb8f85ab16bb6eb0d3c4def",
+            "0xf1a0a71a6550c41bc8d4dac4f186b6d274a839f2f95ad9e3bb651d45810c5a1f",
+            "0xc6984907d2e534964351393bc85f04374065b63870cc859c68192def090c1017",
+            "0xdc0606b906238dd157e69cb261e75696007e4d9a3f707a7ce10ce410d08bcfec",
+            "0x8e4b3745e5f2f7d48e36b192cb39242fa0f7a76fac1e36a519d8ebe00f3e21fb",
+            "0xbd752b8e76f5f891e5d3a10352dbf3ac25123b6eb48a3ad154020cd0c84d2176",
+            "0x29398d48e1a1a9f3c8e0f97b0f8c066d2beaf88a319baef02a5482d6157ebd2b",
+            "0x76dc94f187362590f6fd2f1e2b1b8c8f06d7439080b4a499ae6b267ab1b5cc31",
+            "0xd100399f607ba956d68737045ea9eb3e75475dfa633b7cabecf0afa05c9f3af8",
+            "0x3e46222c092b9baa5a16df1dc2864c7cb5fb79609d096ac2a10d64f824d1c73a",
+            "0x8cf2c9bd2369a3b9e0bbdd2cee634605440adb2d70b15263dbe7d0d16ebfc03d",
+            "0xfbbb942587ef256738d2bbb0506423880206cfbfa2ed4d340d796b0f7e290980",
+            "0xbbc84bb1eca9b98b546708cadcf829983dd03da168f65aeae21724003072c21a",
+            "0x669b03f8ec7153d9f9db779449f504489942359aab734d938417889394394b09",
+            "0xa3f6714a23c8f9b91fb3dd6e311bd1cf5f8bcb3618dee8ae5cd7ab0ec40c0876",
+            "0x0bd2118fbd68fa6bb6733596bb879f571bd648821f7437419dcf49f5078f1db8",
+            "0x51c20d66008024c04cf114564a998e49ef8f6e044e2d13a03a66521d6e200503",
+            "0xb29e665a5be928c888cae79638ea9f6febb5e0da9c0adb8eef892895fdeb34f3",
+            "0xe39d25ebb3238dd9c246e22cceeffe7a6def739037e7ddb41889d3ed2bdb54cb",
+            "0xc39d9328c5e0bef02e859ce63d15d3a5240a4c52ee34bb87ac5ba231910bf5f0",
+            "0xfd153e6be1763177c1d43f43661a359214d26256cf62b811d8442382dbca7470",
+            "0xe8123d755c5a32140ea87605c18ef7f342dc7461e1fd470a158356eaed68503d",
+            "0x16022e1fc087982698d7861ece2506bc8f21626c03a30c424259d3f7fde28633",
+            "0x655542f14a719ca624255c59096d3afb83ccef5bb29ce05d37d540e939a3d7d1",
+            "0x259debd0f2289401c7da9aeb0057abb1d4a8c7a2cffe0af3ec42910497936a75",
+            "0xdd363ae2d13611d37dac77e653436745bcda1f4e2d76b04b2723930947d94602",
+            "0x5a62aaa41541242cf12e482743eedf403c08e920330f6736825bfe27f2da8237",
+            "0xe69e674ae78b120925d53f10daccf990ddd831c025415bdf41b4d594157d23cf"
+          ]
+        },
+        {
+          "index": 1,
+          "proof": [
+            "0xf043908c07e6e1f0082a706a6bced99fe5c786e38b0d026a40df1daf6d8ae3ca",
+            "0x45db1207e7f5c13a712be13e2a5ac863b867b51e457b2df1e3be18d61954043e",
+            "0x90534fe0aff6db9edb29eee74e78a386916a581c8e6465349493e1a6c87241e1",
+            "0xbea16162721bca4b6e1782cbdc695a471522157c6716f508db47c599195340f4",
+            "0x30765fef341bdfe749c391bf956a9f03d363941b2eb8f85ab16bb6eb0d3c4def",
+            "0xf1a0a71a6550c41bc8d4dac4f186b6d274a839f2f95ad9e3bb651d45810c5a1f",
+            "0xc6984907d2e534964351393bc85f04374065b63870cc859c68192def090c1017",
+            "0xdc0606b906238dd157e69cb261e75696007e4d9a3f707a7ce10ce410d08bcfec",
+            "0x8e4b3745e5f2f7d48e36b192cb39242fa0f7a76fac1e36a519d8ebe00f3e21fb",
+            "0xbd752b8e76f5f891e5d3a10352dbf3ac25123b6eb48a3ad154020cd0c84d2176",
+            "0x29398d48e1a1a9f3c8e0f97b0f8c066d2beaf88a319baef02a5482d6157ebd2b",
+            "0x76dc94f187362590f6fd2f1e2b1b8c8f06d7439080b4a499ae6b267ab1b5cc31",
+            "0xd100399f607ba956d68737045ea9eb3e75475dfa633b7cabecf0afa05c9f3af8",
+            "0x3e46222c092b9baa5a16df1dc2864c7cb5fb79609d096ac2a10d64f824d1c73a",
+            "0x8cf2c9bd2369a3b9e0bbdd2cee634605440adb2d70b15263dbe7d0d16ebfc03d",
+            "0xfbbb942587ef256738d2bbb0506423880206cfbfa2ed4d340d796b0f7e290980",
+            "0xbbc84bb1eca9b98b546708cadcf829983dd03da168f65aeae21724003072c21a",
+            "0x669b03f8ec7153d9f9db779449f504489942359aab734d938417889394394b09",
+            "0xa3f6714a23c8f9b91fb3dd6e311bd1cf5f8bcb3618dee8ae5cd7ab0ec40c0876",
+            "0x0bd2118fbd68fa6bb6733596bb879f571bd648821f7437419dcf49f5078f1db8",
+            "0x51c20d66008024c04cf114564a998e49ef8f6e044e2d13a03a66521d6e200503",
+            "0xb29e665a5be928c888cae79638ea9f6febb5e0da9c0adb8eef892895fdeb34f3",
+            "0xe39d25ebb3238dd9c246e22cceeffe7a6def739037e7ddb41889d3ed2bdb54cb",
+            "0xc39d9328c5e0bef02e859ce63d15d3a5240a4c52ee34bb87ac5ba231910bf5f0",
+            "0xfd153e6be1763177c1d43f43661a359214d26256cf62b811d8442382dbca7470",
+            "0xe8123d755c5a32140ea87605c18ef7f342dc7461e1fd470a158356eaed68503d",
+            "0x16022e1fc087982698d7861ece2506bc8f21626c03a30c424259d3f7fde28633",
+            "0x655542f14a719ca624255c59096d3afb83ccef5bb29ce05d37d540e939a3d7d1",
+            "0x259debd0f2289401c7da9aeb0057abb1d4a8c7a2cffe0af3ec42910497936a75",
+            "0xdd363ae2d13611d37dac77e653436745bcda1f4e2d76b04b2723930947d94602",
+            "0x5a62aaa41541242cf12e482743eedf403c08e920330f6736825bfe27f2da8237",
+            "0xe69e674ae78b120925d53f10daccf990ddd831c025415bdf41b4d594157d23cf"
+          ]
+        },
+        {
+          "index": 2,
+          "proof": [
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "0x0074eba7928f1d0d5f2be8dc8fb233568235b6e97063bcf6f16b10250140ea67",
+            "0x90534fe0aff6db9edb29eee74e78a386916a581c8e6465349493e1a6c87241e1",
+            "0xbea16162721bca4b6e1782cbdc695a471522157c6716f508db47c599195340f4",
+            "0x30765fef341bdfe749c391bf956a9f03d363941b2eb8f85ab16bb6eb0d3c4def",
+            "0xf1a0a71a6550c41bc8d4dac4f186b6d274a839f2f95ad9e3bb651d45810c5a1f",
+            "0xc6984907d2e534964351393bc85f04374065b63870cc859c68192def090c1017",
+            "0xdc0606b906238dd157e69cb261e75696007e4d9a3f707a7ce10ce410d08bcfec",
+            "0x8e4b3745e5f2f7d48e36b192cb39242fa0f7a76fac1e36a519d8ebe00f3e21fb",
+            "0xbd752b8e76f5f891e5d3a10352dbf3ac25123b6eb48a3ad154020cd0c84d2176",
+            "0x29398d48e1a1a9f3c8e0f97b0f8c066d2beaf88a319baef02a5482d6157ebd2b",
+            "0x76dc94f187362590f6fd2f1e2b1b8c8f06d7439080b4a499ae6b267ab1b5cc31",
+            "0xd100399f607ba956d68737045ea9eb3e75475dfa633b7cabecf0afa05c9f3af8",
+            "0x3e46222c092b9baa5a16df1dc2864c7cb5fb79609d096ac2a10d64f824d1c73a",
+            "0x8cf2c9bd2369a3b9e0bbdd2cee634605440adb2d70b15263dbe7d0d16ebfc03d",
+            "0xfbbb942587ef256738d2bbb0506423880206cfbfa2ed4d340d796b0f7e290980",
+            "0xbbc84bb1eca9b98b546708cadcf829983dd03da168f65aeae21724003072c21a",
+            "0x669b03f8ec7153d9f9db779449f504489942359aab734d938417889394394b09",
+            "0xa3f6714a23c8f9b91fb3dd6e311bd1cf5f8bcb3618dee8ae5cd7ab0ec40c0876",
+            "0x0bd2118fbd68fa6bb6733596bb879f571bd648821f7437419dcf49f5078f1db8",
+            "0x51c20d66008024c04cf114564a998e49ef8f6e044e2d13a03a66521d6e200503",
+            "0xb29e665a5be928c888cae79638ea9f6febb5e0da9c0adb8eef892895fdeb34f3",
+            "0xe39d25ebb3238dd9c246e22cceeffe7a6def739037e7ddb41889d3ed2bdb54cb",
+            "0xc39d9328c5e0bef02e859ce63d15d3a5240a4c52ee34bb87ac5ba231910bf5f0",
+            "0xfd153e6be1763177c1d43f43661a359214d26256cf62b811d8442382dbca7470",
+            "0xe8123d755c5a32140ea87605c18ef7f342dc7461e1fd470a158356eaed68503d",
+            "0x16022e1fc087982698d7861ece2506bc8f21626c03a30c424259d3f7fde28633",
+            "0x655542f14a719ca624255c59096d3afb83ccef5bb29ce05d37d540e939a3d7d1",
+            "0x259debd0f2289401c7da9aeb0057abb1d4a8c7a2cffe0af3ec42910497936a75",
+            "0xdd363ae2d13611d37dac77e653436745bcda1f4e2d76b04b2723930947d94602",
+            "0x5a62aaa41541242cf12e482743eedf403c08e920330f6736825bfe27f2da8237",
+            "0xe69e674ae78b120925d53f10daccf990ddd831c025415bdf41b4d594157d23cf"
+          ]
+        }
+      ]
+    },
+    {
+      "count": 5,
+      "leaves": [
+        "0xf043908c07e6e1f0082a706a6bced99fe5c786e38b0d026a40df1daf6d8ae3ca",
+        "0xdb99f71f7b15b7b808749fbe7d3baa17a1b1bc988f9997a111db169dcac9740c",
+        "0x9b25dc4ef1760fff4c7f779fd7076765811b9fe64a9f86ebe29ba8bf5bc65a2d",
+        "0xcc250e024cefff4aee4afaea72bb0d54d150cac37869c1c6c3bebca8036f6af3",
+        "0xa4beef55b68ac43a01aa3d20254431b051690843131ab4f1b86234635c838478"
+      ],
+      "frontier": [
+        "0xa4beef55b68ac43a01aa3d20254431b051690843131ab4f1b86234635c838478",
+        null,
+        "0x567c685fb7a7cf6d1621d2b9d06efd4ae8a702f4bac547377e61e168463dd86e",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "root": "0xd5806317e697df590e774b88aca482fecfc0e24bad1b936a28118a8e65c33109",
+      "proofs": [
+        {
+          "index": 0,
+          "proof": [
+            "0xdb99f71f7b15b7b808749fbe7d3baa17a1b1bc988f9997a111db169dcac9740c",
+            "0xccd91ac81f9ec5b25427d271613a928c186df81c8bcfd2b9322cb516bfdcf394",
+            "0x7eab84ba2998eb9f9b79d392b9a5f25dde55f65eddeed92202702f656ecb6a80",
+            "0xbea16162721bca4b6e1782cbdc695a471522157c6716f508db47c599195340f4",
+            "0x30765fef341bdfe749c391bf956a9f03d363941b2eb8f85ab16bb6eb0d3c4def",
+            "0xf1a0a71a6550c41bc8d4dac4f186b6d274a839f2f95ad9e3bb651d45810c5a1f",
+            "0xc6984907d2e534964351393bc85f04374065b63870cc859c68192def090c1017",
+            "0xdc0606b906238dd157e69cb261e75696007e4d9a3f707a7ce10ce410d08bcfec",
+            "0x8e4b3745e5f2f7d48e36b192cb39242fa0f7a76fac1e36a519d8ebe00f3e21fb",
+            "0xbd752b8e76f5f891e5d3a10352dbf3ac25123b6eb48a3ad154020cd0c84d2176",
+            "0x29398d48e1a1a9f3c8e0f97b0f8c066d2beaf88a319baef02a5482d6157ebd2b",
+            "0x76dc94f187362590f6fd2f1e2b1b8c8f06d7439080b4a499ae6b267ab1b5cc31",
+            "0xd100399f607ba956d68737045ea9eb3e75475dfa633b7cabecf0afa05c9f3af8",
+            "0x3e46222c092b9baa5a16df1dc2864c7cb5fb79609d096ac2a10d64f824d1c73a",
+            "0x8cf2c9bd2369a3b9e0bbdd2cee634605440adb2d70b15263dbe7d0d16ebfc03d",
+            "0xfbbb942587ef256738d2bbb0506423880206cfbfa2ed4d340d796b0f7e290980",
+            "0xbbc84bb1eca9b98b546708cadcf829983dd03da168f65aeae21724003072c21a",
+            "0x669b03f8ec7153d9f9db779449f504489942359aab734d938417889394394b09",
+            "0xa3f6714a23c8f9b91fb3dd6e311bd1cf5f8bcb3618dee8ae5cd7ab0ec40c0876",
+            "0x0bd2118fbd68fa6bb6733596bb879f571bd648821f7437419dcf49f5078f1db8",
+            "0x51c20d66008024c04cf114564a998e49ef8f6e044e2d13a03a66521d6e200503",
+            "0xb29e665a5be928c888cae79638ea9f6febb5e0da9c0adb8eef892895fdeb34f3",
+            "0xe39d25ebb3238dd9c246e22cceeffe7a6def739037e7ddb41889d3ed2bdb54cb",
+            "0xc39d9328c5e0bef02e859ce63d15d3a5240a4c52ee34bb87ac5ba231910bf5f0",
+            "0xfd153e6be1763177c1d43f43661a359214d26256cf62b811d8442382dbca7470",
+            "0xe8123d755c5a32140ea87605c18ef7f342dc7461e1fd470a158356eaed68503d",
+            "0x16022e1fc087982698d7861ece2506bc8f21626c03a30c424259d3f7fde28633",
+            "0x655542f14a719ca624255c59096d3afb83ccef5bb29ce05d37d540e939a3d7d1",
+            "0x259debd0f2289401c7da9aeb0057abb1d4a8c7a2cffe0af3ec42910497936a75",
+            "0xdd363ae2d13611d37dac77e653436745bcda1f4e2d76b04b2723930947d94602",
+            "0x5a62aaa41541242cf12e482743eedf403c08e920330f6736825bfe27f2da8237",
+            "0xe69e674ae78b120925d53f10daccf990ddd831c025415bdf41b4d594157d23cf"
+          ]
+        },
+        {
+          "index": 1,
+          "proof": [
+            "0xf043908c07e6e1f0082a706a6bced99fe5c786e38b0d026a40df1daf6d8ae3ca",
+            "0xccd91ac81f9ec5b25427d271613a928c186df81c8bcfd2b9322cb516bfdcf394",
+            "0x7eab84ba2998eb9f9b79d392b9a5f25dde55f65eddeed92202702f656ecb6a80",
+            "0xbea16162721bca4b6e1782cbdc695a471522157c6716f508db47c599195340f4",
+            "0x30765fef341bdfe749c391bf956a9f03d363941b2eb8f85ab16bb6eb0d3c4def",
+            "0xf1a0a71a6550c41bc8d4dac4f186b6d274a839f2f95ad9e3bb651d45810c5a1f",
+            "0xc6984907d2e534964351393bc85f04374065b63870cc859c68192def090c1017",
+            "0xdc0606b906238dd157e69cb261e75696007e4d9a3f707a7ce10ce410d08bcfec",
+            "0x8e4b3745e5f2f7d48e36b192cb39242fa0f7a76fac1e36a519d8ebe00f3e21fb",
+            "0xbd752b8e76f5f891e5d3a10352dbf3ac25123b6eb48a3ad154020cd0c84d2176",
+            "0x29398d48e1a1a9f3c8e0f97b0f8c066d2beaf88a319baef02a5482d6157ebd2b",
+            "0x76dc94f187362590f6fd2f1e2b1b8c8f06d7439080b4a499ae6b267ab1b5cc31",
+            "0xd100399f607ba956d68737045ea9eb3e75475dfa633b7cabecf0afa05c9f3af8",
+            "0x3e46222c092b9baa5a16df1dc2864c7cb5fb79609d096ac2a10d64f824d1c73a",
+            "0x8cf2c9bd2369a3b9e0bbdd2cee634605440adb2d70b15263dbe7d0d16ebfc03d",
+            "0xfbbb942587ef256738d2bbb0506423880206cfbfa2ed4d340d796b0f7e290980",
+            "0xbbc84bb1eca9b98b546708cadcf829983dd03da168f65aeae21724003072c21a",
+            "0x669b03f8ec7153d9f9db779449f504489942359aab734d938417889394394b09",
+            "0xa3f6714a23c8f9b91fb3dd6e311bd1cf5f8bcb3618dee8ae5cd7ab0ec40c0876",
+            "0x0bd2118fbd68fa6bb6733596bb879f571bd648821f7437419dcf49f5078f1db8",
+            "0x51c20d66008024c04cf114564a998e49ef8f6e044e2d13a03a66521d6e200503",
+            "0xb29e665a5be928c888cae79638ea9f6febb5e0da9c0adb8eef892895fdeb34f3",
+            "0xe39d25ebb3238dd9c246e22cceeffe7a6def739037e7ddb41889d3ed2bdb54cb",
+            "0xc39d9328c5e0bef02e859ce63d15d3a5240a4c52ee34bb87ac5ba231910bf5f0",
+            "0xfd153e6be1763177c1d43f43661a359214d26256cf62b811d8442382dbca7470",
+            "0xe8123d755c5a32140ea87605c18ef7f342dc7461e1fd470a158356eaed68503d",
+            "0x16022e1fc087982698d7861ece2506bc8f21626c03a30c424259d3f7fde28633",
+            "0x655542f14a719ca624255c59096d3afb83ccef5bb29ce05d37d540e939a3d7d1",
+            "0x259debd0f2289401c7da9aeb0057abb1d4a8c7a2cffe0af3ec42910497936a75",
+            "0xdd363ae2d13611d37dac77e653436745bcda1f4e2d76b04b2723930947d94602",
+            "0x5a62aaa41541242cf12e482743eedf403c08e920330f6736825bfe27f2da8237",
+            "0xe69e674ae78b120925d53f10daccf990ddd831c025415bdf41b4d594157d23cf"
+          ]
+        },
+        {
+          "index": 2,
+          "proof": [
+            "0xcc250e024cefff4aee4afaea72bb0d54d150cac37869c1c6c3bebca8036f6af3",
+            "0x0074eba7928f1d0d5f2be8dc8fb233568235b6e97063bcf6f16b10250140ea67",
+            "0x7eab84ba2998eb9f9b79d392b9a5f25dde55f65eddeed92202702f656ecb6a80",
+            "0xbea16162721bca4b6e1782cbdc695a471522157c6716f508db47c599195340f4",
+            "0x30765fef341bdfe749c391bf956a9f03d363941b2eb8f85ab16bb6eb0d3c4def",
+            "0xf1a0a71a6550c41bc8d4dac4f186b6d274a839f2f95ad9e3bb651d45810c5a1f",
+            "0xc6984907d2e534964351393bc85f04374065b63870cc859c68192def090c1017",
+            "0xdc0606b906238dd157e69cb261e75696007e4d9a3f707a7ce10ce410d08bcfec",
+            "0x8e4b3745e5f2f7d48e36b192cb39242fa0f7a76fac1e36a519d8ebe00f3e21fb",
+            "0xbd752b8e76f5f891e5d3a10352dbf3ac25123b6eb48a3ad154020cd0c84d2176",
+            "0x29398d48e1a1a9f3c8e0f97b0f8c066d2beaf88a319baef02a5482d6157ebd2b",
+            "0x76dc94f187362590f6fd2f1e2b1b8c8f06d7439080b4a499ae6b267ab1b5cc31",
+            "0xd100399f607ba956d68737045ea9eb3e75475dfa633b7cabecf0afa05c9f3af8",
+            "0x3e46222c092b9baa5a16df1dc2864c7cb5fb79609d096ac2a10d64f824d1c73a",
+            "0x8cf2c9bd2369a3b9e0bbdd2cee634605440adb2d70b15263dbe7d0d16ebfc03d",
+            "0xfbbb942587ef256738d2bbb0506423880206cfbfa2ed4d340d796b0f7e290980",
+            "0xbbc84bb1eca9b98b546708cadcf829983dd03da168f65aeae21724003072c21a",
+            "0x669b03f8ec7153d9f9db779449f504489942359aab734d938417889394394b09",
+            "0xa3f6714a23c8f9b91fb3dd6e311bd1cf5f8bcb3618dee8ae5cd7ab0ec40c0876",
+            "0x0bd2118fbd68fa6bb6733596bb879f571bd648821f7437419dcf49f5078f1db8",
+            "0x51c20d66008024c04cf114564a998e49ef8f6e044e2d13a03a66521d6e200503",
+            "0xb29e665a5be928c888cae79638ea9f6febb5e0da9c0adb8eef892895fdeb34f3",
+            "0xe39d25ebb3238dd9c246e22cceeffe7a6def739037e7ddb41889d3ed2bdb54cb",
+            "0xc39d9328c5e0bef02e859ce63d15d3a5240a4c52ee34bb87ac5ba231910bf5f0",
+            "0xfd153e6be1763177c1d43f43661a359214d26256cf62b811d8442382dbca7470",
+            "0xe8123d755c5a32140ea87605c18ef7f342dc7461e1fd470a158356eaed68503d",
+            "0x16022e1fc087982698d7861ece2506bc8f21626c03a30c424259d3f7fde28633",
+            "0x655542f14a719ca624255c59096d3afb83ccef5bb29ce05d37d540e939a3d7d1",
+            "0x259debd0f2289401c7da9aeb0057abb1d4a8c7a2cffe0af3ec42910497936a75",
+            "0xdd363ae2d13611d37dac77e653436745bcda1f4e2d76b04b2723930947d94602",
+            "0x5a62aaa41541242cf12e482743eedf403c08e920330f6736825bfe27f2da8237",
+            "0xe69e674ae78b120925d53f10daccf990ddd831c025415bdf41b4d594157d23cf"
+          ]
+        },
+        {
+          "index": 3,
+          "proof": [
+            "0x9b25dc4ef1760fff4c7f779fd7076765811b9fe64a9f86ebe29ba8bf5bc65a2d",
+            "0x0074eba7928f1d0d5f2be8dc8fb233568235b6e97063bcf6f16b10250140ea67",
+            "0x7eab84ba2998eb9f9b79d392b9a5f25dde55f65eddeed92202702f656ecb6a80",
+            "0xbea16162721bca4b6e1782cbdc695a471522157c6716f508db47c599195340f4",
+            "0x30765fef341bdfe749c391bf956a9f03d363941b2eb8f85ab16bb6eb0d3c4def",
+            "0xf1a0a71a6550c41bc8d4dac4f186b6d274a839f2f95ad9e3bb651d45810c5a1f",
+            "0xc6984907d2e534964351393bc85f04374065b63870cc859c68192def090c1017",
+            "0xdc0606b906238dd157e69cb261e75696007e4d9a3f707a7ce10ce410d08bcfec",
+            "0x8e4b3745e5f2f7d48e36b192cb39242fa0f7a76fac1e36a519d8ebe00f3e21fb",
+            "0xbd752b8e76f5f891e5d3a10352dbf3ac25123b6eb48a3ad154020cd0c84d2176",
+            "0x29398d48e1a1a9f3c8e0f97b0f8c066d2beaf88a319baef02a5482d6157ebd2b",
+            "0x76dc94f187362590f6fd2f1e2b1b8c8f06d7439080b4a499ae6b267ab1b5cc31",
+            "0xd100399f607ba956d68737045ea9eb3e75475dfa633b7cabecf0afa05c9f3af8",
+            "0x3e46222c092b9baa5a16df1dc2864c7cb5fb79609d096ac2a10d64f824d1c73a",
+            "0x8cf2c9bd2369a3b9e0bbdd2cee634605440adb2d70b15263dbe7d0d16ebfc03d",
+            "0xfbbb942587ef256738d2bbb0506423880206cfbfa2ed4d340d796b0f7e290980",
+            "0xbbc84bb1eca9b98b546708cadcf829983dd03da168f65aeae21724003072c21a",
+            "0x669b03f8ec7153d9f9db779449f504489942359aab734d938417889394394b09",
+            "0xa3f6714a23c8f9b91fb3dd6e311bd1cf5f8bcb3618dee8ae5cd7ab0ec40c0876",
+            "0x0bd2118fbd68fa6bb6733596bb879f571bd648821f7437419dcf49f5078f1db8",
+            "0x51c20d66008024c04cf114564a998e49ef8f6e044e2d13a03a66521d6e200503",
+            "0xb29e665a5be928c888cae79638ea9f6febb5e0da9c0adb8eef892895fdeb34f3",
+            "0xe39d25ebb3238dd9c246e22cceeffe7a6def739037e7ddb41889d3ed2bdb54cb",
+            "0xc39d9328c5e0bef02e859ce63d15d3a5240a4c52ee34bb87ac5ba231910bf5f0",
+            "0xfd153e6be1763177c1d43f43661a359214d26256cf62b811d8442382dbca7470",
+            "0xe8123d755c5a32140ea87605c18ef7f342dc7461e1fd470a158356eaed68503d",
+            "0x16022e1fc087982698d7861ece2506bc8f21626c03a30c424259d3f7fde28633",
+            "0x655542f14a719ca624255c59096d3afb83ccef5bb29ce05d37d540e939a3d7d1",
+            "0x259debd0f2289401c7da9aeb0057abb1d4a8c7a2cffe0af3ec42910497936a75",
+            "0xdd363ae2d13611d37dac77e653436745bcda1f4e2d76b04b2723930947d94602",
+            "0x5a62aaa41541242cf12e482743eedf403c08e920330f6736825bfe27f2da8237",
+            "0xe69e674ae78b120925d53f10daccf990ddd831c025415bdf41b4d594157d23cf"
+          ]
+        },
+        {
+          "index": 4,
+          "proof": [
+            "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "0xae0798d0ecaed2b778eddebf18f071a561c53658c05e76cedecc27cafbdbc577",
+            "0x567c685fb7a7cf6d1621d2b9d06efd4ae8a702f4bac547377e61e168463dd86e",
+            "0xbea16162721bca4b6e1782cbdc695a471522157c6716f508db47c599195340f4",
+            "0x30765fef341bdfe749c391bf956a9f03d363941b2eb8f85ab16bb6eb0d3c4def",
+            "0xf1a0a71a6550c41bc8d4dac4f186b6d274a839f2f95ad9e3bb651d45810c5a1f",
+            "0xc6984907d2e534964351393bc85f04374065b63870cc859c68192def090c1017",
+            "0xdc0606b906238dd157e69cb261e75696007e4d9a3f707a7ce10ce410d08bcfec",
+            "0x8e4b3745e5f2f7d48e36b192cb39242fa0f7a76fac1e36a519d8ebe00f3e21fb",
+            "0xbd752b8e76f5f891e5d3a10352dbf3ac25123b6eb48a3ad154020cd0c84d2176",
+            "0x29398d48e1a1a9f3c8e0f97b0f8c066d2beaf88a319baef02a5482d6157ebd2b",
+            "0x76dc94f187362590f6fd2f1e2b1b8c8f06d7439080b4a499ae6b267ab1b5cc31",
+            "0xd100399f607ba956d68737045ea9eb3e75475dfa633b7cabecf0afa05c9f3af8",
+            "0x3e46222c092b9baa5a16df1dc2864c7cb5fb79609d096ac2a10d64f824d1c73a",
+            "0x8cf2c9bd2369a3b9e0bbdd2cee634605440adb2d70b15263dbe7d0d16ebfc03d",
+            "0xfbbb942587ef256738d2bbb0506423880206cfbfa2ed4d340d796b0f7e290980",
+            "0xbbc84bb1eca9b98b546708cadcf829983dd03da168f65aeae21724003072c21a",
+            "0x669b03f8ec7153d9f9db779449f504489942359aab734d938417889394394b09",
+            "0xa3f6714a23c8f9b91fb3dd6e311bd1cf5f8bcb3618dee8ae5cd7ab0ec40c0876",
+            "0x0bd2118fbd68fa6bb6733596bb879f571bd648821f7437419dcf49f5078f1db8",
+            "0x51c20d66008024c04cf114564a998e49ef8f6e044e2d13a03a66521d6e200503",
+            "0xb29e665a5be928c888cae79638ea9f6febb5e0da9c0adb8eef892895fdeb34f3",
+            "0xe39d25ebb3238dd9c246e22cceeffe7a6def739037e7ddb41889d3ed2bdb54cb",
+            "0xc39d9328c5e0bef02e859ce63d15d3a5240a4c52ee34bb87ac5ba231910bf5f0",
+            "0xfd153e6be1763177c1d43f43661a359214d26256cf62b811d8442382dbca7470",
+            "0xe8123d755c5a32140ea87605c18ef7f342dc7461e1fd470a158356eaed68503d",
+            "0x16022e1fc087982698d7861ece2506bc8f21626c03a30c424259d3f7fde28633",
+            "0x655542f14a719ca624255c59096d3afb83ccef5bb29ce05d37d540e939a3d7d1",
+            "0x259debd0f2289401c7da9aeb0057abb1d4a8c7a2cffe0af3ec42910497936a75",
+            "0xdd363ae2d13611d37dac77e653436745bcda1f4e2d76b04b2723930947d94602",
+            "0x5a62aaa41541242cf12e482743eedf403c08e920330f6736825bfe27f2da8237",
+            "0xe69e674ae78b120925d53f10daccf990ddd831c025415bdf41b4d594157d23cf"
+          ]
+        }
+      ]
+    }
+  ],
+  "authorizations": [
+    {
+      "identity": {
+        "kind": "evm",
+        "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+      },
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 0.2 USDC on NEAR\nsplit: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1 100.00%\nremainder: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nbase: 0.2 USDC on Base to 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\ncipher: 0x0404040404040404040404040404040404040404040404040404040404040404\nmoderator: (none)\nterms: 0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\nseller key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC",
+      "auth": {
+        "kind": "evm",
+        "sig": "0x113c182d9210585c03c7e8cbe08b4a2805c363f0a542495d514b0424852bc71517ab9b0a07eda15f27fb6c74ed4ee79c62898a9687ffb1354866abc330bc44551c"
+      }
+    },
+    {
+      "identity": {
+        "kind": "solana",
+        "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+      },
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB\nprice: 0.2 USDC on NEAR\nsplit: EVM 0x0000000000000000000000000000000000000000 12.50%\nsplit: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1 12.50%\nsplit: Solana 11111111111111111111111111111111 12.50%\nsplit: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB 12.50%\nsplit: NEAR ab 12.50%\nsplit: NEAR seller.near 12.50%\nsplit: NEAR aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 12.50%\nsplit: NEAR ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff 12.50%\nremainder: NEAR ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\nbase: none\ncipher: 0x0404040404040404040404040404040404040404040404040404040404040404\nmoderator: moderator.near\nterms: 0x291e0e4288ea97141e03dcf590c805256c6c629c5814099662b4db8310d02d98\nseller key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC",
+      "auth": {
+        "kind": "solana",
+        "sig": "0x48e4f9108b5fb843edb519499d8d1f3fc6c6926048fe856581ac6de56fb803af9016b51ddcc801c714fba4c2e542f997a5332b6a788be6b1aaed30e60d84a805"
+      }
+    },
+    {
+      "identity": {
+        "kind": "near",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: NEAR aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nprice: 340282366920938463463374607431768.211455 USDC on NEAR\nsplit: NEAR seller.near 100.00%\nremainder: NEAR seller.near\nbase: none\ncipher: 0x0404040404040404040404040404040404040404040404040404040404040404\nmoderator: (none)\nterms: 0x8d8308ab811eaff10b927eacb61f50bc1763062e1bfc88fdbfe3eb3c363ecc68\nseller key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC",
+      "auth": null,
+      "predecessor": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "identity": {
+        "kind": "solana",
+        "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+      },
+      "text": "Annon: open a purchased file again\ncontract: v2.annon.defdone.near\npurchase: 0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC",
+      "auth": {
+        "kind": "solana",
+        "sig": "0x17a067321f3c43d6e120a02e55fbc5e3d3f564dc500da98885034f90697184a9a4b4664718d90bd7edeaae48a225926c0648dd0a51c44150208353ed06adfe0f"
+      }
+    },
+    {
+      "identity": {
+        "kind": "evm",
+        "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+      },
+      "text": "Annon: open a purchased file again\ncontract: v2.annon.defdone.near\npurchase: 0x9bd1d620f2603306c1b79786326fc57641a7e0b0577c9e3bac2d625a5946bf8f\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC",
+      "auth": {
+        "kind": "evm",
+        "sig": "0x986a802ff2b49f1f4e5a1400456e02df31d7db1885e7faa2eb6c5f491215166465b9f18dffcbad67254a149305770ba38cfd2c636c4e47d96260f8fb9a735af71b"
+      }
+    },
+    {
+      "identity": {
+        "kind": "near",
+        "id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "text": "Annon: open a purchased file again\ncontract: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\npurchase: 0xf25c0007ec8bbd7f91d73210f53c35f5d2b707757638513a5718940fbf142eb6\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: NEAR ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC",
+      "auth": null,
+      "predecessor": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "identity": {
+        "kind": "near",
+        "id": "seller.near"
+      },
+      "text": "Annon: open a purchased file again\ncontract: v2.annon.defdone.near\npurchase: 0x5ff4904fd36e4c7bda270a518acd6d2e54688e7938afb0ee2c4ef3a295bb6682\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: NEAR seller.near\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC",
+      "auth": null,
+      "predecessor": "seller.near"
+    }
+  ],
+  "pay2": [
+    {
+      "id": "evm",
+      "input": {
+        "K": "0x0202020202020202020202020202020202020202020202020202020202020202",
+        "fileId": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "ckdSecret": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "contractId": "v2.annon.defdone.near",
+        "name": "settlement.txt",
+        "mime": "text/plain",
+        "chunkLog2": 16,
+        "previewLen": 10,
+        "data_utf8": "NEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\n"
+      },
+      "seller": {
+        "kind": "evm",
+        "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+      },
+      "auth_kind": 0,
+      "cipher_hash": "0x68d88019d64ea7f1298f3b98027d4072dc2890ad898de226d4b741483b00b2a6",
+      "header_hash": "0xd260829705a64d74bbe10ac2d9937fd304613e3eeafffcecb25b57818dbe6914",
+      "whole_header_hash": "0x75dc36bce0856d46cd7d56a2d1a94f34f3ee3046901f7bd17a17e3c3edba8e37",
+      "publish_text": "Annon: publish a file\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nheader: 0xd260829705a64d74bbe10ac2d9937fd304613e3eeafffcecb25b57818dbe6914",
+      "auth": {
+        "kind": "evm",
+        "sig": "0x936c150a6fe8a8a716f4e6e79e9dad549067fd5f72d86baac37edefa91486ef740c30af59afca524033a1455447c8c3f54e24c315f1620228f67e3be384fc1501b"
+      },
+      "trailer": "0x936c150a6fe8a8a716f4e6e79e9dad549067fd5f72d86baac37edefa91486ef740c30af59afca524033a1455447c8c3f54e24c315f1620228f67e3be384fc1501b",
+      "header": "UEFZMgIQAQAAAAGDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMBAAAAAAoAAAADDNSZU272T7bgOHH7NRC8fHlhiILwBkw2sX8ZFGFGcNqO46NOVz4aQayl56de+hiSCHXtyeMjHFNmBmDvPA/IK0II4ekC4dLrINvYMx3mamPM0waTqlRULeufOgyGBU9V/pAJQWnNIiP7QM3m683xMj+um9gkVIOn9g3g4njSmpZHjQQFhjIHrR48ZWFQREVupoLVU/vvEqjKF0rFK1UI6gtuZWFyLWNrZC92MQA+FXYyLmFubm9uLmRlZmRvbmUubmVhctsS7GJuOLhMNzFW+EnKjEx6RzzPMdh2/CGMiAa0mRaiohxzJEIkzid8xsDfHYXpxki75gwBQnG3YuVdPl3r+DBxIMrztL2fcpNsFQpv6KinFvTm556drVSQZ/1fcthrqsN+3vqRSG73QMMK9Zr8pSQDOhRVRHyMP1TiTDFfFiAij2fjvjhPwVAb",
+      "file": "UEFZMgIQAQAAAAGDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMBAAAAAAoAAAADDNSZU272T7bgOHH7NRC8fHlhiILwBkw2sX8ZFGFGcNqO46NOVz4aQayl56de+hiSCHXtyeMjHFNmBmDvPA/IK0II4ekC4dLrINvYMx3mamPM0waTqlRULeufOgyGBU9V/pAJQWnNIiP7QM3m683xMj+um9gkVIOn9g3g4njSmpZHjQQFhjIHrR48ZWFQREVupoLVU/vvEqjKF0rFK1UI6gtuZWFyLWNrZC92MQA+FXYyLmFubm9uLmRlZmRvbmUubmVhctsS7GJuOLhMNzFW+EnKjEx6RzzPMdh2/CGMiAa0mRaiohxzJEIkzid8xsDfHYXpxki75gwBQnG3YuVdPl3r+DBxIMrztL2fcpNsFQpv6KinFvTm556drVSQZ/1fcthrqsN+3vqRSG73QMMK9Zr8pSQDOhRVRHyMP1TiTDFfFiAij2fjvjhPwVAbNI25Tmy0hz4I7O86bPRnOKak7W80+1/I0VkWv4LNFMBJ4HsGNQ9I4dpJHQiOxzYWYWThGkcVG31do/9JD6W922IlyB1VJGZZ/rowE3FNnAa+8tOQ687+w2ybQ3dnCvvy3aH+mbYAuPLVKOhPowI9ALU3uCrDxPjuL7QafKveGAHvhLLFdQKbJF3GJmKS00CFvpH+ibRWeXOEmImbC5VsRdRfaHSJlJ5FDt1rulQAPcsxyELorMrcdR4c4GQzUSuhJ95ZJJUEpIcdMLV8+GYRd5hWXVmR5f6eCm4+sXpEPB1r82Imq+DXRptNvEE8BdKBaj/hPUdVfpU46Obs2U4PYUey4XLHYFKZLJ6fL64FgD043arJtVUkTfq7yMWafG82kMAiysgSKoDY5Dq7kZZfqlg2PKH9U5gf90MgmQP373zxRhdmCMgOOJzvhkoMazkMWWi7ZGXfI4S2NKWr6qPp/uEfgh6RuPiSXrIW22So48XALHap+UcHQ6U4dREtJvhwaKSMsurxl0VC9CkupUROVHpRIkpmWM0AakKHmMVOL6vDI8RwOp5hXU/EJWYTATdyMHNRyyb48Ns7S0okaco8gCncnX7FSqcnQJn+B/weDfN/MBhDVw==",
+      "preview": {
+        "v": 1,
+        "header": "UEFZMgIQAAAAAAAAAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMBAAAAAAoAAAADDNSZU272T7bgOHH7NRC8fHlhiILwBkw2sX8ZFGFGcNqO46NOVz4aQayl56de+hiSCHXtyeMjHFNmBmDvPA/IK0II4ekC4dLrINvYMx3mamPM0waTqlRULeufOgyGBU9V/pAJQWnNIiP7QM3m683xMj+um9gkVIOn9g3g4njSmpZHjQQFhjIHrR48ZWFQREVupoLVU/vvEqjKF0rFK1UI6g==",
+        "chunks": [
+          {
+            "index": 0,
+            "key": "NorNW+SDMTFfLduExVQJudQK+5O41uFyPLUk20O+0wE=",
+            "data": "NI25Tmy0hz4I7O86bPRnOKak7W80+1/I0VkWv4LNFMBJ4HsGNQ9I4dpJHQiOxzYWYWThGkcVG31do/9JD6W922IlyB1VJGZZ/rowE3FNnAa+8tOQ687+w2ybQ3dnCvvy3aH+mbYAuPLVKOhPowI9ALU3uCrDxPjuL7QafKveGAHvhLLFdQKbJF3GJmKS00CFvpH+ibRWeXOEmImbC5VsRdRfaHSJlJ5FDt1rulQAPcsxyELorMrcdR4c4GQzUSuhJ95ZJJUEpIcdMLV8+GYRd5hWXVmR5f6eCm4+sXpEPB1r82Imq+DXRptNvEE8BdKBaj/hPUdVfpU46Obs2U4PYUey4XLHYFKZLJ6fL64FgD0="
+          },
+          {
+            "index": 1,
+            "key": "ByuLl+qUrCFktahXuAt7zTYjSox7YejIf3WM7HCVdU0=",
+            "data": "ON2qybVVJE36u8jFmnxvNpDAIsrIEiqA2OQ="
+          }
+        ]
+      }
+    },
+    {
+      "id": "solana",
+      "input": {
+        "K": "0x0202020202020202020202020202020202020202020202020202020202020202",
+        "fileId": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "ckdSecret": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "contractId": "v2.annon.defdone.near",
+        "name": "settlement.txt",
+        "mime": "text/plain",
+        "chunkLog2": 16,
+        "previewLen": 10,
+        "data_utf8": "NEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\n"
+      },
+      "seller": {
+        "kind": "solana",
+        "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+      },
+      "auth_kind": 1,
+      "cipher_hash": "0x68d88019d64ea7f1298f3b98027d4072dc2890ad898de226d4b741483b00b2a6",
+      "header_hash": "0xc1278ab6a7fdf6b2ac956a10a8c1a26667d3e9bd8aad6ba673488340c1730ed1",
+      "whole_header_hash": "0x743b4ca02230501ee32208fdf0f03f6db937605c16e2975b637cc7dcedc7e61f",
+      "publish_text": "Annon: publish a file\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nheader: 0xc1278ab6a7fdf6b2ac956a10a8c1a26667d3e9bd8aad6ba673488340c1730ed1",
+      "auth": {
+        "kind": "solana",
+        "sig": "0xf1cfe106595c18a9444cbeca36d1603ca4fb052ee3705c7be1d8768086102744d2cd32b9bda99345a3bf870adc89e62ce6ba48815a8032116b88bd7d600f590c"
+      },
+      "trailer": "0xf1cfe106595c18a9444cbeca36d1603ca4fb052ee3705c7be1d8768086102744d2cd32b9bda99345a3bf870adc89e62ce6ba48815a8032116b88bd7d600f590c00",
+      "header": "UEFZMgIQAQEAAAGDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMBAAAAAAoAAAADDNSZU272T7bgOHH7NRC8fHlhiILwBkw2sX8ZFGFGcNqO46NOVz4aQayl56de+hiSCHXtyeMjHFNmBmDvPA/IK0II4ekC4dLrINvYMx3mamPM0waTqlRULeufOgyGBU9V/pAJQWnNIiP7QM3m683xMj+um9gkVIOn9g3g4njSmpZHjQQFhjIHrR48ZWFQREVupoLVU/vvEqjKF0rFK1UI6gtuZWFyLWNrZC92MQA+FXYyLmFubm9uLmRlZmRvbmUubmVhctsS7GJuOLhMNzFW+EnKjEx6RzzPMdh2/CGMiAa0mRaiohxzJEIkzifQ8VPQqHiIc0VFquRLHh8HiZvyAGSxmyWLElA5jP3N0/HP4QZZXBipREy+yjbRYDyk+wUu43Bce+HYdoCGECdE0s0yub2pk0Wjv4cK3InmLOa6SIFagDIRa4i9fWAPWQwA",
+      "file": "UEFZMgIQAQEAAAGDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMBAAAAAAoAAAADDNSZU272T7bgOHH7NRC8fHlhiILwBkw2sX8ZFGFGcNqO46NOVz4aQayl56de+hiSCHXtyeMjHFNmBmDvPA/IK0II4ekC4dLrINvYMx3mamPM0waTqlRULeufOgyGBU9V/pAJQWnNIiP7QM3m683xMj+um9gkVIOn9g3g4njSmpZHjQQFhjIHrR48ZWFQREVupoLVU/vvEqjKF0rFK1UI6gtuZWFyLWNrZC92MQA+FXYyLmFubm9uLmRlZmRvbmUubmVhctsS7GJuOLhMNzFW+EnKjEx6RzzPMdh2/CGMiAa0mRaiohxzJEIkzifQ8VPQqHiIc0VFquRLHh8HiZvyAGSxmyWLElA5jP3N0/HP4QZZXBipREy+yjbRYDyk+wUu43Bce+HYdoCGECdE0s0yub2pk0Wjv4cK3InmLOa6SIFagDIRa4i9fWAPWQwANI25Tmy0hz4I7O86bPRnOKak7W80+1/I0VkWv4LNFMBJ4HsGNQ9I4dpJHQiOxzYWYWThGkcVG31do/9JD6W922IlyB1VJGZZ/rowE3FNnAa+8tOQ687+w2ybQ3dnCvvy3aH+mbYAuPLVKOhPowI9ALU3uCrDxPjuL7QafKveGAHvhLLFdQKbJF3GJmKS00CFvpH+ibRWeXOEmImbC5VsRdRfaHSJlJ5FDt1rulQAPcsxyELorMrcdR4c4GQzUSuhJ95ZJJUEpIcdMLV8+GYRd5hWXVmR5f6eCm4+sXpEPB1r82Imq+DXRptNvEE8BdKBaj/hPUdVfpU46Obs2U4PYUey4XLHYFKZLJ6fL64FgD043arJtVUkTfq7yMWafG82kMAiysgSKoDY5Dq7kZZfqlg2PKH9U5gf90MgmQP373zxRhdmCMgOOJzvhkoMazkMWWi7ZGXfI4S2NKWr6qPp/uEfgh6RuPiSXrIW22So48XALHap+UcHQ6U4dREtJvhwaKSMsurxl0VC9CkupUROVHpRIkpmWM0AakKHmMVOL6vDI8RwOp5hXU/EJWYTATdyMHNRyyb48Ns7S0okaco8gCncnX7FSqcnQJn+B/weDfN/MBhDVw==",
+      "preview": {
+        "v": 1,
+        "header": "UEFZMgIQAAEAAAAAAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMBAAAAAAoAAAADDNSZU272T7bgOHH7NRC8fHlhiILwBkw2sX8ZFGFGcNqO46NOVz4aQayl56de+hiSCHXtyeMjHFNmBmDvPA/IK0II4ekC4dLrINvYMx3mamPM0waTqlRULeufOgyGBU9V/pAJQWnNIiP7QM3m683xMj+um9gkVIOn9g3g4njSmpZHjQQFhjIHrR48ZWFQREVupoLVU/vvEqjKF0rFK1UI6g==",
+        "chunks": [
+          {
+            "index": 0,
+            "key": "NorNW+SDMTFfLduExVQJudQK+5O41uFyPLUk20O+0wE=",
+            "data": "NI25Tmy0hz4I7O86bPRnOKak7W80+1/I0VkWv4LNFMBJ4HsGNQ9I4dpJHQiOxzYWYWThGkcVG31do/9JD6W922IlyB1VJGZZ/rowE3FNnAa+8tOQ687+w2ybQ3dnCvvy3aH+mbYAuPLVKOhPowI9ALU3uCrDxPjuL7QafKveGAHvhLLFdQKbJF3GJmKS00CFvpH+ibRWeXOEmImbC5VsRdRfaHSJlJ5FDt1rulQAPcsxyELorMrcdR4c4GQzUSuhJ95ZJJUEpIcdMLV8+GYRd5hWXVmR5f6eCm4+sXpEPB1r82Imq+DXRptNvEE8BdKBaj/hPUdVfpU46Obs2U4PYUey4XLHYFKZLJ6fL64FgD0="
+          },
+          {
+            "index": 1,
+            "key": "ByuLl+qUrCFktahXuAt7zTYjSox7YejIf3WM7HCVdU0=",
+            "data": "ON2qybVVJE36u8jFmnxvNpDAIsrIEiqA2OQ="
+          }
+        ]
+      }
+    },
+    {
+      "id": "near",
+      "input": {
+        "K": "0x0202020202020202020202020202020202020202020202020202020202020202",
+        "fileId": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "ckdSecret": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "contractId": "v2.annon.defdone.near",
+        "name": "settlement.txt",
+        "mime": "text/plain",
+        "chunkLog2": 16,
+        "previewLen": 10,
+        "data_utf8": "NEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\nNEAR settlement vector — UTF-8\n"
+      },
+      "seller": {
+        "kind": "near",
+        "id": "seller.near"
+      },
+      "auth_kind": 2,
+      "cipher_hash": "0x68d88019d64ea7f1298f3b98027d4072dc2890ad898de226d4b741483b00b2a6",
+      "header_hash": "0xd49cf21763cd35b395dee7685aff52363b5669e6eaa90302244982f1a2784e93",
+      "whole_header_hash": "0x09d91305c8d527cfcad35eb4a18dd00c53f6d37d9ed78f17eec360e0dd155c75",
+      "publish_text": "Annon: publish a file\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nheader: 0xd49cf21763cd35b395dee7685aff52363b5669e6eaa90302244982f1a2784e93",
+      "auth": null,
+      "trailer": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "header": "UEFZMgIQAQIAAAGDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMBAAAAAAoAAAADDNSZU272T7bgOHH7NRC8fHlhiILwBkw2sX8ZFGFGcNqO46NOVz4aQayl56de+hiSCHXtyeMjHFNmBmDvPA/IK0II4ekC4dLrINvYMx3mamPM0waTqlRULeufOgyGBU9V/pAJQWnNIiP7QM3m683xMj+um9gkVIOn9g3g4njSmpZHjQQFhjIHrR48ZWFQREVupoLVU/vvEqjKF0rFK1UI6gtuZWFyLWNrZC92MQA+FXYyLmFubm9uLmRlZmRvbmUubmVhctsS7GJuOLhMNzFW+EnKjEx6RzzPMdh2/CGMiAa0mRaiohxzJEIkzifSVX5IwZWiHQyLszIbZDpZZzaHW2q4nkgzZG3TP1AH+QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "file": "UEFZMgIQAQIAAAGDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMBAAAAAAoAAAADDNSZU272T7bgOHH7NRC8fHlhiILwBkw2sX8ZFGFGcNqO46NOVz4aQayl56de+hiSCHXtyeMjHFNmBmDvPA/IK0II4ekC4dLrINvYMx3mamPM0waTqlRULeufOgyGBU9V/pAJQWnNIiP7QM3m683xMj+um9gkVIOn9g3g4njSmpZHjQQFhjIHrR48ZWFQREVupoLVU/vvEqjKF0rFK1UI6gtuZWFyLWNrZC92MQA+FXYyLmFubm9uLmRlZmRvbmUubmVhctsS7GJuOLhMNzFW+EnKjEx6RzzPMdh2/CGMiAa0mRaiohxzJEIkzifSVX5IwZWiHQyLszIbZDpZZzaHW2q4nkgzZG3TP1AH+QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANI25Tmy0hz4I7O86bPRnOKak7W80+1/I0VkWv4LNFMBJ4HsGNQ9I4dpJHQiOxzYWYWThGkcVG31do/9JD6W922IlyB1VJGZZ/rowE3FNnAa+8tOQ687+w2ybQ3dnCvvy3aH+mbYAuPLVKOhPowI9ALU3uCrDxPjuL7QafKveGAHvhLLFdQKbJF3GJmKS00CFvpH+ibRWeXOEmImbC5VsRdRfaHSJlJ5FDt1rulQAPcsxyELorMrcdR4c4GQzUSuhJ95ZJJUEpIcdMLV8+GYRd5hWXVmR5f6eCm4+sXpEPB1r82Imq+DXRptNvEE8BdKBaj/hPUdVfpU46Obs2U4PYUey4XLHYFKZLJ6fL64FgD043arJtVUkTfq7yMWafG82kMAiysgSKoDY5Dq7kZZfqlg2PKH9U5gf90MgmQP373zxRhdmCMgOOJzvhkoMazkMWWi7ZGXfI4S2NKWr6qPp/uEfgh6RuPiSXrIW22So48XALHap+UcHQ6U4dREtJvhwaKSMsurxl0VC9CkupUROVHpRIkpmWM0AakKHmMVOL6vDI8RwOp5hXU/EJWYTATdyMHNRyyb48Ns7S0okaco8gCncnX7FSqcnQJn+B/weDfN/MBhDVw==",
+      "preview": {
+        "v": 1,
+        "header": "UEFZMgIQAAIAAAAAAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMBAAAAAAoAAAADDNSZU272T7bgOHH7NRC8fHlhiILwBkw2sX8ZFGFGcNqO46NOVz4aQayl56de+hiSCHXtyeMjHFNmBmDvPA/IK0II4ekC4dLrINvYMx3mamPM0waTqlRULeufOgyGBU9V/pAJQWnNIiP7QM3m683xMj+um9gkVIOn9g3g4njSmpZHjQQFhjIHrR48ZWFQREVupoLVU/vvEqjKF0rFK1UI6g==",
+        "chunks": [
+          {
+            "index": 0,
+            "key": "NorNW+SDMTFfLduExVQJudQK+5O41uFyPLUk20O+0wE=",
+            "data": "NI25Tmy0hz4I7O86bPRnOKak7W80+1/I0VkWv4LNFMBJ4HsGNQ9I4dpJHQiOxzYWYWThGkcVG31do/9JD6W922IlyB1VJGZZ/rowE3FNnAa+8tOQ687+w2ybQ3dnCvvy3aH+mbYAuPLVKOhPowI9ALU3uCrDxPjuL7QafKveGAHvhLLFdQKbJF3GJmKS00CFvpH+ibRWeXOEmImbC5VsRdRfaHSJlJ5FDt1rulQAPcsxyELorMrcdR4c4GQzUSuhJ95ZJJUEpIcdMLV8+GYRd5hWXVmR5f6eCm4+sXpEPB1r82Imq+DXRptNvEE8BdKBaj/hPUdVfpU46Obs2U4PYUey4XLHYFKZLJ6fL64FgD0="
+          },
+          {
+            "index": 1,
+            "key": "ByuLl+qUrCFktahXuAt7zTYjSox7YejIf3WM7HCVdU0=",
+            "data": "ON2qybVVJE36u8jFmnxvNpDAIsrIEiqA2OQ="
+          }
+        ]
+      }
+    }
+  ]
+}
