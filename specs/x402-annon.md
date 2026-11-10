@@ -6,11 +6,14 @@ How a server sells an Annon file over x402 v2, and what an Annon client sends. I
 [exact on EVM](https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_evm.md))
 with one scheme of its own, one extension, `annon`, the standard
 [`payment-identifier`](https://github.com/x402-foundation/x402/blob/main/specs/extensions/payment_identifier.md)
-extension, and the payment nonce of [nonce.md](nonce.md).
+and [`sign-in-with-x`](https://github.com/x402-foundation/x402/blob/main/specs/extensions/sign-in-with-x.md)
+extensions, and the payment nonce of [nonce.md](nonce.md). The resource is the PAY2 file itself:
+the paid request returns it, and a buyer signs in at the same URL to get it again
+([download.md](download.md)).
 The SDK builds and checks all of it (`offerFor`, `verifyPayment`, `forFacilitator` on the seller's
 side; `discover`, `preflight`, `authorize` on the buyer's); integrators don't write these objects.
 
-Status: v1.1, draft. v1 was frozen on 9 Nov 2026 (commit `1676d96`); section 11 lists what v1.1
+Status: v1.1, draft. v1 was frozen on 9 Nov 2026 (commit `1676d96`); section 12 lists what v1.1
 changes. Any change to what a client or server sends or checks is a new version.
 
 ## 1. Why its own scheme
@@ -37,8 +40,10 @@ A `402` with the `PAYMENT-REQUIRED` header (base64 JSON `PaymentRequired`, `x402
 | `contract` | the Annon contract account, e.g. `v1.annon.defdone.near` |
 | `fileId` | `0x` and 32 bytes, lowercase |
 | `header` | URL of the complete PAY2 header, public (section 7) |
-| `download` | URL of the PAY2 file for buyers (section 7) |
 | `public` | optional, `true` when the seller publishes the body too |
+
+`resource.url` is the PAY2 file (section 7). v1's `info.download` is gone: the file is at
+`resource.url` for the paid request and for every download after it.
 
 `extensions.annon.schema` is the JSON Schema of that object (`ANNON_SCHEMA` in the SDK); in v1.1
 its `version` is `const: 2`.
@@ -54,12 +59,24 @@ configuration (`get_config`):
 | `amount` | the registered price |
 | `payTo` | the registered `pay_to` |
 | `maxTimeoutSeconds` | the server's choice; the Annon client signs for at most 180 seconds |
-| `extra` | `name: "USD Coin"`, `version: "2"`; no `assetTransferMethod`, no `paymentFlow` other than `authorization` |
+| `extra` | `name: "USD Coin"`, `version: "2"`, `paymentFlow: "upfront"`; `assetTransferMethod` absent or `eip3009`; no `splits` |
+
+`paymentFlow: "upfront"` ([x402 v2 §6.1](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md#61-asset-transfer-methods-and-payment-flow-models)):
+the payment is settled before the file is served, so the body goes only to a buyer whose payment
+is on Base (section 7). A client refuses a v1.1 offer (`version: 2`) with any other flow, a v1 offer
+(`version: 1`) with any flow but `authorization`, an `assetTransferMethod` other than `eip3009`, and
+a non-empty `extra.splits` (a split there would take part of the payment away from `pay_to`).
 
 `extensions["payment-identifier"]`: as the extension defines it, with `info.required: false`
 (section 10).
 
-A stopped or taken-down file is not offered: `410`.
+`extensions["sign-in-with-x"]`: a single-use challenge for a buyer who already paid
+([download.md](download.md) section 2).
+
+A file whose sales are stopped answers `402` with `accepts: []` and the sign-in challenge only:
+past buyers still download it. (x402's own `wrapFetchWithSIWx` takes the network to sign for from
+`accepts[0]` and does not sign without an offer; a client takes it from `supportedChains`, as the
+Annon client does.) A taken-down file answers `410`.
 
 ## 3. Payment
 
@@ -95,13 +112,17 @@ Base's, read before the registration is read again:
 Anything else: refuse, settle nothing. A retry of a payment already settled or being settled is
 recognized first and never reaches these checks (section 10). Then `forFacilitator` renames the
 scheme to `exact` in both the payload's `accepted` and the requirements (the official facilitator
-checks both), keeps every extension of the payload, and returns the facilitator's request body with
-`x402Version: 2`; any standard facilitator settles it.
+checks both), keeps every extension of the payload but `bazaar` (section 11), and returns the
+facilitator's request body with `x402Version: 2`; any standard facilitator settles it.
 
-## 5. Settlement response
+## 5. Settlement response: paid is not opened
 
-`PAYMENT-RESPONSE` (base64 JSON `SettlementResponse`). The client does not depend on it: it finds
-the payment on Base by its nonce, searching from the Base block that was finalized when it signed.
+`PAYMENT-RESPONSE` (base64 JSON `SettlementResponse`) with `success: true` says the payment is on
+Base at `safe` (section 10). It does not say the buyer can open the file: the key comes only after
+`unlock` records the payment on NEAR (anyone may send it, a relayer included) and NEAR MPC releases
+the key to the buyer's one-time key. A client tells the buyer "paid" on this response, and "ready"
+only once it has opened the file. The client does not depend on the response either: it finds the
+payment on Base by its nonce (section 10).
 
 ## 6. What the client trusts
 
@@ -129,19 +150,44 @@ stanza for the trusted contract. This proves which bytes the buyer will pay for,
 holds them, and not that the wrapped key is right (a dishonest seller can sign a broken file; the
 signature is the evidence).
 
-**After payment the buyer downloads.** Once `unlock` has recorded the buyer on NEAR (final state),
-`info.download` serves the file to the paying wallet: the host issues a single-use challenge, the
-wallet signs it (EIP-4361, bound to the host's domain, the contract, the `fileId`, the header's
-hash and a short expiry; the header's hash is `SHA256` of every byte of the final header as served
-at `info.header`, stanzas and seller signature included, as `0x` and lowercase hex), and the host checks the signature and `is_buyer(fileId, wallet)` on the
-trusted contract before streaming. Range requests resume a broken download. The client checks
-every chunk against the hash list of the header it checked before paying, and marks the file
-complete only when all checks pass.
+**The paid request returns the file, to the buyer only.** With `paymentFlow: "upfront"` the file
+is served only for a purchase that is settled (section 10). A payment payload alone never gets the
+body: the facilitator sees the whole payload, and the payment signature binds neither the host nor
+the client. What only the buyer holds is the one-time key's secret (the key the nonce commits to;
+the client needs it to open the file). So the paid request also carries `Annon-Buyer-Proof`
+([download.md](download.md) section 3): a signature by that key over `resource.url`, which no
+facilitator can make and no other host can use.
 
-**Re-download is the same request, any time later.** A payment signature or a transaction hash is
-never an entitlement; `is_buyer` is. The guarantee is: verifiable downloads and repeat access
-while a host or mirror holds the file and the moderator has not taken it down (a takedown also
-blocks `reopen`).
+The answer to a request with a payload, after the checks of section 10, unless the request is
+entitled to the file anyway (download.md section 1):
+
+- settled, with a valid `Annon-Buyer-Proof` for the payload's `buyerKey`: `200`, the success
+  `PAYMENT-RESPONSE`, and the complete PAY2 file as the body, with `Cache-Control: private,
+  no-store`; `Range` resumes a broken download the same way;
+- settled, without one: `402`, the success `PAYMENT-RESPONSE` and a fresh sign-in challenge;
+- broadcast and not yet at `safe` (`submitted`): `402` with `PAYMENT-RESPONSE`
+  `errorReason: "settlement_pending"` and its transaction;
+- settling with no transaction known yet (`processing`): `503` with `Retry-After`, and no
+  `PAYMENT-RESPONSE`.
+
+In the last two the client asks again with the same payload and proof (section 10) until the body
+comes. A client that lost the one-time secret signs in to download, and uses `reopen` for the key.
+
+**A buyer signs in to download again.** Any later request, from any device, uses the standard x402
+sign-in ([download.md](download.md)): the `402` carries a single-use `sign-in-with-x` challenge,
+the wallet signs it, and the host checks the signature, that the wallet bought the file, and that
+the file exists and is not taken down, for every request. "Bought" is `is_buyer(fileId, wallet)` on
+the trusted contract at final state, or, until NEAR records it, a purchase by that wallet this host
+has settled. One sign-in gets a session of at most two hours for that wallet on that host:
+parallel downloads and resumes need no further signature. A payment payload or a transaction hash
+is never an entitlement.
+
+**The client checks every byte.** It checks every chunk against the hash list of the header it
+checked before paying (its `SHA256`, as `0x` and lowercase hex of every byte of the final header as
+served at `info.header`, stanzas and seller signature included, is recorded with the purchase), and
+marks the file complete only when all checks pass. The guarantee is: verifiable downloads and
+repeat access while a host or mirror holds the file and the moderator has not taken it down (a
+takedown also blocks `reopen`).
 
 **A seller may publish the body** (e.g. on IPFS): `info.public: true`. The client then downloads
 and checks the whole file before signing.
@@ -196,16 +242,22 @@ nobody until more arrive.
 
 ## 9. Browser clients
 
-As the HTTP transport requires ([browser clients](https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/http.md#browser-clients)):
+As the HTTP transport requires ([browser clients](https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/http.md#browser-clients)),
+for the file URL:
 
 - `Access-Control-Allow-Origin` for the calling origin on every response: the `402`, the paid
-  response, a retry's answer and every error. Without it the browser hides the whole response;
-- `Access-Control-Expose-Headers: PAYMENT-REQUIRED, PAYMENT-RESPONSE`, merged with any value already
-  there;
-- a preflight answered without payment, allowing the actual method,
-  `Access-Control-Allow-Headers: PAYMENT-SIGNATURE, Content-Type`, and a non-trivial
-  `Access-Control-Max-Age`;
-- `Vary: Origin` when origins are reflected, and the `402` kept out of shared caches.
+  response, a download, a retry's answer and every error. Without it the browser hides the whole
+  response;
+- `Access-Control-Expose-Headers: PAYMENT-REQUIRED, PAYMENT-RESPONSE, Annon-Session, Retry-After,
+  Content-Range, Content-Length`, merged with any value already there (a browser reads no other
+  response header across origins);
+- a preflight answered without payment or sign-in, allowing `GET`,
+  `Access-Control-Allow-Headers: PAYMENT-SIGNATURE, Annon-Buyer-Proof, SIGN-IN-WITH-X,
+  Authorization, Range, Content-Type`, and a non-trivial `Access-Control-Max-Age`;
+- no credentialed CORS: the session travels in `Authorization`, never in a cookie, and the client
+  sends no cookies (`credentials: "omit"`);
+- `Vary: Origin` on every response of a host that reflects origins, also to a request without
+  one, and every answer `Cache-Control: no-store`: each depends on who asks.
 
 ## 10. Retries: one purchase, one settlement
 
@@ -261,8 +313,10 @@ The answer always follows the purchase's state at the time of the request, never
 answer. A retry of a `processing` or `submitted` purchase, and any such purchase left behind by a
 crash, is reconciled from Base by its nonce, whether or not a hash is known: if its payment is on
 Base it is `settled`; if not and the payload can still settle, the server calls the facilitator
-again with the same payload (the same nonce settles at most once); if it can no longer settle, it
-is `unpaid`. The purchase stays open until one of these is certain.
+again with the same payload (the same nonce settles at most once), at most once per `Retry-After`
+interval after a call that did not settle; if it can no longer settle, it is `unpaid`. The purchase
+stays open until one of these is certain. A host also does this for a signed-in wallet's open
+purchases on this host, from their recorded payloads (`download.md` section 1).
 
 **Payment evidence.** A purchase is `settled` only on the same evidence NEAR's `unlock` checks: a
 successful Base transaction whose USDC `AuthorizationUsed(from, nonce)` log is followed by the
@@ -282,15 +336,55 @@ above: a purchase that is `processing`, `submitted` or `settled` is answered fro
 if sales have stopped or the seller's settings have changed since, or the authorization has
 expired. Only a purchase the server has not started settling goes through the rest of section 4:
 "still on sale", the deadline, and the comparison of the whole offer and info, seller settings
-(`maxTimeoutSeconds`, the `header` and `download` URLs, `public`) included. A facilitator may also
+(`maxTimeoutSeconds`, the `header` URL, `public`) included. A facilitator may also
 use the id; a seller does not rely on it.
 
-## 11. Changes from v1
+## 11. Extensions
+
+**Which ones.** A server advertises `annon` and `sign-in-with-x` always, `payment-identifier`
+(section 10), and may advertise `builder-code` and `bazaar`. A client echoes every advertised
+extension with at least the `info` it received, adds only what this profile names (`annon.info
+.buyerKey`, `payment-identifier.info.id`, the `builder-code` fields below), and echoes an extension
+it does not know unchanged. A server checks the extensions it advertised and ignores others.
+`forFacilitator` passes the payload's extensions on, except `bazaar` (below).
+
+**`builder-code`**
+([extension](https://github.com/x402-foundation/x402/blob/main/specs/extensions/builder_code.md)).
+A server may declare its app code as x402's `declareBuilderCodeExtension` does (`info.a`, and
+optionally its own service codes in `info.s`). The Annon client sends `extensions["builder-code"]`
+as x402's client merge does: the declared `info` (none if nothing was declared) with `info.s` set
+to the Annon SDK's service code `bc_lq0mq0v9` followed by the declared codes, duplicates removed.
+`info.s` may also be one code as a plain string, as the extension allows; it counts as a list of
+one. The server refuses, before anything is settled, a payload without the extension when it
+advertised it, whose `info.a` differs from the one it declared or is present when it declared
+none, whose `info.s` leaves out a code it declared, or whose codes break the extension's format
+(`^[a-z0-9_]{1,32}$`) and limits (at most 10 echoed service codes). The
+facilitator turns the codes into an ERC-8021 suffix on the settlement; none of this changes the
+payment evidence (section 10).
+
+**`bazaar`**
+([extension](https://github.com/x402-foundation/x402/blob/main/specs/extensions/bazaar.md)). A
+server may describe the file for discovery, in the shape of x402's `declareDiscoveryExtension`:
+`info.input` `{ "type": "http", "method": "GET" }`, `info.output` `{ "type": "binary", "format":
+"application/vnd.annon.pay2" }`, and the `resource` fields `description`, `mimeType`,
+`serviceName`, `tags` and `iconUrl` as the extension's service metadata rules keep them: a name
+and up to five tags, distinct ignoring case, of 1 to 32 printable ASCII characters, and an icon
+URL of at most 2048 characters with no credentials and a host name that is not an IP address or
+loopback. An Annon server uses an `https` icon URL and refuses metadata outside these rules
+rather than trimming it.
+It is never part of the payment: the client echoes it, the server does not check it, and
+`forFacilitator` leaves it out, because a facilitator would catalog the offer renamed `exact`
+(section 4), which an ordinary x402 client cannot pay. Discovery reads the seller's own `402`.
+
+## 12. Changes from v1
 
 | Section | v1.1 |
 |---|---|
-| 2 | `extensions.annon.info.version` is `2`; the server advertises `payment-identifier` |
+| 2 | `extensions.annon.info.version` is `2`; the server advertises `payment-identifier` and `sign-in-with-x`; `paymentFlow: "upfront"`; `info.download` is gone (the file is `resource.url`); a stopped file answers `402` with `accepts: []`; `extra.splits` refused |
 | 3 | the client sends a `payment-identifier` id when advertised |
-| 4 | retries are recognized before the checks of a new payment; `forFacilitator` keeps every extension and returns `x402Version: 2` |
-| 9 | `Access-Control-Allow-Origin` on every response, the preflight allows the method and is cached |
+| 4 | retries are recognized before the checks of a new payment; `forFacilitator` keeps every extension but `bazaar` and returns `x402Version: 2` |
+| 5 | `success` means paid on Base at `safe`, not that the key is released |
+| 7 | the paid request returns the file to a request with a proof by the purchase's one-time key (`Annon-Buyer-Proof`); a payload alone never gets the body; `processing` answers `503`; later downloads use x402 sign-in and a session of at most two hours instead of v1's per-download challenge |
+| 9 | `Access-Control-Allow-Origin` on every response; the sign-in, session and range headers allowed and exposed; no cookies |
 | 10 | new: purchase identity, what the client records and when, when a purchase closes, retries, the id binding and its lifetime, purchase states and their answers, reconciliation by nonce, payment evidence, order of checks (purchase terms before seller settings) |
+| 11 | new: which extensions a server advertises and a client echoes; `builder-code` (the Annon client's service code `bc_lq0mq0v9`); `bazaar` for discovery, never sent to a facilitator |
