@@ -72,6 +72,12 @@ export async function listDeliveries(
   if (!Array.isArray(ds) || ds.length > limit) throw new TypeError('invalid deliveries');
   return ds.map(delivery);
 }
+/** How many delivery ids exist; some have no record yet (refund leaves), so scan them all. */
+export async function deliveryCount(url: string, contract: string): Promise<number> {
+  const n = await view(url, contract, 'delivery_count', {});
+  integer(n as number);
+  return n as number;
+}
 export async function refundRoot(url: string, contract: string): Promise<RefundRoot> {
   const r = (await view(url, contract, 'refund_root', {})) as RefundRoot;
   bytes(r.root, 32);

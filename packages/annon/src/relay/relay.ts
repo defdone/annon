@@ -30,7 +30,7 @@ import {
   purchaseId,
 } from '../settle-near/purchase.js';
 import { type SettlementAssets, termsHash } from '../settle-near/terms.js';
-import { listDeliveries } from './keeper.js';
+import { deliveryCount, listDeliveries } from './keeper.js';
 
 export type RelayRequest =
   | { method: 'register'; args: RegisterArgs; auth: Authorization }
@@ -621,36 +621,30 @@ const KEEP_HOLD = 60_000;
 const PAGE = 50;
 
 export interface KeepResult {
-  /** The first delivery not yet fully paid: where the next pass can start. */
-  next: number;
   sent: { method: 'fund_delivery' | 'pay_slot'; args: object; result: RelayResult }[];
 }
 
 /**
- * One keeper pass over the deliveries from `from` on: a pending deposit gets `fund_delivery`, a
- * pending slot of a funded delivery gets `pay_slot`. Steps in flight are never sent again: only
- * their callback moves them on, so nothing is paid twice. Sent with the relayer's key, in the
- * same line as relayed requests. Anyone may make these calls; the contract fixes every amount
- * and destination.
+ * One keeper pass over every delivery id (`0 .. delivery_count`): a pending deposit gets
+ * `fund_delivery`, a pending slot of a funded delivery gets `pay_slot`. The whole range every
+ * time: a refund materialized from the refund tree takes an old, empty id, and a step can go back
+ * to pending after a failed transfer. Steps in flight are never sent again: only their callback
+ * moves them on, so nothing is paid twice. Sent with the relayer's key, in the same line as
+ * relayed requests. Anyone may make these calls; the contract fixes every amount and destination.
  */
-export async function keep(
-  o: { nearRpc: string; contractId: string; sender: Sender },
-  from = 0,
-): Promise<KeepResult> {
+// ponytail: a full scan per pass (one view per 50 ids, views are free); an index of open
+// deliveries in the contract if the count grows large.
+export async function keep(o: {
+  nearRpc: string;
+  contractId: string;
+  sender: Sender;
+}): Promise<KeepResult> {
   const sent: KeepResult['sent'] = [];
   const key = senderKey(o);
-  let next: number | undefined;
-  let cursor = from;
-  let after = from;
-  // ponytail: stops at the first empty page; 50 refund leaves in a row (no reserve) would hide
-  // later deliveries from this pass. A delivery count view if that ever happens.
-  for (;;) {
-    const page = await listDeliveries(o.nearRpc, o.contractId, cursor, PAGE);
-    if (page.length === 0) break;
-    for (const d of page) {
-      after = d.id + 1;
-      if (next === undefined && (d.fund.state !== 2 || d.slots.some((x) => x.step.state !== 2)))
-        next = d.id;
+  const count = await deliveryCount(o.nearRpc, o.contractId);
+  for (const [k, v] of held) if (v <= Date.now()) held.delete(k);
+  for (let from = 0; from < count; from += PAGE) {
+    for (const d of await listDeliveries(o.nearRpc, o.contractId, from, PAGE)) {
       const due: [KeepResult['sent'][number]['method'], object][] =
         d.fund.state === 0
           ? [['fund_delivery', { delivery_id: d.id }]]
@@ -673,9 +667,8 @@ export async function keep(
         sent.push({ method, args, result });
       }
     }
-    cursor += PAGE;
   }
-  return { next: next ?? after, sent };
+  return { sent };
 }
 
 /**
@@ -741,6 +734,7 @@ async function send(
 export {
   type DeliveryInfo,
   type DeliveryStep,
+  deliveryCount,
   fundDelivery,
   getDelivery,
   listDeliveries,

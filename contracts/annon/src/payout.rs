@@ -211,6 +211,12 @@ impl Annon {
             .map(|d| view(delivery_id, d))
     }
 
+    /// How many delivery ids exist (`0 .. count`). Some may have no record: a refund leaf keeps
+    /// its id until someone materializes it, so a keeper scans the whole range.
+    pub fn delivery_count(&self) -> u64 {
+        self.next_delivery
+    }
+
     /// Recorded deliveries with ids in `from .. from + limit` (at most 50); the keeper's work list.
     pub fn list_deliveries(&self, from: u64, limit: u64) -> Vec<DeliveryView> {
         (from..self.next_delivery.min(from.saturating_add(limit.min(50))))
@@ -422,6 +428,7 @@ mod tests {
         }
         let ids: Vec<u64> = c.list_deliveries(1, 10).iter().map(|d| d.id).collect();
         assert_eq!(ids, vec![1, 2]);
+        assert_eq!(c.delivery_count(), 3);
         assert_eq!(c.get_delivery(2).unwrap().slots[0].to.id, "buyer.near");
     }
 }

@@ -1074,6 +1074,9 @@ async fn without_a_reserve_a_refund_waits_in_the_tree_until_someone_materializes
     let out = w.pay_near(PRICE, &p.message()).await?;
     assert_eq!(answer(&out), json!(PRICE.to_string()));
     let leaf = &events(&out, "refund_leaf")[0];
+    let count: u64 = w.annon.view("delivery_count").await?.json()?;
+    assert_eq!(count, 1, "a leaf keeps its delivery id");
+    assert!(w.delivery(0).await?.is_null());
     assert!(!w.bought(&p).await?, "no storage, no purchase");
     println!("delivery into the refund tree: {} Tgas burnt", tgas(&out));
 

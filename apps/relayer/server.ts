@@ -168,15 +168,12 @@ export function serve(c: Config, port: number, keeperSeconds = 0) {
   );
 }
 
-/** Keeper passes every `seconds`, one at a time, each starting from the first unpaid delivery. */
+/** Keeper passes every `seconds`, one at a time, each over every delivery. */
 function keeper(c: Config, seconds: number) {
-  let from = 0;
   const pass = async () => {
     if (!c.disabled) {
       try {
-        const r = await keep(c, from);
-        from = r.next;
-        for (const s of r.sent)
+        for (const s of (await keep(c)).sent)
           console.log(
             JSON.stringify({
               at: new Date().toISOString(),
