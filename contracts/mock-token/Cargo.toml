@@ -1,0 +1,13 @@
+[package]
+name = "mock-token"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Test stand-in for NEAR USDC (NEP-141) and intents.near (deposits, mt_transfer), for Annon's sandbox tests only"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+near-sdk = "5.30.0"

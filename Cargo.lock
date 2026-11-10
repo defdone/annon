@@ -50,6 +50,7 @@ dependencies = [
  "near-sdk",
  "near-workspaces",
  "serde_json",
+ "sha2 0.10.9",
  "sha3 0.10.9",
  "tokio",
 ]
@@ -1944,6 +1945,13 @@ dependencies = [
 
 [[package]]
 name = "mock-mpc"
+version = "0.0.0"
+dependencies = [
+ "near-sdk",
+]
+
+[[package]]
+name = "mock-token"
 version = "0.0.0"
 dependencies = [
  "near-sdk",

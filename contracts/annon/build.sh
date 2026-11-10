@@ -1,11 +1,11 @@
 #!/bin/sh
-# Builds the contract wasm (and the MPC stand-in for sandbox tests), shrinks it with wasm-opt and
+# Builds the contract wasm (and the MPC and token stand-ins for sandbox tests), shrinks it with wasm-opt and
 # checks it only imports host functions mainnet has.
 # ponytail: plain cargo build for dev deploys; the final deploy uses cargo near reproducible-wasm
 set -e
 cd "$(dirname "$0")/../.."
 RUSTFLAGS="--cfg near -C target-cpu=mvp -C link-arg=-s" \
-  cargo build -p annon -p mock-mpc --lib --target wasm32-unknown-unknown --release
+  cargo build -p annon -p mock-mpc -p mock-token --lib --target wasm32-unknown-unknown --release
 WASM=target/wasm32-unknown-unknown/release/annon.wasm
 # About 20% smaller, so 20% less NEAR locked for storage. Keeps the features rustc already emits
 # (bulk memory, sign-ext), which mainnet accepts.

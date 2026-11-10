@@ -1,12 +1,15 @@
-//! Annon's real wasm in a local NEAR sandbox, with a stand-in for NEAR MPC (`contracts/mock-mpc`).
-//! Checks what unit tests can't: entrypoint guards, real gas, return values, refunds, events and a
-//! function-call key. Run `contracts/annon/build.sh` first; `--nocapture` prints the gas used.
+//! Annon's real wasm in a local NEAR sandbox, with stand-ins for NEAR MPC (`contracts/mock-mpc`)
+//! and for NEAR USDC and intents.near (`contracts/mock-token`). Checks what unit tests can't:
+//! entrypoint guards, real gas, the real NEP-141 call chain, the host's BLS12-381 and Ed25519
+//! checks, return values, refunds, events and a function-call key. Run `contracts/annon/build.sh`
+//! first; `--nocapture` prints the gas used.
 use k256::ecdsa::SigningKey;
 use near_workspaces::network::Sandbox;
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::types::{AccessKey, Gas, NearToken, SecretKey};
 use near_workspaces::{Account, Contract, Worker};
 use serde_json::{json, Value};
+use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
 const WASM_DIR: &str = concat!(
@@ -17,6 +20,10 @@ const USDC: &str = "0x5252525252525252525252525252525252525252";
 const AUTH_USED: &str = "AuthorizationUsed(address,bytes32)";
 const TRANSFER: &str = "Transfer(address,address,uint256)";
 const PRICE: u128 = 10_000;
+/// Real BLS12-381 G1 points, compressed: the generator and twice the generator.
+const G1: &str = "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb";
+const G1X2: &str = "0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e";
+const DEADLINE: u64 = 4_000_000_000;
 
 fn wasm(name: &str) -> Vec<u8> {
     std::fs::read(format!("{WASM_DIR}/{name}.wasm"))
@@ -29,6 +36,10 @@ fn keccak(b: &[u8]) -> [u8; 32] {
 
 fn hex0x(b: &[u8]) -> String {
     format!("0x{}", hex::encode(b))
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    hex::decode(s.trim_start_matches("0x")).unwrap()
 }
 
 struct Wallet(SigningKey);
@@ -51,13 +62,106 @@ impl Wallet {
         out.push(27 + recid.to_byte());
         hex0x(&out)
     }
+    fn id(&self) -> Value {
+        json!({ "kind": "evm", "id": self.address() })
+    }
+    fn auth(&self, text: &str) -> Value {
+        json!({ "kind": "evm", "sig": self.sign(text) })
+    }
+}
+
+/// An identity as the contract's Borsh encodes it (specs/near-settlement.md §2).
+fn borsh_identity(i: &Value) -> Vec<u8> {
+    let id = i["id"].as_str().unwrap();
+    match i["kind"].as_str().unwrap() {
+        "evm" => [vec![0], unhex(id)].concat(),
+        "solana" => [vec![1], unhex(id)].concat(),
+        _ => [vec![2], borsh_str(id)].concat(),
+    }
+}
+
+fn borsh_str(s: &str) -> Vec<u8> {
+    [
+        (s.len() as u32).to_le_bytes().to_vec(),
+        s.as_bytes().to_vec(),
+    ]
+    .concat()
+}
+
+/// A purchase message (§5.1) and its id (§5.2), built here from the spec, not by the contract.
+struct Purchase {
+    refund: Value,
+    network: String,
+    contract: String,
+    route: u8,
+    asset: String,
+    file_id: String,
+    terms_hash: String,
+    price: u128,
+    nonce: [u8; 32],
+    buyer_key: String,
+    recovery: Value,
+    expires_at: u64,
+}
+
+impl Purchase {
+    fn id(&self) -> [u8; 32] {
+        let mut b = vec![2u8];
+        b.extend(borsh_identity(&self.refund));
+        b.extend(borsh_str(&self.network));
+        b.extend(borsh_str(&self.contract));
+        b.push(self.route);
+        b.extend(borsh_str(&self.asset));
+        b.extend(unhex(&self.file_id));
+        b.extend(unhex(&self.terms_hash));
+        b.extend(self.price.to_le_bytes());
+        b.extend(self.nonce);
+        b.extend(unhex(&self.buyer_key));
+        b.extend(borsh_identity(&self.recovery));
+        b.extend(self.expires_at.to_le_bytes());
+        let mut h = Sha256::new();
+        h.update(b"annon/purchase/v2\0");
+        h.update(&b);
+        h.finalize().into()
+    }
+
+    fn id_hex(&self) -> String {
+        hex0x(&self.id())
+    }
+
+    fn message(&self) -> String {
+        let ident = |i: &Value| {
+            format!(
+                "{{\"kind\":\"{}\",\"id\":\"{}\"}}",
+                i["kind"].as_str().unwrap(),
+                i["id"].as_str().unwrap()
+            )
+        };
+        format!(
+            "{{\"annon\":2,\"refund\":{},\"purchase\":{{\"network\":\"{}\",\"contract\":\"{}\",\"route\":\"{}\",\"asset\":\"{}\",\"file_id\":\"{}\",\"terms_hash\":\"{}\",\"price\":\"{}\",\"nonce\":\"{}\",\"buyer_key\":\"{}\",\"recovery\":{},\"expires_at\":\"{}\",\"purchase_id\":\"{}\"}}}}",
+            ident(&self.refund), self.network, self.contract,
+            if self.route == 0 { "near-usdc" } else { "base-usdc" },
+            self.asset, self.file_id, self.terms_hash, self.price, hex0x(&self.nonce), self.buyer_key,
+            ident(&self.recovery), self.expires_at, self.id_hex(),
+        )
+    }
+
+    /// The EIP-3009 nonce of a Base purchase (§5.3).
+    fn base_nonce(&self) -> [u8; 32] {
+        keccak(&[b"annon/base-payment/v2\0".as_slice(), &self.id()].concat())
+    }
 }
 
 struct World {
     worker: Worker<Sandbox>,
     annon: Contract,
     mpc: Contract,
+    usdc: Contract,
+    intents: Contract,
     relayer: Account,
+    /// Pays NEAR USDC for purchases.
+    payer: Account,
+    platform: Account,
     seller: Wallet,
     buyer: Wallet,
 }
@@ -65,22 +169,35 @@ struct World {
 async fn world() -> anyhow::Result<World> {
     let worker = near_workspaces::sandbox().await?;
     let mpc = worker.dev_deploy(&wasm("mock_mpc")).await?;
+    let usdc = worker.dev_deploy(&wasm("mock_token")).await?;
+    let intents = worker.dev_deploy(&wasm("mock_token")).await?;
     let annon = worker.dev_deploy(&wasm("annon")).await?;
     annon
         .call("new")
         .args_json(
-            json!({ "mpc": mpc.id(), "ckd_domain": 2, "foreign_tx_domain": 3,
-            "usdc": USDC }),
+            json!({ "mpc": mpc.id(), "ckd_domain": 2, "foreign_tx_domain": 3, "usdc": USDC,
+            "near_usdc": usdc.id(), "intents": intents.id() }),
         )
         .transact()
         .await?
         .into_result()?;
     let relayer = worker.dev_create_account().await?;
+    let payer = worker.dev_create_account().await?;
+    let platform = worker.dev_create_account().await?;
+    usdc.call("mint")
+        .args_json(json!({ "account_id": payer.id(), "amount": "1000000" }))
+        .transact()
+        .await?
+        .into_result()?;
     Ok(World {
         worker,
         annon,
         mpc,
+        usdc,
+        intents,
         relayer,
+        payer,
+        platform,
         seller: Wallet::new(1),
         buyer: Wallet::new(7),
     })
@@ -88,10 +205,6 @@ async fn world() -> anyhow::Result<World> {
 
 fn topic_address(a: &str) -> String {
     format!("{}{}", "00".repeat(12), a.trim_start_matches("0x"))
-}
-
-fn h(b: &[u8; 32]) -> String {
-    hex::encode(b)
 }
 
 fn log(address: &str, index: u64, topics: Vec<String>, data: String) -> Value {
@@ -105,21 +218,38 @@ impl World {
         hex0x(&[n; 32])
     }
 
-    fn nonce(&self, file: &str, key: &str) -> [u8; 32] {
-        let mut m = b"annon/v1".to_vec();
-        m.extend_from_slice(self.annon.id().as_bytes());
-        m.extend_from_slice(&hex::decode(&file[2..]).unwrap());
-        m.extend_from_slice(&hex::decode(&key[2..]).unwrap());
-        keccak(&m)
-    }
-
-    /// The address buyers pay for every test file (Wallet 9).
+    /// The address buyers pay on Base, and the 95% share on NEAR (Wallet 9).
     fn pay_to(&self) -> String {
         Wallet::new(9).address()
     }
 
+    fn terms(&self, file: &str, seller: Value) -> Value {
+        json!({
+            "network": "near:mainnet", "contract": self.annon.id(), "file_id": file, "seller": seller,
+            "pay2_version": 2, "cipher_hash": hex0x(&[0x22; 32]), "moderator": self.relayer.id(),
+            "near": { "token": self.usdc.id(), "price": PRICE.to_string(), "remainder": 0, "recipients": [
+                { "identity": { "kind": "evm", "id": self.pay_to() }, "bps": 9500 },
+                { "identity": { "kind": "near", "id": self.platform.id() }, "bps": 500 },
+            ]},
+            "base": { "usdc": USDC, "price": PRICE.to_string(), "pay_to": self.pay_to() },
+        })
+    }
+
+    fn register_args(&self, file: &str, seller: Value) -> Value {
+        json!({ "terms": self.terms(file, seller), "seller_key": hex0x(&[0x33; 48]), "deadline": DEADLINE })
+    }
+
+    async fn text(&self, method: &str, args: &Value) -> anyhow::Result<String> {
+        Ok(self
+            .annon
+            .view(method)
+            .args_json(json!({ "args": args }))
+            .await?
+            .json()?)
+    }
+
     async fn register(&self, file: &str) -> anyhow::Result<ExecutionFinalResult> {
-        self.register_by(&self.relayer, file, NearToken::from_millinear(10))
+        self.register_by(&self.relayer, file, NearToken::from_millinear(20))
             .await
     }
 
@@ -129,35 +259,59 @@ impl World {
         file: &str,
         deposit: NearToken,
     ) -> anyhow::Result<ExecutionFinalResult> {
-        let args = json!({ "file_id": file, "seller": self.seller.address(), "price": PRICE.to_string(),
-            "pay_to": self.pay_to(), "cipher_hash": hex0x(&[0x22; 32]), "moderator": self.relayer.id(),
-            "seller_key": hex0x(&[0x33; 48]), "deadline": 4_000_000_000u64 });
-        let message: String = self
-            .annon
-            .view("register_message")
-            .args_json(json!({ "args": args }))
-            .await?
-            .json()?;
+        let args = self.register_args(file, self.seller.id());
+        let text = self.text("register_text", &args).await?;
         Ok(by
             .call(self.annon.id(), "register")
-            .args_json(json!({ "args": args, "sig": self.seller.sign(&message) }))
+            .args_json(json!({ "args": args, "auth": self.seller.auth(&text) }))
             .deposit(deposit)
             .gas(Gas::from_tgas(100))
             .transact()
             .await?)
     }
 
-    /// The USDC `AuthorizationUsed` and `Transfer` of one payment for `file` with buyer `key`.
-    fn payment_logs(&self, file: &str, key: &str) -> Value {
-        let pay_to = &self.pay_to();
+    async fn terms_hash(&self, file: &str) -> anyhow::Result<String> {
+        let f: Value = self
+            .annon
+            .view("get_file")
+            .args_json(json!({ "file_id": file }))
+            .await?
+            .json()?;
+        Ok(f["terms_hash"].as_str().unwrap().into())
+    }
+
+    async fn purchase(&self, file: &str, route: u8) -> anyhow::Result<Purchase> {
+        let (network, asset) = if route == 0 {
+            ("near:mainnet".to_string(), self.usdc.id().to_string())
+        } else {
+            ("eip155:8453".to_string(), USDC.to_string())
+        };
+        Ok(Purchase {
+            refund: self.buyer.id(),
+            network,
+            contract: self.annon.id().to_string(),
+            route,
+            asset,
+            file_id: file.into(),
+            terms_hash: self.terms_hash(file).await?,
+            price: PRICE,
+            nonce: [0x55; 32],
+            buyer_key: G1.into(),
+            recovery: self.buyer.id(),
+            expires_at: DEADLINE,
+        })
+    }
+
+    /// The USDC `AuthorizationUsed` and `Transfer` of one Base payment for `p`.
+    fn payment_logs(&self, p: &Purchase) -> Value {
         json!([
             log(
                 USDC,
                 7,
                 vec![
-                    h(&keccak(AUTH_USED.as_bytes())),
+                    hex::encode(keccak(AUTH_USED.as_bytes())),
                     topic_address(&self.buyer.address()),
-                    h(&self.nonce(file, key))
+                    hex::encode(p.base_nonce())
                 ],
                 "0x".into()
             ),
@@ -165,9 +319,9 @@ impl World {
                 USDC,
                 8,
                 vec![
-                    h(&keccak(TRANSFER.as_bytes())),
+                    hex::encode(keccak(TRANSFER.as_bytes())),
                     topic_address(&self.buyer.address()),
-                    topic_address(pay_to)
+                    topic_address(&self.pay_to())
                 ],
                 format!("0x{PRICE:064x}")
             ),
@@ -177,19 +331,97 @@ impl World {
     async fn unlock(
         &self,
         by: &Account,
-        file: &str,
-        key: &str,
+        p: &Purchase,
         logs: Value,
         deposit: NearToken,
         tgas: u64,
     ) -> anyhow::Result<ExecutionFinalResult> {
         Ok(by
             .call(self.annon.id(), "unlock")
-            .args_json(json!({ "args": { "file_id": file, "buyer_key": key, "logs": logs } }))
+            .args_json(json!({ "args": { "purchase": p.message(), "logs": logs } }))
             .deposit(deposit)
             .gas(Gas::from_tgas(tgas))
             .transact()
             .await?)
+    }
+
+    /// `amount` of NEAR USDC sent to Annon with `msg`, through the token's `ft_transfer_call`.
+    async fn pay_near(&self, amount: u128, msg: &str) -> anyhow::Result<ExecutionFinalResult> {
+        Ok(self
+            .payer
+            .call(self.usdc.id(), "ft_transfer_call")
+            .args_json(
+                json!({ "receiver_id": self.annon.id(), "amount": amount.to_string(), "msg": msg }),
+            )
+            .deposit(NearToken::from_yoctonear(1))
+            .gas(Gas::from_tgas(300))
+            .transact()
+            .await?)
+    }
+
+    async fn fund_reserve(&self) -> anyhow::Result<()> {
+        self.relayer
+            .call(self.annon.id(), "fund_receiver_reserve")
+            .deposit(NearToken::from_near(1))
+            .transact()
+            .await?
+            .into_result()?;
+        Ok(())
+    }
+
+    async fn keeper(
+        &self,
+        method: &str,
+        args: Value,
+        tgas: u64,
+    ) -> anyhow::Result<ExecutionFinalResult> {
+        Ok(self
+            .relayer
+            .call(self.annon.id(), method)
+            .args_json(args)
+            .gas(Gas::from_tgas(tgas))
+            .transact()
+            .await?)
+    }
+
+    async fn delivery(&self, id: u64) -> anyhow::Result<Value> {
+        Ok(self
+            .annon
+            .view("get_delivery")
+            .args_json(json!({ "delivery_id": id }))
+            .await?
+            .json()?)
+    }
+
+    async fn ft_balance(&self, of: &str) -> anyhow::Result<u128> {
+        let b: String = self
+            .usdc
+            .view("ft_balance_of")
+            .args_json(json!({ "account_id": of }))
+            .await?
+            .json()?;
+        Ok(b.parse()?)
+    }
+
+    async fn intents_balance(&self, of: &str) -> anyhow::Result<u128> {
+        let b: String = self
+            .intents
+            .view("mt_balance_of")
+            .args_json(
+                json!({ "account_id": of, "token_id": format!("nep141:{}", self.usdc.id()) }),
+            )
+            .await?
+            .json()?;
+        Ok(b.parse()?)
+    }
+
+    async fn set_mode(&self, c: &Contract, mode: &str) -> anyhow::Result<()> {
+        c.call("set_mode")
+            .args_json(json!({ "mode": mode }))
+            .transact()
+            .await?
+            .into_result()?;
+        Ok(())
     }
 
     async fn mode(&self, verify: &str, ckd: &str) -> anyhow::Result<()> {
@@ -202,13 +434,14 @@ impl World {
         Ok(())
     }
 
-    async fn is_buyer(&self, file: &str) -> anyhow::Result<bool> {
-        Ok(self
+    async fn bought(&self, p: &Purchase) -> anyhow::Result<bool> {
+        let v: Value = self
             .annon
-            .view("is_buyer")
-            .args_json(json!({ "file_id": file, "wallet": self.buyer.address() }))
+            .view("get_purchase")
+            .args_json(json!({ "purchase_id": p.id_hex() }))
             .await?
-            .json()?)
+            .json()?;
+        Ok(!v.is_null())
     }
 
     async fn balance(&self, of: &Account) -> anyhow::Result<u128> {
@@ -250,8 +483,7 @@ async fn nobody_but_the_contract_account_can_initialize_it() -> anyhow::Result<(
     let out = attacker
         .call(annon.id(), "new")
         .args_json(
-            json!({ "mpc": attacker.id(), "ckd_domain": 2, "foreign_tx_domain": 3,
-            "usdc": USDC }),
+            json!({ "mpc": attacker.id(), "ckd_domain": 2, "foreign_tx_domain": 3, "usdc": USDC }),
         )
         .transact()
         .await?;
@@ -262,57 +494,111 @@ async fn nobody_but_the_contract_account_can_initialize_it() -> anyhow::Result<(
 #[tokio::test]
 async fn callbacks_are_private() -> anyhow::Result<()> {
     let w = world().await?;
-    let out = w.relayer.call(w.annon.id(), "on_key_released")
-        .args_json(json!({ "file_id": w.file(1), "key": hex0x(&[0x44; 48]), "reason": "reopen", "wallet": w.buyer.address() }))
-        .transact().await?;
-    assert!(out.is_failure(), "on_key_released is callable from outside");
+    for (method, args) in [
+        (
+            "on_key_released",
+            json!({ "file_id": w.file(1), "key": G1, "reason": "claim", "who": "x" }),
+        ),
+        ("on_funded", json!({ "delivery_id": 0, "attempt": 1 })),
+        (
+            "on_paid",
+            json!({ "delivery_id": 0, "slot": 0, "attempt": 1 }),
+        ),
+    ] {
+        let out = w
+            .relayer
+            .call(w.annon.id(), method)
+            .args_json(args)
+            .transact()
+            .await?;
+        assert!(out.is_failure(), "{method} is callable from outside");
+    }
     Ok(())
 }
 
 #[tokio::test]
-async fn register_returns_the_key_answer_and_logs_receipts() -> anyhow::Result<()> {
+async fn sellers_of_every_kind_register_and_get_the_key() -> anyhow::Result<()> {
     let w = world().await?;
     let out = w.register(&w.file(1)).await?;
     assert!(out.is_success(), "{:?}", out.failures());
-    let answer = answer(&out);
-    assert_eq!(answer["big_y"], "bls12381g1:mockY");
-    assert!(answer["big_c"]
+    let a = answer(&out);
+    assert_eq!(a["big_y"], "bls12381g1:mockY");
+    assert!(a["big_c"]
         .as_str()
         .unwrap()
         .ends_with(&format!("file/{}", "01".repeat(32))));
-    assert_eq!(events(&out, "register").len(), 1);
+    assert_eq!(events(&out, "file_registered").len(), 1);
     assert_eq!(events(&out, "key_released")[0]["reason"], "register");
-    println!("register: {} Tgas burnt", tgas(&out));
+    println!("register (EVM seller): {} Tgas burnt", tgas(&out));
+
+    // A Solana seller: the host's ed25519_verify over the UTF-8 text.
+    use ed25519_dalek::Signer;
+    let sol = ed25519_dalek::SigningKey::from_bytes(&[4; 32]);
+    let id = json!({ "kind": "solana", "id": hex::encode(sol.verifying_key().to_bytes()) });
+    let args = w.register_args(&w.file(2), id);
+    let text = w.text("register_text", &args).await?;
+    let sig = hex0x(&sol.sign(text.as_bytes()).to_bytes());
+    let out = w
+        .relayer
+        .call(w.annon.id(), "register")
+        .args_json(json!({ "args": args, "auth": { "kind": "solana", "sig": sig } }))
+        .deposit(NearToken::from_millinear(20))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    println!("register (Solana seller): {} Tgas burnt", tgas(&out));
+
+    // A NEAR seller calls itself; nobody else can register for it.
+    let id = json!({ "kind": "near", "id": w.platform.id() });
+    let args = w.register_args(&w.file(3), id);
+    let out = w
+        .relayer
+        .call(w.annon.id(), "register")
+        .args_json(json!({ "args": args }))
+        .deposit(NearToken::from_millinear(20))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?;
+    assert!(out.is_failure());
+    let out = w
+        .platform
+        .call(w.annon.id(), "register")
+        .args_json(json!({ "args": args }))
+        .deposit(NearToken::from_millinear(20))
+        .gas(Gas::from_tgas(100))
+        .transact()
+        .await?;
+    assert!(out.is_success(), "{:?}", out.failures());
     Ok(())
 }
 
 #[tokio::test]
-async fn a_purchase_releases_the_key_with_the_minimum_gas() -> anyhow::Result<()> {
+async fn a_base_purchase_releases_the_key_with_the_minimum_gas() -> anyhow::Result<()> {
     let w = world().await?;
     let file = w.file(2);
-    let key = hex0x(&[0x33; 48]);
     w.register(&file).await?.into_result()?;
+    let p = w.purchase(&file, 1).await?;
     let out = w
         .unlock(
             &w.relayer,
-            &file,
-            &key,
-            w.payment_logs(&file, &key),
-            NearToken::from_millinear(5),
+            &p,
+            w.payment_logs(&p),
+            NearToken::from_millinear(10),
             150,
         )
         .await?;
     assert!(out.is_success(), "{:?}", out.failures());
-    let answer = answer(&out);
     assert_eq!(
-        answer["big_y"], "bls12381g1:mockY",
+        answer(&out)["big_y"],
+        "bls12381g1:mockY",
         "unlock must return the CKD answer"
     );
     let paid = &events(&out, "payment_verified")[0];
     assert_eq!(paid["payer"], w.buyer.address());
-    assert_eq!(paid["amount"], PRICE.to_string());
+    assert_eq!(paid["purchase_id"], p.id_hex());
     assert_eq!(events(&out, "key_released")[0]["reason"], "unlock");
-    assert!(w.is_buyer(&file).await?);
+    assert!(w.bought(&p).await?);
     let used: bool = w
         .annon
         .view("is_payment_used")
@@ -330,7 +616,6 @@ async fn a_failed_check_refunds_the_reservation_and_the_payment_can_be_retried(
 ) -> anyhow::Result<()> {
     let w = world().await?;
     let file = w.file(4);
-    let key = hex0x(&[0x33; 48]);
     w.register(&file).await?.into_result()?;
     w.relayer
         .call(w.annon.id(), "storage_deposit")
@@ -340,15 +625,15 @@ async fn a_failed_check_refunds_the_reservation_and_the_payment_can_be_retried(
         .await?
         .into_result()?;
     let start = w.balance(&w.relayer).await?;
+    let p = w.purchase(&file, 1).await?;
 
     for bad in ["fail", "wrong_hash"] {
         w.mode(bad, "ok").await?;
         let out = w
             .unlock(
                 &w.relayer,
-                &file,
-                &key,
-                w.payment_logs(&file, &key),
+                &p,
+                w.payment_logs(&p),
                 NearToken::from_yoctonear(0),
                 150,
             )
@@ -364,16 +649,15 @@ async fn a_failed_check_refunds_the_reservation_and_the_payment_can_be_retried(
             start,
             "{bad}: reservation not restored"
         );
-        assert!(!w.is_buyer(&file).await?);
+        assert!(!w.bought(&p).await?);
     }
 
     w.mode("ok", "ok").await?;
     let out = w
         .unlock(
             &w.relayer,
-            &file,
-            &key,
-            w.payment_logs(&file, &key),
+            &p,
+            w.payment_logs(&p),
             NearToken::from_yoctonear(0),
             150,
         )
@@ -384,25 +668,25 @@ async fn a_failed_check_refunds_the_reservation_and_the_payment_can_be_retried(
         "retry after failures must work"
     );
     let spent = start - w.balance(&w.relayer).await?;
-    println!("storage for one purchase: {spent} yoctoNEAR");
-    assert!(spent > 0 && spent < NearToken::from_millinear(5).as_yoctonear());
+    println!("storage for one Base purchase: {spent} yoctoNEAR");
+    assert!(spent > 0 && spent < NearToken::from_millinear(10).as_yoctonear());
     Ok(())
 }
 
 #[tokio::test]
-async fn a_failed_key_release_keeps_the_purchase_and_reopen_gets_the_key() -> anyhow::Result<()> {
+async fn a_failed_key_release_keeps_the_purchase_and_the_buyer_gets_the_key_later(
+) -> anyhow::Result<()> {
     let w = world().await?;
     let file = w.file(5);
-    let key = hex0x(&[0x33; 48]);
     w.register(&file).await?.into_result()?;
+    let p = w.purchase(&file, 1).await?;
     w.mode("ok", "fail").await?;
     let out = w
         .unlock(
             &w.relayer,
-            &file,
-            &key,
-            w.payment_logs(&file, &key),
-            NearToken::from_millinear(5),
+            &p,
+            w.payment_logs(&p),
+            NearToken::from_millinear(10),
             150,
         )
         .await?;
@@ -411,65 +695,61 @@ async fn a_failed_key_release_keeps_the_purchase_and_reopen_gets_the_key() -> an
         events(&out, "key_released").is_empty(),
         "no receipt without a key"
     );
-    assert!(answer(&out)["error"].as_str().unwrap().contains("reopen"));
-    assert!(w.is_buyer(&file).await?);
-
-    w.mode("ok", "ok").await?;
-    let reopen = |k: u8, deposit: NearToken| {
-        let w = &w;
-        let file = file.clone();
-        async move {
-            let args = json!({ "file_id": file, "wallet": w.buyer.address(), "key": hex0x(&[k; 48]), "deadline": 4_000_000_000u64 });
-            let message: String = w
-                .annon
-                .view("reopen_message")
-                .args_json(json!({ "args": args }))
-                .await?
-                .json()?;
-            w.relayer
-                .call(w.annon.id(), "reopen")
-                .args_json(json!({ "args": args, "sig": w.buyer.sign(&message) }))
-                .deposit(deposit)
-                .gas(Gas::from_tgas(100))
-                .transact()
-                .await
-        }
-    };
-    let before = w.relayer.view_account().await?.balance;
-    let out = reopen(0x44, NearToken::from_near(1)).await?;
-    assert_eq!(events(&out, "key_released")[0]["reason"], "reopen");
-    println!("reopen: {} Tgas burnt", tgas(&out));
-    let spent = before.as_yoctonear() - w.relayer.view_account().await?.balance.as_yoctonear();
-    assert!(
-        spent < NearToken::from_millinear(20).as_yoctonear(),
-        "the deposit beyond the marker's storage must come back, spent {spent}"
-    );
-
-    // The same reopen sent again (a replay, or a relayer resending): refused, no second release.
-    let again = reopen(0x44, NearToken::from_millinear(1)).await?;
-    assert!(again.is_failure());
-    assert!(format!("{:?}", again.failures()).contains("already used to reopen"));
-    assert!(events(&again, "key_released").is_empty());
-
-    // Too little for the marker: nothing is kept, so the same key can try again.
-    let short = reopen(0x55, NearToken::from_yoctonear(1)).await?;
-    assert!(format!("{:?}", short.failures()).contains("attach at least"));
-    assert!(events(&short, "key_released").is_empty());
-
-    // MPC fails after the marker is written: the key stays used, a fresh one still works.
-    w.mode("ok", "fail").await?;
-    let failed = reopen(0x55, NearToken::from_millinear(1)).await?;
-    assert!(failed.is_success(), "{:?}", failed.failures());
-    assert!(events(&failed, "key_released").is_empty());
-    assert!(answer(&failed)["error"]
+    assert!(answer(&out)["error"]
         .as_str()
         .unwrap()
-        .contains("reopen"));
+        .contains("ask again"));
+    assert!(w.bought(&p).await?);
+
     w.mode("ok", "ok").await?;
-    let used = reopen(0x55, NearToken::from_millinear(1)).await?;
-    assert!(format!("{:?}", used.failures()).contains("already used to reopen"));
-    let fresh = reopen(0x66, NearToken::from_millinear(1)).await?;
-    assert_eq!(events(&fresh, "key_released")[0]["reason"], "reopen");
+    let out = w
+        .keeper("claim_key", json!({ "purchase_id": p.id_hex() }), 100)
+        .await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    assert_eq!(events(&out, "key_released")[0]["reason"], "claim");
+    println!("claim_key: {} Tgas burnt", tgas(&out));
+
+    // A new device: the recovery wallet adds a grant for a fresh key. The same request again
+    // gives the same grant.
+    let args = json!({ "purchase_id": p.id_hex(), "fresh_key": G1X2, "nonce": hex0x(&[7; 32]), "deadline": DEADLINE });
+    let text = w.text("reopen_text", &args).await?;
+    for _ in 0..2 {
+        let out = w
+            .relayer
+            .call(w.annon.id(), "reopen")
+            .args_json(json!({ "args": args, "auth": w.buyer.auth(&text) }))
+            .deposit(NearToken::from_millinear(10))
+            .gas(Gas::from_tgas(100))
+            .transact()
+            .await?;
+        assert!(out.is_success(), "{:?}", out.failures());
+        assert_eq!(events(&out, "key_released")[0]["grant"], 1);
+    }
+    let v: Value = w
+        .annon
+        .view("get_purchase")
+        .args_json(json!({ "purchase_id": p.id_hex() }))
+        .await?
+        .json()?;
+    assert_eq!(v["grants"], 2);
+
+    // The seller's own reopen runs once per one-time key.
+    let args = json!({ "file_id": file, "key": G1X2, "deadline": DEADLINE });
+    let text = w.text("reopen_seller_text", &args).await?;
+    let send = || {
+        w.relayer
+            .call(w.annon.id(), "reopen_seller")
+            .args_json(json!({ "args": args, "auth": w.seller.auth(&text) }))
+            .deposit(NearToken::from_millinear(10))
+            .gas(Gas::from_tgas(100))
+            .transact()
+    };
+    assert_eq!(
+        events(&send().await?, "key_released")[0]["reason"],
+        "reopen"
+    );
+    let again = send().await?;
+    assert!(format!("{:?}", again.failures()).contains("already used"));
     Ok(())
 }
 
@@ -478,7 +758,6 @@ async fn a_function_call_key_registers_and_unlocks_from_a_prepaid_balance_but_ca
 ) -> anyhow::Result<()> {
     let w = world().await?;
     let file = w.file(6);
-    let key = hex0x(&[0x33; 48]);
     w.register(&file).await?.into_result()?;
     w.relayer
         .call(w.annon.id(), "storage_deposit")
@@ -488,7 +767,7 @@ async fn a_function_call_key_registers_and_unlocks_from_a_prepaid_balance_but_ca
         .await?
         .into_result()?;
 
-    // The relayer's hot key: function-call only, limited to Annon's relayed methods.
+    // The relayer's hot key: function-call only, limited to the methods it relays.
     let hot = SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
     w.relayer
         .batch(w.relayer.id())
@@ -496,7 +775,16 @@ async fn a_function_call_key_registers_and_unlocks_from_a_prepaid_balance_but_ca
             hot.public_key(),
             AccessKey::function_call_access(
                 w.annon.id(),
-                &["register", "unlock", "reopen", "stop_sales"],
+                &[
+                    "register",
+                    "unlock",
+                    "reopen",
+                    "reopen_seller",
+                    "stop_sales",
+                    "claim_key",
+                    "fund_delivery",
+                    "pay_slot",
+                ],
                 None,
             ),
         )
@@ -505,26 +793,24 @@ async fn a_function_call_key_registers_and_unlocks_from_a_prepaid_balance_but_ca
         .into_result()?;
     let agent = Account::from_secret_key(w.relayer.id().clone(), hot, &w.worker);
 
-    // A listing paid from the balance: the hot key can't attach a deposit.
     let before = w.balance(&w.relayer).await?;
-    let listed = w.file(7);
     let out = w
-        .register_by(&agent, &listed, NearToken::from_yoctonear(0))
+        .register_by(&agent, &w.file(7), NearToken::from_yoctonear(0))
         .await?;
     assert!(out.is_success(), "{:?}", out.failures());
     let used = before - w.balance(&w.relayer).await?;
     assert!(
-        used > 0 && used < NearToken::from_millinear(5).as_yoctonear(),
-        "register took {used} yocto from the balance"
+        used > 0 && used < NearToken::from_millinear(10).as_yoctonear(),
+        "register took {used} yocto"
     );
     println!("register from the prepaid balance: {used} yoctoNEAR of storage");
 
+    let p = w.purchase(&file, 1).await?;
     let out = w
         .unlock(
             &agent,
-            &file,
-            &key,
-            w.payment_logs(&file, &key),
+            &p,
+            w.payment_logs(&p),
             NearToken::from_yoctonear(0),
             150,
         )
@@ -549,7 +835,6 @@ async fn a_function_call_key_registers_and_unlocks_from_a_prepaid_balance_but_ca
 async fn a_takedown_blocks_unlock_until_restore() -> anyhow::Result<()> {
     let w = world().await?;
     let file = w.file(7);
-    let key = hex0x(&[0x33; 48]);
     w.register(&file).await?.into_result()?; // moderator: the relayer account
     w.relayer
         .call(w.annon.id(), "takedown")
@@ -558,13 +843,13 @@ async fn a_takedown_blocks_unlock_until_restore() -> anyhow::Result<()> {
         .transact()
         .await?
         .into_result()?;
+    let p = w.purchase(&file, 1).await?;
     let out = w
         .unlock(
             &w.relayer,
-            &file,
-            &key,
-            w.payment_logs(&file, &key),
-            NearToken::from_millinear(5),
+            &p,
+            w.payment_logs(&p),
+            NearToken::from_millinear(10),
             150,
         )
         .await?;
@@ -579,10 +864,9 @@ async fn a_takedown_blocks_unlock_until_restore() -> anyhow::Result<()> {
     let out = w
         .unlock(
             &w.relayer,
-            &file,
-            &key,
-            w.payment_logs(&file, &key),
-            NearToken::from_millinear(5),
+            &p,
+            w.payment_logs(&p),
+            NearToken::from_millinear(10),
             150,
         )
         .await?;
@@ -607,25 +891,20 @@ async fn after_a_stop_unlock_reads_the_payment_time_from_the_real_block_header(
 ) -> anyhow::Result<()> {
     let w = world().await?;
     let file = w.file(9);
-    let key = hex0x(&[0x33; 48]);
     w.register(&file).await?.into_result()?;
-    let stop = json!({ "file_id": file, "deadline": 4_000_000_000u64 });
-    let message: String = w
-        .annon
-        .view("stop_sales_message")
-        .args_json(json!({ "args": stop }))
-        .await?
-        .json()?;
+    let stop = json!({ "file_id": file, "deadline": DEADLINE });
+    let text = w.text("stop_sales_text", &stop).await?;
     w.relayer
         .call(w.annon.id(), "stop_sales")
-        .args_json(json!({ "args": stop, "sig": w.seller.sign(&message) }))
+        .args_json(json!({ "args": stop, "auth": w.seller.auth(&text) }))
         .transact()
         .await?
         .into_result()?;
 
     // The payment sits in a real Base block from before the stop (3 Nov 2026).
+    let p = w.purchase(&file, 1).await?;
     let (header, hash, number) = real_header(0);
-    let mut logs = w.payment_logs(&file, &key);
+    let mut logs = w.payment_logs(&p);
     for i in 0..2 {
         logs[i]["block_hash"] = json!(hash);
         logs[i]["block_number"] = json!(number);
@@ -633,29 +912,190 @@ async fn after_a_stop_unlock_reads_the_payment_time_from_the_real_block_header(
     let send = |header: Option<String>| {
         w.relayer
             .call(w.annon.id(), "unlock")
-            .args_json(json!({ "args": { "file_id": file, "buyer_key": key, "logs": logs, "header": header } }))
-            .deposit(NearToken::from_millinear(5))
+            .args_json(
+                json!({ "args": { "purchase": p.message(), "logs": logs, "header": header } }),
+            )
+            .deposit(NearToken::from_millinear(10))
             .gas(Gas::from_tgas(150))
             .transact()
     };
-
     let without = send(None).await?;
     assert!(format!("{:?}", without.failures()).contains("send the payment's block header"));
     let (other, ..) = real_header(4);
     let wrong = send(Some(other)).await?;
     assert!(format!("{:?}", wrong.failures()).contains("the header is not the payment's block"));
-    assert!(
-        !w.is_buyer(&file).await?,
-        "a refused unlock records nothing"
-    );
+    assert!(!w.bought(&p).await?, "a refused unlock records nothing");
 
     let out = send(Some(header)).await?;
     assert!(out.is_success(), "{:?}", out.failures());
-    assert!(w.is_buyer(&file).await?);
+    assert!(w.bought(&p).await?);
     println!(
         "unlock with a header after a stop: {} Tgas burnt",
         tgas(&out)
     );
     assert!(tgas(&out) < 120, "unlock burnt {} Tgas", tgas(&out));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_near_purchase_is_split_through_intents_and_releases_the_key() -> anyhow::Result<()> {
+    let w = world().await?;
+    let file = w.file(10);
+    w.register(&file).await?.into_result()?;
+    w.fund_reserve().await?;
+    let p = w.purchase(&file, 0).await?;
+    let start = w.ft_balance(w.payer.id().as_str()).await?;
+
+    // The real NEP-141 chain; the host checks the buyer key (BLS12-381) on the way.
+    let out = w.pay_near(PRICE + 2_000, &p.message()).await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    assert_eq!(
+        answer(&out),
+        json!((PRICE + 2_000).to_string()),
+        "the contract keeps all of it"
+    );
+    assert_eq!(
+        events(&out, "purchase_accepted")[0]["purchase_id"],
+        p.id_hex()
+    );
+    println!(
+        "NEAR purchase through ft_transfer_call: {} Tgas burnt",
+        tgas(&out)
+    );
+    assert_eq!(
+        w.ft_balance(w.payer.id().as_str()).await?,
+        start - PRICE - 2_000
+    );
+    assert!(w.bought(&p).await?);
+
+    let out = w
+        .keeper("claim_key", json!({ "purchase_id": p.id_hex() }), 100)
+        .await?;
+    assert_eq!(answer(&out)["big_y"], "bls12381g1:mockY");
+
+    let out = w
+        .keeper("fund_delivery", json!({ "delivery_id": 0 }), 150)
+        .await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    println!("fund_delivery: {} Tgas burnt", tgas(&out));
+    assert_eq!(w.delivery(0).await?["fund"]["state"], 2);
+    assert_eq!(
+        w.intents_balance(w.annon.id().as_str()).await?,
+        PRICE + 2_000
+    );
+
+    for slot in 0..3 {
+        let out = w
+            .keeper("pay_slot", json!({ "delivery_id": 0, "slot": slot }), 80)
+            .await?;
+        assert!(out.is_success(), "{:?}", out.failures());
+        assert_eq!(events(&out, "slot_paid").len(), 1, "slot {slot}");
+        println!("pay_slot {slot}: {} Tgas burnt", tgas(&out));
+    }
+    assert_eq!(w.intents_balance(&w.pay_to()).await?, 9_500);
+    assert_eq!(w.intents_balance(w.platform.id().as_str()).await?, 500);
+    assert_eq!(
+        w.intents_balance(&w.buyer.address()).await?,
+        2_000,
+        "the excess back to the refund identity"
+    );
+    assert_eq!(w.intents_balance(w.annon.id().as_str()).await?, 0);
+    let again = w
+        .keeper("pay_slot", json!({ "delivery_id": 0, "slot": 0 }), 80)
+        .await?;
+    assert!(again.is_failure(), "a paid slot was paid again");
+    Ok(())
+}
+
+#[tokio::test]
+async fn refunds_are_automatic_and_foreign_messages_bounce() -> anyhow::Result<()> {
+    let w = world().await?;
+    let file = w.file(11);
+    w.register(&file).await?.into_result()?;
+    w.fund_reserve().await?;
+    let p = w.purchase(&file, 0).await?;
+    let start = w.ft_balance(w.payer.id().as_str()).await?;
+
+    // Not an Annon purchase: NEP-141 sends it all back to the payer.
+    let out = w.pay_near(PRICE, "hello").await?;
+    assert_eq!(answer(&out), json!("0"));
+    assert_eq!(w.ft_balance(w.payer.id().as_str()).await?, start);
+
+    // Underpaid: kept, and owed back to the refund identity.
+    let out = w.pay_near(PRICE - 1, &p.message()).await?;
+    assert_eq!(answer(&out), json!((PRICE - 1).to_string()));
+    assert_eq!(events(&out, "refund_due")[0]["reason"], 9);
+    assert!(!w.bought(&p).await?);
+
+    // A buyer key off the curve, checked by the host: refunded too.
+    let bad = Purchase {
+        buyer_key: hex0x(&[0x33; 48]),
+        ..w.purchase(&file, 0).await?
+    };
+    let out = w.pay_near(PRICE, &bad.message()).await?;
+    assert_eq!(events(&out, "refund_due")[0]["reason"], 1);
+
+    // Funding refused by Intents: nothing counted, retried later in full.
+    w.set_mode(&w.intents, "refuse_deposit").await?;
+    w.keeper("fund_delivery", json!({ "delivery_id": 0 }), 150)
+        .await?
+        .into_result()?;
+    let d = w.delivery(0).await?;
+    assert_eq!(
+        (d["fund"]["state"].clone(), d["funded"].clone()),
+        (json!(0), json!("0"))
+    );
+    w.set_mode(&w.intents, "ok").await?;
+    w.keeper("fund_delivery", json!({ "delivery_id": 0 }), 150)
+        .await?
+        .into_result()?;
+
+    // A failed transfer: pending again, paid on retry, never twice.
+    w.set_mode(&w.intents, "fail_mt").await?;
+    w.keeper("pay_slot", json!({ "delivery_id": 0, "slot": 0 }), 80)
+        .await?
+        .into_result()?;
+    assert_eq!(w.delivery(0).await?["slots"][0]["step"]["state"], 0);
+    w.set_mode(&w.intents, "ok").await?;
+    w.keeper("pay_slot", json!({ "delivery_id": 0, "slot": 0 }), 80)
+        .await?
+        .into_result()?;
+    assert_eq!(w.intents_balance(&w.buyer.address()).await?, PRICE - 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn without_a_reserve_a_refund_waits_in_the_tree_until_someone_materializes_it(
+) -> anyhow::Result<()> {
+    let w = world().await?;
+    let file = w.file(12);
+    w.register(&file).await?.into_result()?;
+    let p = w.purchase(&file, 0).await?;
+    let out = w.pay_near(PRICE, &p.message()).await?;
+    assert_eq!(answer(&out), json!(PRICE.to_string()));
+    let leaf = &events(&out, "refund_leaf")[0];
+    assert!(!w.bought(&p).await?, "no storage, no purchase");
+    println!("delivery into the refund tree: {} Tgas burnt", tgas(&out));
+
+    // A tree with one leaf: its proof is the empty subtrees.
+    let mut zero = [0u8; 32];
+    let mut proof = vec![];
+    for _ in 0..32 {
+        proof.push(hex0x(&zero));
+        let mut h = Sha256::new();
+        h.update([1u8]);
+        h.update(zero);
+        h.update(zero);
+        zero = h.finalize().into();
+    }
+    let out = w.relayer.call(w.annon.id(), "materialize_refund")
+        .args_json(json!({ "leaf": { "delivery_id": leaf["delivery_id"], "refund": w.buyer.id(), "amount": PRICE.to_string() },
+            "index": 0, "proof": proof }))
+        .deposit(NearToken::from_millinear(20)).gas(Gas::from_tgas(100)).transact().await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    assert_eq!(
+        w.delivery(0).await?["slots"][0]["amount"],
+        PRICE.to_string()
+    );
     Ok(())
 }

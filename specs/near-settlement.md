@@ -255,9 +255,9 @@ obligation (§7). Events carry every leaf so anyone (the keeper) can build proof
   valid until: <UTC>
   ```
   creates the next grant (identical request → same grant) and requests CKD. Earlier grants stay.
-- Seller: `reopen_seller` and `stop_sales` with the same identity authorization (texts in the
-  contract's `reopen_seller_text` / `stop_sales_text`, ending with `seller: <identity text form>`).
-  Stop is final.
+- Seller: `reopen_seller` and `stop_sales` with the same identity authorization (texts from the
+  contract's `reopen_seller_text` / `stop_sales_text`, which name the seller in a
+  `seller: <identity text form>` line). Stop is final.
 - `purchases_of(recovery: Identity, from, limit)` finds purchases on a fresh device.
 - Downloads: the existing buyer proof (`specs/download.md`) plus `purchase_id` and `grant`; the
   host checks the proof against that grant's key at finality.
