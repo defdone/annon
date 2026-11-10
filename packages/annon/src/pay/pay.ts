@@ -6,6 +6,7 @@
  * request is only compared against it. The host can make the purchase fail, not misdirect it.
  */
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 import { type Inspected, inspect, inspectHeader, Pay2Error } from '../envelope/pay2.js';
 import { type FileInfo, getConfig, getFile, isBuyer } from '../near/rpc.js';
 import {
@@ -29,9 +30,18 @@ import {
   typedData,
 } from './eip3009.js';
 import {
+  bounds,
+  type PaymentAttempt,
+  type PurchaseRecord,
+  purchaseKey,
+  randomHex,
+} from './purchase.js';
+import type { Store } from './store.js';
+import {
   ANNON_EXACT,
   BASE_NETWORK,
   type Offer,
+  PAYMENT_IDENTIFIER,
   type PaymentRequired,
   paymentSignature,
 } from './x402.js';
@@ -220,29 +230,6 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
   };
 }
 
-/**
- * Saved before the wallet signs, holds nothing secret. Whatever happens to the client after the
- * signature, it finds the payment (`status`) and gets the key (`unlock` with `buyerKey`).
- */
-export interface PaymentJob {
-  contractId: string;
-  fileId: string;
-  buyer: string;
-  seller: string;
-  /** The registered `pay_to`. */
-  to: string;
-  usdc: string;
-  price: string;
-  /** The one-time key the nonce commits to, 0x and 48 bytes. */
-  buyerKey: string;
-  /** The nonce signed: `annonNonce(contractId, fileId, buyerKey)`. */
-  nonce: string;
-  validBefore: string;
-  /** The Base head when it was signed. */
-  block: number;
-  signedAt: number;
-}
-
 export interface Wallet {
   address: string;
   /** EIP-712, as viem's `signTypedData`: returns the 65-byte signature as 0x hex. */
@@ -253,29 +240,33 @@ export interface AuthorizeOptions {
   /** The buyer's one-time G1 key (`OneTimeKey.publicKeyBytes`). */
   buyerKey: Uint8Array;
   wallet: Wallet;
-  /** Must keep the job durably (and hand it to the relayer) before it resolves. */
-  persist(job: PaymentJob): Promise<void>;
+  /** Where the purchase is recorded (profile section 10): one open purchase per wallet and file. */
+  store: Store<PurchaseRecord>;
 }
 
-/** The authorization a job signs. */
-export const authorizationOf = (j: PaymentJob): Authorization => ({
-  from: j.buyer,
-  to: j.to,
-  value: BigInt(j.price),
+/** The authorization an attempt signs. */
+export const authorizationOf = (
+  r: PurchaseRecord,
+  attempt: PaymentAttempt = r.attempts[0] as PaymentAttempt,
+): Authorization => ({
+  from: r.terms.buyer,
+  to: r.terms.to,
+  value: BigInt(r.terms.price),
   validAfter: 0n,
-  validBefore: BigInt(j.validBefore),
-  nonce: j.nonce,
+  validBefore: BigInt(attempt.validBefore),
+  nonce: r.terms.nonce,
 });
 
 /**
- * Asks the wallet to sign and returns the `PAYMENT-SIGNATURE` header. The job is saved first; the
- * signature is checked to be the buyer's, in the form USDC takes, and run against USDC before it
- * is returned.
+ * Asks the wallet to sign and returns the `PAYMENT-SIGNATURE` header. The purchase is recorded
+ * first (refused while this wallet has another open purchase of the file); the signature is checked
+ * to be the buyer's, in the form USDC takes; the payload is recorded, and only then run against
+ * USDC and returned.
  */
 export async function authorize(
   q: Quote,
   o: AuthorizeOptions,
-): Promise<{ header: string; job: PaymentJob }> {
+): Promise<{ header: string; purchase: PurchaseRecord }> {
   if (lower(o.wallet.address) !== q.buyer)
     throw new TypeError('the wallet is not the buyer the quote was made for');
   // Exactly the 48-byte compressed form `unlock` takes: the nonce hashes these bytes. The
@@ -308,54 +299,96 @@ export async function authorize(
   }
   // Never sign without a checked header, even for a quote not made by `preflight`.
   await checkPay2(q.header, false, q.contractId, q.fileId, now);
-  const annon = annonNonce(q.contractId, q.fileId, o.buyerKey);
   // The search for the payment starts at the finalized block: a reorg or a lying RPC can't put the
   // payment below it.
   const final = await block(q.baseRpc, 'finalized');
-  const job: PaymentJob = {
-    contractId: q.contractId,
-    fileId: q.fileId,
-    buyer: q.buyer,
-    seller: q.seller,
-    to: q.to,
-    usdc: q.usdc,
-    price: q.price.toString(),
-    buyerKey: toHex(o.buyerKey),
-    nonce: annon,
-    // The earliest reading: no clock and no stall can stretch the window.
-    validBefore: (Math.min(h.timestamp, local) + q.validity).toString(),
-    block: Math.min(final.number, h.number),
-    signedAt: Math.min(h.timestamp, local),
+  const start = Math.min(h.timestamp, local);
+  const created: PurchaseRecord = {
+    schemaVersion: 1,
+    id: randomHex(16),
+    revision: 0,
+    terms: {
+      network: BASE_NETWORK,
+      contractId: q.contractId,
+      fileId: q.fileId,
+      buyer: q.buyer,
+      seller: q.seller,
+      to: q.to,
+      usdc: q.usdc,
+      price: q.price.toString(),
+      buyerKey: toHex(o.buyerKey),
+      nonce: annonNonce(q.contractId, q.fileId, o.buyerKey),
+      headerHash: toHex(sha256(q.header)),
+      cipherHash: q.file.cipherHash,
+      moderator: q.file.moderator,
+    },
+    attempts: [
+      {
+        attemptId: randomHex(16),
+        ...(q.paymentRequired.extensions?.[PAYMENT_IDENTIFIER]
+          ? { paymentId: `pay_${randomHex(16)}` }
+          : {}),
+        preparedAt: start,
+        searchFromBlock: Math.min(final.number, h.number),
+        // The earliest reading: no clock and no stall can stretch the window.
+        validBefore: (start + q.validity).toString(),
+        paymentRequired: q.paymentRequired,
+      },
+    ],
   };
-  await o.persist(job);
+  const key = purchaseKey(q.contractId, q.fileId, q.buyer);
+  if (!(await o.store.compareAndSet(key, null, created))) {
+    fail('purchase_open', 'this wallet has an open purchase of this file: follow its nextStep');
+  }
+  // A quote may predate this wallet being recorded on NEAR (another tab). Checked while this tab
+  // holds the slot, so no other tab can finish a purchase between the check and the signature.
+  if (await isBuyer(q.nearRpc, q.contractId, q.fileId, q.buyer)) {
+    await o.store.compareAndSet(key, created, null);
+    fail('already_bought', 'this wallet already bought the file; open it again instead');
+  }
 
-  const a = authorizationOf(job);
+  const attempt = created.attempts[0] as PaymentAttempt;
+  const a = authorizationOf(created);
   const signature = await o.wallet.signTypedData(typedData(q.usdc, a));
   if (typeof signature !== 'string' || recover(digest(q.usdc, a), signature) !== q.buyer) {
     fail('bad_signature', 'the wallet did not return a plain signature from the buyer');
   }
+  const header = paymentSignature(
+    q.paymentRequired,
+    q.offer,
+    a,
+    signature,
+    { contractId: q.contractId, fileId: q.fileId, buyerKey: created.terms.buyerKey },
+    attempt.paymentId,
+  );
+  // Recorded before any RPC sees it: a crash from here on can only resend this payload.
+  const purchase: PurchaseRecord = {
+    ...created,
+    revision: 1,
+    attempts: [{ ...attempt, payload: header }],
+  };
+  if (!(await o.store.compareAndSet(key, created, purchase))) {
+    const e = new PayError('store_conflict', 'the purchase changed while the wallet signed');
+    e.purchase = created;
+    throw e;
+  }
   try {
     await dryRun(q.baseRpc, q.usdc, a, signature);
   } catch (e) {
-    // The RPC has seen a valid authorization: it can still land, so the caller keeps the job.
-    if (e instanceof PayError) e.job = job;
+    // The RPC has seen a valid authorization: it can still land, so the purchase stays open.
+    if (e instanceof PayError) e.purchase = purchase;
     throw e;
   }
-  return {
-    header: paymentSignature(q.paymentRequired, q.offer, a, signature, {
-      contractId: q.contractId,
-      fileId: q.fileId,
-      buyerKey: job.buyerKey,
-    }),
-    job,
-  };
+  return { header, purchase };
 }
 
-/** Where a saved job stands on Base. */
-export const status = (baseRpc: string, j: PaymentJob): Promise<PaymentStatus> =>
+/** Where a recorded purchase stands on Base, over all its attempts. */
+export const status = (baseRpc: string, r: PurchaseRecord): Promise<PaymentStatus> =>
   paymentStatus(baseRpc, {
-    ...j,
-    from: j.buyer,
-    price: BigInt(j.price),
-    validBefore: BigInt(j.validBefore),
+    usdc: r.terms.usdc,
+    to: r.terms.to,
+    from: r.terms.buyer,
+    nonce: r.terms.nonce,
+    price: BigInt(r.terms.price),
+    ...bounds(r),
   });

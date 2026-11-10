@@ -16,6 +16,27 @@ export const BASE_NETWORK = 'eip155:8453';
  * (`forFacilitator`): the scheme label is not part of what the buyer signs.
  */
 export const ANNON_EXACT = 'annon-exact';
+/** The x402 idempotency extension (profile section 10). */
+export const PAYMENT_IDENTIFIER = 'payment-identifier';
+
+/** As the x402 extension declares it, optional: the official `declarePaymentIdentifierExtension`. */
+export const paymentIdentifierDeclaration = () => ({
+  info: { required: false },
+  schema: {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    type: 'object',
+    properties: {
+      required: { type: 'boolean' },
+      id: { type: 'string', minLength: 16, maxLength: 128, pattern: '^[a-zA-Z0-9_-]+$' },
+    },
+    required: ['required'],
+  },
+});
+
+/** A payment id the extension allows: 16 to 128 letters, digits, `-` and `_`. */
+export const isPaymentId = (id: unknown): id is string =>
+  typeof id === 'string' && /^[a-zA-Z0-9_-]{16,128}$/.test(id);
+
 /** Contracts the SDK trusts without being told: the one Annon deployment on NEAR mainnet. */
 export const TRUSTED_CONTRACTS: readonly string[] = ['v1.annon.defdone.near'];
 
@@ -85,8 +106,9 @@ export function discover(
 ): { contractId: string; fileId: string } {
   const info = pr.extensions?.annon?.info;
   if (!info) return fail('file_mismatch', 'the payment request names no Annon file');
-  if (info.version !== 1 || info.network !== 'near:mainnet') {
-    fail('file_mismatch', 'the Annon extension is not version 1 on NEAR mainnet');
+  // 2 is profile v1.1, 1 is v1: the buyer's side of both is the same.
+  if ((info.version !== 1 && info.version !== 2) || info.network !== 'near:mainnet') {
+    fail('file_mismatch', 'the Annon extension is not version 1 or 2 on NEAR mainnet');
   }
   if (typeof info.contract !== 'string' || !trusted.includes(info.contract)) {
     fail(
@@ -103,7 +125,7 @@ export function discover(
 /**
  * The `PAYMENT-SIGNATURE` header: the chosen offer echoed, the EIP-3009 authorization, and the
  * `annon` extension echoed with the buyer's one-time key, from which the server recomputes the
- * nonce before it settles.
+ * nonce before it settles. With `paymentId`, the advertised `payment-identifier` gets its id.
  */
 export function paymentSignature(
   pr: PaymentRequired,
@@ -111,7 +133,9 @@ export function paymentSignature(
   a: Authorization,
   signature: string,
   annon: { contractId: string; fileId: string; buyerKey: string },
+  paymentId?: string,
 ): string {
+  const pid = pr.extensions?.[PAYMENT_IDENTIFIER] as { info?: object } | undefined;
   const advertised = pr.extensions?.annon;
   const info = {
     ...(advertised?.info ?? {
@@ -141,6 +165,9 @@ export function paymentSignature(
       extensions: {
         ...(pr.extensions ?? {}),
         annon: { ...(advertised ?? {}), info },
+        ...(pid && paymentId
+          ? { [PAYMENT_IDENTIFIER]: { ...pid, info: { ...pid.info, id: paymentId } } }
+          : {}),
       },
     }),
   );

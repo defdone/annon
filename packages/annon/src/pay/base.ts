@@ -8,6 +8,7 @@
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { RPC_TIMEOUT_MS } from '../near/rpc.js';
 import { type Authorization, addressWord, fromHex, toHex, word } from './eip3009.js';
+import type { PurchaseRecord } from './purchase.js';
 
 export type PayErrorCode =
   /** The RPC couldn't be reached or answered something malformed; safe to retry. */
@@ -35,16 +36,26 @@ export type PayErrorCode =
   | 'smart_wallet_unsupported'
   /** The wallet's answer isn't a signature USDC accepts from this buyer. */
   | 'bad_signature'
-  /** USDC refused the signed authorization in a dry run (the RPC saw it; see `PayError.job`). */
-  | 'payment_rejected';
+  /** USDC refused the signed authorization in a dry run (the RPC saw it; see `PayError.purchase`). */
+  | 'payment_rejected'
+  /** This wallet has an open purchase of this file: follow `nextStep` of the recorded one. */
+  | 'purchase_open'
+  /** The purchase record changed under this writer (another tab or process): load it again. */
+  | 'store_conflict'
+  /** A seller: this payment id came with another payload before (HTTP 409). */
+  | 'payment_id_conflict'
+  /** A seller: the settlement of this purchase is under way or unclear; send the same payload later. */
+  | 'settlement_processing'
+  /** A seller: this purchase can no longer be paid (expired or canceled, finalized). */
+  | 'payment_expired';
 
 export class PayError extends Error {
   readonly code: PayErrorCode;
   /**
    * Set when the wallet had already signed: the authorization may have reached an RPC and could
-   * still be settled. Check `status(job)` before starting a new purchase.
+   * still be settled. The purchase stays open: follow `nextStep`.
    */
-  job?: unknown;
+  purchase?: PurchaseRecord;
   constructor(code: PayErrorCode, message: string = code) {
     super(message);
     this.code = code;
@@ -102,6 +113,8 @@ const call = (...parts: Uint8Array[]) =>
 export interface Head {
   number: number;
   timestamp: number;
+  /** 0x and lowercase, when the RPC gave it. */
+  hash?: string;
 }
 
 /** The latest block, after checking the RPC is on Base mainnet. */
@@ -124,6 +137,7 @@ export async function block(
   return {
     number: quantity(b?.number, 'block number'),
     timestamp: quantity(b?.timestamp, 'timestamp'),
+    ...(typeof b?.hash === 'string' ? { hash: b.hash.toLowerCase() } : {}),
   };
 }
 
@@ -399,6 +413,35 @@ async function lastBlock(url: string, from: number, validBefore: bigint, now: He
   }
 }
 
+/** The block of an `AuthorizationCanceled` for this nonce in `[from, to]`, searched in chunks. */
+async function canceledAfter(url: string, e: Expected, from: number, to: number) {
+  // ponytail: 10,000 blocks per query, the common RPC limit; a long-expired purchase takes several.
+  for (let at = from; at <= to; at += 10_000) {
+    const end = Math.min(to, at + 9_999);
+    const topics = [
+      TOPICS.authorizationCanceled,
+      toHex(addressWord(e.from)),
+      e.nonce.toLowerCase(),
+    ];
+    const found = await ask(url, 'eth_getLogs', [
+      { address: e.usdc, fromBlock: qty(at), toBlock: qty(end), topics },
+    ]);
+    if (!Array.isArray(found)) return malformed('eth_getLogs result');
+    for (const l of found.map(evmLog).filter((l) => !l.removed)) {
+      if (
+        l.address !== strip(e.usdc) ||
+        l.topics.join() !== topics.map(strip).join() ||
+        l.block_number < at ||
+        l.block_number > end
+      ) {
+        return malformed('eth_getLogs returned a log the query did not ask for');
+      }
+      return l.block_number;
+    }
+  }
+  return null;
+}
+
 /**
  * Where a signed purchase stands, found by its nonce alone, so a lost transaction hash loses
  * nothing. `block` is the head when it was signed. A payment counts as soon as it is in a block;
@@ -410,8 +453,10 @@ export async function paymentStatus(
   url: string,
   e: Expected & { block: number; validBefore: bigint },
 ): Promise<PaymentStatus> {
-  const now = await head(url);
+  // Finalized first: the head read after it is at least as far, so a payment in any block the
+  // expiry below relies on is inside the search.
   const final = await block(url, 'finalized');
+  const now = await head(url);
   const last = await lastBlock(url, e.block, e.validBefore, now);
   const query = {
     address: e.usdc,
@@ -458,6 +503,9 @@ export async function paymentStatus(
   if (canceled)
     return canceled.block_number <= final.number ? { state: 'canceled' } : { state: 'pending' };
   if (await authorizationState(url, e.usdc, e.from, e.nonce, now.number)) {
+    // USDC takes a cancellation after the deadline too: look for one up to the head.
+    const late = await canceledAfter(url, e, last + 1, now.number);
+    if (late !== null) return late <= final.number ? { state: 'canceled' } : { state: 'pending' };
     return fail(
       'transport',
       'USDC marks the authorization used, but the RPC returned no log for it',

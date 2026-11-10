@@ -9,7 +9,15 @@ import { getConfig, getFile } from '../near/rpc.js';
 import { fail, head } from './base.js';
 import { annonNonce, digest, fromHex, signer } from './eip3009.js';
 import { MAX_CLOCK_SKEW_SECONDS, MAX_VALIDITY_SECONDS } from './pay.js';
-import { ANNON_EXACT, BASE_NETWORK, type Offer, type PaymentRequired } from './x402.js';
+import {
+  ANNON_EXACT,
+  BASE_NETWORK,
+  isPaymentId,
+  type Offer,
+  PAYMENT_IDENTIFIER,
+  type PaymentRequired,
+  paymentIdentifierDeclaration,
+} from './x402.js';
 
 export interface OfferOptions {
   nearRpc: string;
@@ -55,7 +63,7 @@ export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
     extra: { name: 'USD Coin', version: '2' },
   };
   const info = {
-    version: 1,
+    version: 2,
     network: 'near:mainnet',
     contract: o.contractId,
     fileId: o.fileId,
@@ -67,7 +75,10 @@ export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
     x402Version: 2,
     resource: { url: o.url },
     accepts: [offer],
-    extensions: { annon: { info, schema: ANNON_SCHEMA } },
+    extensions: {
+      annon: { info, schema: ANNON_SCHEMA },
+      [PAYMENT_IDENTIFIER]: paymentIdentifierDeclaration(),
+    },
   };
 }
 
@@ -77,7 +88,7 @@ export const ANNON_SCHEMA = {
   type: 'object',
   required: ['version', 'network', 'contract', 'fileId'],
   properties: {
-    version: { const: 1 },
+    version: { const: 2 },
     network: { const: 'near:mainnet' },
     contract: { type: 'string' },
     fileId: { type: 'string', pattern: '^0x[0-9a-f]{64}$' },
@@ -95,8 +106,18 @@ export interface CheckedPayment {
   buyerKey: string;
   /** The nonce the buyer signed: `annonNonce(contract, fileId, buyerKey)`. */
   nonce: string;
+  validBefore: bigint;
+  /** The payload's `payment-identifier` id, if it has one. */
+  paymentId?: string;
   offer: Offer;
 }
+
+type Payload = {
+  x402Version?: unknown;
+  accepted?: Offer;
+  payload?: { signature?: unknown; authorization?: Record<string, unknown> };
+  extensions?: Record<string, { info?: Record<string, unknown> } & Record<string, unknown>>;
+};
 
 const b64json = (s: string): unknown => {
   try {
@@ -144,34 +165,32 @@ export async function verifyPayment(
   return checkPayment(header, pr, Math.min(base, local));
 }
 
-/**
- * @internal Use `verifyPayment`: this checks against a `PaymentRequired` that may be stale.
- * Checks `PAYMENT-SIGNATURE` against the `PaymentRequired` this server sent (profile section 3):
- * the offer echoed unchanged, the `annon` extension echoed with a valid buyer key, and the nonce
- * the one that key gives. Run it before settling: a payment with any other nonce would move the
- * buyer's money and never release the key. Throws `PayError` `bad_signature` or `bad_requirements`.
- */
-export function checkPayment(
-  header: string,
-  pr: PaymentRequired,
-  now: number = Math.floor(Date.now() / 1000),
-): CheckedPayment {
-  const p = b64json(header) as {
-    x402Version?: unknown;
-    accepted?: Offer;
-    payload?: { signature?: unknown; authorization?: Record<string, unknown> };
-    extensions?: { annon?: { info?: Record<string, unknown> } };
-  } | null;
+/** The base64 JSON of `PAYMENT-SIGNATURE`, as an x402 v2 payload. */
+export function readPayload(header: string): Payload {
+  const p = b64json(header) as Payload | null;
   if (p?.x402Version !== 2) return fail('bad_requirements', 'not an x402 v2 payment');
-  const offer = pr.accepts.find((o) => same(o, p.accepted));
-  if (!offer)
-    return fail('bad_requirements', 'the payment is for an offer this server did not make');
-  const sent = p.extensions?.annon?.info ?? {};
-  const advertised = pr.extensions?.annon?.info ?? {};
-  for (const [k, v] of Object.entries(advertised)) {
-    if (!same(sent[k], v)) fail('bad_requirements', `the annon extension changed ${k}`);
-  }
-  const buyerKey = sent.buyerKey;
+  return p;
+}
+
+/** The payload's `payment-identifier` id, checked when it is there. */
+function paymentIdOf(p: Payload): string | undefined {
+  const ext = p.extensions?.[PAYMENT_IDENTIFIER];
+  if (ext === undefined) return undefined;
+  // Optional: an echo without an id is a payment without one.
+  const id = ext?.info?.id;
+  if (id === undefined) return undefined;
+  if (!isPaymentId(id))
+    fail('bad_requirements', 'the payment id is not a valid payment-identifier');
+  return id as string;
+}
+
+/**
+ * What never changes for a purchase (profile section 10): the authorization signed by `from`, for
+ * the Annon nonce of this file and the buyer key, paying `offer` exactly. Shared by a new payment
+ * (`checkPayment`) and by a retry of one already settling (`settle`).
+ */
+function checkSigned(p: Payload, contract: string, fileId: string, offer: Offer) {
+  const buyerKey = p.extensions?.annon?.info?.buyerKey;
   if (typeof buyerKey !== 'string')
     return fail('bad_requirements', 'the payment carries no buyer key');
   try {
@@ -179,8 +198,6 @@ export function checkPayment(
   } catch {
     fail('bad_requirements', 'the buyer key is not a one-time G1 key');
   }
-  const contract = String(advertised.contract);
-  const fileId = String(advertised.fileId);
   const nonce = annonNonce(contract, fileId, fromHex(buyerKey, 48, 'buyerKey'));
 
   const a = p.payload?.authorization ?? {};
@@ -195,31 +212,109 @@ export function checkPayment(
     fail('bad_requirements', 'the authorization pays another amount or recipient');
   }
   if (str('validAfter') !== '0') fail('bad_requirements', 'validAfter must be 0');
-  // The contract counts a payment up to 300 s after a stop. A buyer's client could sign for longer;
-  // this server settles only authorizations short enough to stay inside that, whoever made them.
-  if (BigInt(str('validBefore')) > BigInt(now + MAX_VALIDITY_SECONDS + MAX_CLOCK_SKEW_SECONDS)) {
-    fail('bad_requirements', 'the authorization is valid for too long');
-  }
   const from = str('from').toLowerCase();
+  const validBefore = BigInt(str('validBefore'));
   const auth = {
     from,
     to: offer.payTo.toLowerCase(),
     value: BigInt(offer.amount),
     validAfter: 0n,
-    validBefore: BigInt(str('validBefore')),
+    validBefore,
     nonce,
   };
   const sig = p.payload?.signature;
   if (typeof sig !== 'string' || signer(digest(offer.asset.toLowerCase(), auth), sig) !== from) {
     fail('bad_signature', "the signature is not the payer's, or not in the form USDC takes");
   }
-  return { payer: from, buyerKey, nonce, offer };
+  return { payer: from, buyerKey, nonce, validBefore, offer };
 }
 
 /**
- * A checked `annon-exact` payment as a standard x402 facilitator takes it: the same signed
- * authorization with the scheme named `exact` in both the payload and the requirements (the
- * official facilitator checks both). Run `verifyPayment` first.
+ * The purchase terms of a payload against the registration and the contract's configuration,
+ * without the seller's settings, the sale status or the deadline (profile section 10, order of
+ * checks): what a retry of a payment already settling must still pass.
+ */
+export function checkTerms(
+  header: string,
+  t: { contractId: string; fileId: string; usdc: string; price: bigint; payTo: string },
+): CheckedPayment {
+  const p = readPayload(header);
+  const o = p.accepted;
+  const extra = (o?.extra ?? {}) as Record<string, unknown>;
+  if (
+    o?.scheme !== ANNON_EXACT ||
+    o.network !== BASE_NETWORK ||
+    typeof o.asset !== 'string' ||
+    o.asset.toLowerCase() !== t.usdc ||
+    o.amount !== t.price.toString() ||
+    typeof o.payTo !== 'string' ||
+    o.payTo.toLowerCase() !== t.payTo ||
+    extra.name !== 'USD Coin' ||
+    extra.version !== '2'
+  ) {
+    fail('bad_requirements', 'the payment is not for this file on its registered terms');
+  }
+  const info = p.extensions?.annon?.info ?? {};
+  if (info.contract !== t.contractId || info.fileId !== t.fileId) {
+    fail('bad_requirements', 'the payment is for another Annon contract or file');
+  }
+  const paymentId = paymentIdOf(p);
+  return {
+    ...checkSigned(p, t.contractId, t.fileId, o as Offer),
+    ...(paymentId ? { paymentId } : {}),
+  };
+}
+
+/**
+ * @internal Use `verifyPayment`: this checks against a `PaymentRequired` that may be stale.
+ * Checks `PAYMENT-SIGNATURE` against the `PaymentRequired` this server sent (profile section 3):
+ * the offer echoed unchanged, the `annon` extension echoed with a valid buyer key, an advertised
+ * `payment-identifier` echoed with a valid id, and the nonce the one that key gives. Run it before
+ * settling: a payment with any other nonce would move the buyer's money and never release the key.
+ * Throws `PayError` `bad_signature` or `bad_requirements`.
+ */
+export function checkPayment(
+  header: string,
+  pr: PaymentRequired,
+  now: number = Math.floor(Date.now() / 1000),
+): CheckedPayment {
+  const p = readPayload(header);
+  const offer = pr.accepts.find((o) => same(o, p.accepted));
+  if (!offer)
+    return fail('bad_requirements', 'the payment is for an offer this server did not make');
+  const sent = p.extensions?.annon?.info ?? {};
+  const advertised = pr.extensions?.annon?.info ?? {};
+  for (const [k, v] of Object.entries(advertised)) {
+    if (!same(sent[k], v)) fail('bad_requirements', `the annon extension changed ${k}`);
+  }
+  // payment-identifier: optional; when sent, the advertised object with only `info.id` added.
+  const declared = pr.extensions?.[PAYMENT_IDENTIFIER] as
+    | ({ info?: Record<string, unknown> } & Record<string, unknown>)
+    | undefined;
+  const echoed = p.extensions?.[PAYMENT_IDENTIFIER];
+  if (echoed !== undefined) {
+    const { id: _, ...info } = echoed?.info ?? {};
+    if (!declared || !same({ ...echoed, info }, declared)) {
+      fail('bad_requirements', 'the payment-identifier extension is not the one advertised');
+    }
+  }
+  const paymentId = paymentIdOf(p);
+  if (declared?.info?.required === true && !paymentId) {
+    fail('bad_requirements', 'this server requires a payment id');
+  }
+  const c = checkSigned(p, String(advertised.contract), String(advertised.fileId), offer);
+  // The contract counts a payment up to 300 s after a stop. A buyer's client could sign for longer;
+  // this server settles only authorizations short enough to stay inside that, whoever made them.
+  if (c.validBefore > BigInt(now + MAX_VALIDITY_SECONDS + MAX_CLOCK_SKEW_SECONDS)) {
+    fail('bad_requirements', 'the authorization is valid for too long');
+  }
+  return { ...c, ...(paymentId ? { paymentId } : {}) };
+}
+
+/**
+ * A checked `annon-exact` payment as a standard x402 facilitator's `/verify` and `/settle` take it:
+ * the same signed authorization, every extension kept, with the scheme named `exact` in both the
+ * payload and the requirements (the official facilitator checks both). Run `verifyPayment` first.
  */
 export function forFacilitator(header: string, offer: Offer) {
   if (offer.scheme !== ANNON_EXACT) {
@@ -231,5 +326,9 @@ export function forFacilitator(header: string, offer: Offer) {
   const p = b64json(header) as Record<string, unknown> | null;
   if (!p) return fail('bad_requirements', 'PAYMENT-SIGNATURE is not base64 JSON');
   const paymentRequirements = { ...offer, scheme: 'exact' };
-  return { paymentPayload: { ...p, accepted: paymentRequirements }, paymentRequirements };
+  return {
+    x402Version: 2 as const,
+    paymentPayload: { ...p, accepted: paymentRequirements },
+    paymentRequirements,
+  };
 }

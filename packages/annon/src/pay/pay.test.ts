@@ -3,10 +3,21 @@ import { isDeepStrictEqual } from 'node:util';
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { x402Client } from '@x402/core/client';
-import { decodePaymentSignatureHeader, encodePaymentRequiredHeader } from '@x402/core/http';
+import {
+  decodePaymentResponseHeader,
+  decodePaymentSignatureHeader,
+  encodePaymentRequiredHeader,
+  encodePaymentResponseHeader,
+} from '@x402/core/http';
 import { parsePaymentPayload, parsePaymentRequired } from '@x402/core/schemas';
+import type { SettleResponse as X402SettleResponse } from '@x402/core/types';
 import { registerExactEvmScheme } from '@x402/evm/exact/client';
 import { ExactEvmScheme } from '@x402/evm/exact/facilitator';
+import {
+  declarePaymentIdentifierExtension,
+  extractPaymentIdentifier,
+  isValidPaymentId,
+} from '@x402/extensions/payment-identifier';
 import {
   decodeFunctionData,
   encodeAbiParameters,
@@ -30,12 +41,14 @@ import {
   authorize,
   MAX_CLOCK_SKEW_SECONDS,
   MAX_VALIDITY_SECONDS,
-  type PaymentJob,
   preflight,
   status,
 } from './pay.js';
-import { nextStep, purchaseKey } from './recover.js';
+import { type PurchaseRecord, purchaseKey } from './purchase.js';
+import { nextStep } from './recover.js';
 import { checkPayment, forFacilitator, offerFor, verifyPayment } from './seller.js';
+import { paymentResponse, type SellerRecord, type SettleResponse, settle } from './settle.js';
+import { memoryStore } from './store.js';
 import { discover, type PaymentRequired, paymentSignature, readPaymentRequired } from './x402.js';
 
 const USDC_ABI = parseAbi([
@@ -189,6 +202,12 @@ type World = {
   chainId: string;
   head: { number: number; timestamp: number };
   finalized: { number: number; timestamp: number };
+  /** Base `safe`; the head when not set. */
+  safe?: { number: number; timestamp: number };
+  /** Block hashes that differ from the logs' (a reorg); every other block is `0xbb…`. */
+  blockHashes?: Record<number, string>;
+  /** Runs when a block tag is read, before the answer: lets the chain move between reads. */
+  onTag?: (tag: string) => void;
   /** An honest RPC answers eth_getLogs with what the query asked for; a lying one with everything. */
   honest: boolean;
   code: string;
@@ -299,13 +318,21 @@ async function respond(
       return reply(w.chainId);
     case 'eth_getBlockByNumber': {
       const tag = params[0];
+      if (typeof tag === 'string' && !tag.startsWith('0x')) w.onTag?.(tag);
       const b =
-        tag === 'latest' ? w.head : tag === 'finalized' ? w.finalized : at(Number(tag as string));
+        tag === 'latest'
+          ? w.head
+          : tag === 'finalized'
+            ? w.finalized
+            : tag === 'safe'
+              ? (w.safe ?? w.head)
+              : at(Number(tag as string));
       // Like a real node: no answer for a block past the head.
       if (b.number > w.head.number) return reply(null);
       return reply({
         number: `0x${b.number.toString(16)}`,
         timestamp: `0x${b.timestamp.toString(16)}`,
+        hash: w.blockHashes?.[b.number] ?? `0x${'bb'.repeat(32)}`,
       });
     }
     case 'eth_getCode':
@@ -802,9 +829,10 @@ describe('the PAY2 check before signing (profile section 7)', () => {
     // Only the seller's signature changed: the registration still matches.
     const badSig = Uint8Array.from(HEADER);
     badSig[HEADER.length - 10] = (badSig[HEADER.length - 10] as number) ^ 1;
-    const persist = vi.fn(async () => {});
+    const store = memoryStore<PurchaseRecord>();
+    const cas = vi.spyOn(store, 'compareAndSet');
     for (const header of [bad, badSig, new Uint8Array(0)]) {
-      expect(await codeOf(authorize({ ...q, header }, { buyerKey, wallet, persist }))).toBe(
+      expect(await codeOf(authorize({ ...q, header }, { buyerKey, wallet, store }))).toBe(
         'file_invalid',
       );
     }
@@ -819,11 +847,11 @@ describe('the PAY2 check before signing (profile section 7)', () => {
     h.set(hexToBytes(await sellerAccount.signMessage({ message: text })), h.length - 65);
     w.file = file({ cipher_hash: elsewhere.cipherHash });
     const keyless = { ...q, header: h, file: { ...q.file, cipherHash: elsewhere.cipherHash } };
-    expect(await codeOf(authorize(keyless, { buyerKey, wallet, persist }))).toBe('file_invalid');
+    expect(await codeOf(authorize(keyless, { buyerKey, wallet, store }))).toBe('file_invalid');
     w.file = file({ cipher_hash: `0x${'22'.repeat(32)}` });
-    expect(await codeOf(authorize(q, { buyerKey, wallet, persist }))).toBe('price_mismatch');
+    expect(await codeOf(authorize(q, { buyerKey, wallet, store }))).toBe('price_mismatch');
     expect(wallet.signTypedData).not.toHaveBeenCalled();
-    expect(persist).not.toHaveBeenCalled();
+    expect(cas).not.toHaveBeenCalled();
   });
 });
 
@@ -836,10 +864,10 @@ describe('authorize', () => {
   it('signs a payment a profile server accepts, bound to the file and the buyer key', async () => {
     const q = await preflight(opts());
     const wallet = sign();
-    const { header, job } = await authorize(q, {
+    const { header, purchase } = await authorize(q, {
       buyerKey,
       wallet,
-      persist: async () => {},
+      store: memoryStore(),
     });
     const v = await serverVerify(header, required());
     expect(v).toMatchObject({ ok: true });
@@ -861,7 +889,8 @@ describe('authorize', () => {
       nonce: annonNonce(CONTRACT, FILE, buyerKey),
     });
     // The search starts at the finalized block, not the head.
-    expect(job).toMatchObject({ block: SIGNED - 5000, signedAt: NOW, buyerKey: hex(buyerKey) });
+    expect(purchase.terms.buyerKey).toBe(hex(buyerKey));
+    expect(purchase.attempts[0]).toMatchObject({ searchFromBlock: SIGNED - 5000, preparedAt: NOW });
   });
 
   it('dry-runs exactly the signed transferWithAuthorization against USDC', async () => {
@@ -871,7 +900,7 @@ describe('authorize', () => {
     const { header } = await authorize(q, {
       buyerKey,
       wallet: sign(),
-      persist: async () => {},
+      store: memoryStore(),
     });
     const v = await serverVerify(header, required(req));
     expect(v).toMatchObject({ ok: true });
@@ -894,7 +923,7 @@ describe('authorize', () => {
     });
   });
 
-  it('saves the job before the wallet is asked, and never asks if saving fails', async () => {
+  it('records the purchase before the wallet is asked, and the payload before anything sees it', async () => {
     const q = await preflight(opts());
     const order: string[] = [];
     const wallet = sign();
@@ -902,32 +931,149 @@ describe('authorize', () => {
       order.push('sign');
       return buyerAccount.signTypedData(asViem(t));
     });
-    await authorize(q, {
-      buyerKey,
-      wallet,
-      persist: async (job: PaymentJob) => {
-        await new Promise((r) => setTimeout(r, 5));
-        order.push(`persist ${job.nonce}`);
+    const store = memoryStore<PurchaseRecord>();
+    const cas = store.compareAndSet.bind(store);
+    store.compareAndSet = async (key, expected, next) => {
+      await new Promise((r) => setTimeout(r, 5));
+      order.push(next?.attempts.at(-1)?.payload ? 'record payload' : 'record purchase');
+      return cas(key, expected, next);
+    };
+    const realFetch = vi.mocked(fetch).getMockImplementation();
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      const b = JSON.parse(String((init as { body: string }).body));
+      if (b.method === 'eth_call' && String(b.params[0].data).startsWith('0xe3ee160e'))
+        order.push('dry run');
+      return (realFetch as typeof fetch)(url, init);
+    });
+    const { header, purchase } = await authorize(q, { buyerKey, wallet, store });
+    expect(order).toEqual(['record purchase', 'sign', 'record payload', 'dry run']);
+    const saved = (await store.load(purchaseKey(CONTRACT, FILE, BUYER))) as PurchaseRecord;
+    expect(saved).toEqual(purchase);
+    expect(saved).toMatchObject({
+      schemaVersion: 1,
+      revision: 1,
+      terms: {
+        network: 'eip155:8453',
+        contractId: CONTRACT,
+        fileId: FILE,
+        buyer: BUYER,
+        seller: SELLER,
+        to: PAY_TO,
+        usdc: USDC,
+        price: '10000',
+        buyerKey: hex(buyerKey),
+        nonce: ANNON,
+        headerHash: sha256(HEADER),
+        cipherHash: CIPHER_HASH,
+        moderator: null,
       },
     });
-    expect(order).toEqual([`persist ${annonNonce(CONTRACT, FILE, buyerKey)}`, 'sign']);
+    expect(saved.attempts).toHaveLength(1);
+    expect(saved.attempts[0]).toMatchObject({
+      validBefore: String(NOW + 180),
+      paymentRequired: required(),
+      payload: header,
+    });
+    expect(saved.attempts[0]).not.toHaveProperty('paymentId');
+  });
 
+  it('refuses a quote that predates this wallet being recorded as a buyer (another tab)', async () => {
+    const q = await preflight(opts());
+    w.isBuyer = true;
+    const wallet = sign();
+    const store = memoryStore<PurchaseRecord>();
+    expect(await codeOf(authorize(q, { buyerKey, wallet, store }))).toBe('already_bought');
+    expect(wallet.signTypedData).not.toHaveBeenCalled();
+    expect(await store.load(purchaseKey(CONTRACT, FILE, BUYER))).toBeNull();
+  });
+
+  it('checks the buyer again once it holds the slot: another tab may have just finished', async () => {
+    const q = await preflight(opts());
+    const wallet = sign();
+    const store = memoryStore<PurchaseRecord>();
+    const cas = store.compareAndSet.bind(store);
+    store.compareAndSet = async (key, expected, next) => {
+      const ok = await cas(key, expected, next);
+      // The other tab's purchase is recorded on NEAR just as this tab claims the empty slot.
+      if (expected === null && next) w.isBuyer = true;
+      return ok;
+    };
+    expect(await codeOf(authorize(q, { buyerKey, wallet, store }))).toBe('already_bought');
+    expect(wallet.signTypedData).not.toHaveBeenCalled();
+    expect(await store.load(purchaseKey(CONTRACT, FILE, BUYER))).toBeNull();
+  });
+
+  it('never asks the wallet when the purchase cannot be recorded', async () => {
+    const q = await preflight(opts());
     const never = sign();
-    const failed = authorize(q, {
-      buyerKey,
-      wallet: never,
-      persist: async () => {
-        throw new Error('disk full');
-      },
-    });
-    await expect(failed).rejects.toThrow('disk full');
+    const store = memoryStore<PurchaseRecord>();
+    store.compareAndSet = async () => {
+      throw new Error('disk full');
+    };
+    await expect(authorize(q, { buyerKey, wallet: never, store })).rejects.toThrow('disk full');
     expect(never.signTypedData).not.toHaveBeenCalled();
+  });
+
+  it('keeps one open purchase per wallet and file: a second one is refused before the wallet', async () => {
+    const q = await preflight(opts());
+    const store = memoryStore<PurchaseRecord>();
+    await authorize(q, { buyerKey, wallet: sign(), store });
+    const second = sign();
+    const otherKey = bls.G1.Point.BASE.multiply(8n).toBytes(true);
+    expect(await codeOf(authorize(q, { buyerKey: otherKey, wallet: second, store }))).toBe(
+      'purchase_open',
+    );
+    expect(second.signTypedData).not.toHaveBeenCalled();
+  });
+
+  it('returns no payload it could not record, and keeps the attempt as possibly signed', async () => {
+    const q = await preflight(opts());
+    const store = memoryStore<PurchaseRecord>();
+    const cas = store.compareAndSet.bind(store);
+    store.compareAndSet = async (key, expected, next) =>
+      next?.attempts.at(-1)?.payload ? false : cas(key, expected, next);
+    expect(await codeOf(authorize(q, { buyerKey, wallet: sign(), store }))).toBe('store_conflict');
+    const kept = (await store.load(purchaseKey(CONTRACT, FILE, BUYER))) as PurchaseRecord;
+    expect(kept.attempts).toHaveLength(1);
+    expect(kept.attempts[0]).not.toHaveProperty('payload');
+    // The dry run never saw it.
+    expect(
+      w.calls.some((c) => c.method === 'eth_call' && String(c.data).startsWith('0xe3ee160e')),
+    ).toBe(false);
+  });
+
+  it('sends a payment-identifier id when the server advertises the extension, and records it', async () => {
+    const pr = {
+      ...required(),
+      extensions: {
+        ...required().extensions,
+        'payment-identifier': declarePaymentIdentifierExtension(false),
+      },
+    } as PaymentRequired;
+    const q = await preflight(opts({ paymentRequired: pr }));
+    const { header, purchase } = await authorize(q, {
+      buyerKey,
+      wallet: sign(),
+      store: memoryStore(),
+    });
+    const payload = decodePaymentSignatureHeader(header);
+    const id = extractPaymentIdentifier(payload);
+    expect(id).toMatch(/^pay_[0-9a-f]{32}$/);
+    expect(isValidPaymentId(id as string)).toBe(true);
+    expect(payload.extensions?.['payment-identifier']).toEqual({
+      ...declarePaymentIdentifierExtension(false),
+      info: { required: false, id },
+    });
+    expect(purchase.attempts[0]?.paymentId).toBe(id);
+    // Two purchases never share an id.
+    const again = await authorize(q, { buyerKey, wallet: sign(), store: memoryStore() });
+    expect(again.purchase.attempts[0]?.paymentId).not.toBe(id);
   });
 
   it('refuses a signature that is not the buyer, or not in the form USDC takes', async () => {
     const q = await preflight(opts());
     const run = (wallet: ReturnType<typeof sign>) =>
-      codeOf(authorize(q, { buyerKey, wallet, persist: async () => {} }));
+      codeOf(authorize(q, { buyerKey, wallet, store: memoryStore() }));
     expect(await run(sign(otherAccount))).toBe('bad_signature');
     const smart = sign();
     smart.signTypedData.mockResolvedValue(`0x${'00'.repeat(200)}`); // an ERC-6492 style blob
@@ -944,7 +1090,7 @@ describe('authorize', () => {
 
   it('stops when USDC refuses the signed authorization, and tells a revert from a dead RPC', async () => {
     const q = await preflight(opts());
-    const run = () => codeOf(authorize(q, { buyerKey, wallet: sign(), persist: async () => {} }));
+    const run = () => codeOf(authorize(q, { buyerKey, wallet: sign(), store: memoryStore() }));
     w.dryRun = {
       error: { code: 3, message: 'execution reverted: FiatTokenV2: invalid signature' },
     };
@@ -959,7 +1105,7 @@ describe('authorize', () => {
       const q = await preflight(opts());
       change();
       const wallet = sign();
-      const got = await codeOf(authorize(q, { buyerKey, wallet, persist: async () => {} }));
+      const got = await codeOf(authorize(q, { buyerKey, wallet, store: memoryStore() }));
       expect(wallet.signTypedData).not.toHaveBeenCalled();
       return got;
     };
@@ -1014,13 +1160,13 @@ describe('authorize', () => {
   it('takes the deadline from the earlier clock, so a fast RPC cannot stretch it', async () => {
     const q = await preflight(opts());
     w.head = { ...at(SIGNED), timestamp: NOW + 60 };
-    const { job } = await authorize(q, { buyerKey, wallet: sign(), persist: async () => {} });
-    expect(job.validBefore).toBe(String(NOW + 180));
+    const { purchase } = await authorize(q, { buyerKey, wallet: sign(), store: memoryStore() });
+    expect(purchase.attempts[0]?.validBefore).toBe(String(NOW + 180));
     // And a fast local clock: Base is 60 s behind it.
     w.head = { ...at(SIGNED), timestamp: NOW - 60 };
-    const slow = await authorize(q, { buyerKey, wallet: sign(), persist: async () => {} });
-    expect(slow.job.validBefore).toBe(String(NOW - 60 + 180));
-    expect(slow.job.signedAt).toBe(NOW - 60);
+    const slow = await authorize(q, { buyerKey, wallet: sign(), store: memoryStore() });
+    expect(slow.purchase.attempts[0]?.validBefore).toBe(String(NOW - 60 + 180));
+    expect(slow.purchase.attempts[0]?.preparedAt).toBe(NOW - 60);
   });
 
   it('takes the deadline from before the registration is read, however long the reads stall', async () => {
@@ -1031,32 +1177,33 @@ describe('authorize', () => {
       w.head = { ...at(SIGNED), timestamp: NOW + 400 };
       vi.mocked(Date.now).mockReturnValue((NOW + 400) * 1000);
     };
-    const { job } = await authorize(q, { buyerKey, wallet: sign(), persist: async () => {} });
-    expect(job.validBefore).toBe(String(NOW + 180));
-    expect(job.signedAt).toBe(NOW);
+    const { purchase } = await authorize(q, { buyerKey, wallet: sign(), store: memoryStore() });
+    expect(purchase.attempts[0]?.validBefore).toBe(String(NOW + 180));
+    expect(purchase.attempts[0]?.preparedAt).toBe(NOW);
   });
 
   it('refuses a local clock that is off before the registration read, even if it is corrected during it', async () => {
     const q = await preflight(opts());
     vi.mocked(Date.now).mockReturnValue((NOW + 400) * 1000);
     w.onNear = () => vi.mocked(Date.now).mockReturnValue(NOW * 1000);
-    expect(await codeOf(authorize(q, { buyerKey, wallet: sign(), persist: async () => {} }))).toBe(
+    expect(await codeOf(authorize(q, { buyerKey, wallet: sign(), store: memoryStore() }))).toBe(
       'transport',
     );
   });
 
-  it('hands back the job when a signed authorization fails afterwards', async () => {
+  it('hands back the recorded purchase, payload included, when the dry run fails', async () => {
     const q = await preflight(opts());
     w.dryRun = {
       error: { code: 3, message: 'execution reverted: FiatTokenV2: invalid signature' },
     };
-    const err = await authorize(q, { buyerKey, wallet: sign(), persist: async () => {} }).catch(
+    const err = await authorize(q, { buyerKey, wallet: sign(), store: memoryStore() }).catch(
       (e: PayError) => e,
     );
     expect(err).toBeInstanceOf(PayError);
-    expect((err as PayError).job).toMatchObject({
-      buyerKey: hex(buyerKey),
+    expect((err as PayError).purchase?.terms.buyerKey).toBe(hex(buyerKey));
+    expect((err as PayError).purchase?.attempts[0]).toMatchObject({
       validBefore: String(NOW + 180),
+      payload: expect.any(String),
     });
   });
 
@@ -1064,12 +1211,12 @@ describe('authorize', () => {
     const q = await preflight(opts());
     for (const off of [-61, 61]) {
       w.head = { ...at(SIGNED), timestamp: NOW + off };
-      expect(
-        await codeOf(authorize(q, { buyerKey, wallet: sign(), persist: async () => {} })),
-      ).toBe('transport');
+      expect(await codeOf(authorize(q, { buyerKey, wallet: sign(), store: memoryStore() }))).toBe(
+        'transport',
+      );
     }
     w.head = { ...at(SIGNED), timestamp: NOW + 60 };
-    expect(await codeOf(authorize(q, { buyerKey, wallet: sign(), persist: async () => {} }))).toBe(
+    expect(await codeOf(authorize(q, { buyerKey, wallet: sign(), store: memoryStore() }))).toBe(
       'ok',
     );
   });
@@ -1077,15 +1224,15 @@ describe('authorize', () => {
   it('refuses a wallet other than the quoted buyer and a key that is not a G1 point', async () => {
     const q = await preflight(opts());
     const other = { ...sign(otherAccount), address: otherAccount.address };
-    expect(
-      await codeOf(authorize(q, { buyerKey, wallet: other, persist: async () => {} })),
-    ).toMatch(/TypeError/);
+    expect(await codeOf(authorize(q, { buyerKey, wallet: other, store: memoryStore() }))).toMatch(
+      /TypeError/,
+    );
     expect(
       await codeOf(
         authorize(q, {
           buyerKey: new Uint8Array(48).fill(1),
           wallet: sign(),
-          persist: async () => {},
+          store: memoryStore(),
         }),
       ),
     ).toMatch(/TypeError/);
@@ -1095,7 +1242,7 @@ describe('authorize', () => {
         authorize(q, {
           buyerKey: bls.G1.Point.BASE.multiply(7n).toBytes(false),
           wallet: sign(),
-          persist: async () => {},
+          store: memoryStore(),
         }),
       ),
     ).toMatch(/TypeError/);
@@ -1105,7 +1252,7 @@ describe('authorize', () => {
         authorize(q, {
           buyerKey: bls.G1.Point.ZERO.toBytes(true),
           wallet: sign(),
-          persist: async () => {},
+          store: memoryStore(),
         }),
       ),
     ).toMatch(/TypeError/);
@@ -1295,21 +1442,44 @@ describe('paymentLogs', () => {
 });
 
 describe('status', () => {
-  const job = (over: Partial<PaymentJob> = {}): PaymentJob => ({
-    contractId: CONTRACT,
-    fileId: FILE,
-    buyer: BUYER,
-    seller: SELLER,
-    to: PAY_TO,
-    usdc: USDC,
-    price: '10000',
-    buyerKey: hex(buyerKey),
-    nonce: ANNON,
-    validBefore: String(NOW + 300),
-    block: SIGNED,
-    signedAt: NOW,
-    ...over,
+  /** A recorded purchase with one attempt: its search start and deadline. */
+  const job = (
+    over: { block?: number; validBefore?: string; payload?: string } = {},
+  ): PurchaseRecord => ({
+    schemaVersion: 1,
+    id: 'purchase-1',
+    revision: 1,
+    terms: {
+      network: 'eip155:8453',
+      contractId: CONTRACT,
+      fileId: FILE,
+      buyer: BUYER,
+      seller: SELLER,
+      to: PAY_TO,
+      usdc: USDC,
+      price: '10000',
+      buyerKey: hex(buyerKey),
+      nonce: ANNON,
+      headerHash: sha256(HEADER),
+      cipherHash: CIPHER_HASH,
+      moderator: null,
+    },
+    attempts: [
+      {
+        attemptId: 'attempt-1',
+        preparedAt: NOW,
+        searchFromBlock: over.block ?? SIGNED,
+        validBefore: over.validBefore ?? String(NOW + 300),
+        paymentRequired: required(),
+        ...(over.payload ? { payload: over.payload } : {}),
+      },
+    ],
   });
+  const opened = async (r: PurchaseRecord) => {
+    const store = memoryStore<PurchaseRecord>();
+    await store.compareAndSet(purchaseKey(CONTRACT, FILE, BUYER), null, { ...r, revision: 0 });
+    return { store, record: { ...r, revision: 0 } };
+  };
 
   const atBlock = (l: RpcLog, n: number) => ({ ...l, blockNumber: `0x${n.toString(16)}` });
   const getLogsQuery = () =>
@@ -1420,7 +1590,8 @@ describe('status', () => {
       block: real.number - 20,
       validBefore: String(at(real.number + 30).timestamp + 300),
     });
-    const step = await nextStep(paidJob, { nearRpc: NEAR, baseRpc: BASE });
+    const { store, record } = await opened(paidJob);
+    const step = await nextStep(record, { nearRpc: NEAR, baseRpc: BASE, store });
     expect(step).toMatchObject({
       step: 'unlock',
       args: { file_id: FILE, buyer_key: hex(buyerKey), header: real.rlp },
@@ -1428,29 +1599,106 @@ describe('status', () => {
     if (step.step !== 'unlock') throw new Error('unreachable');
     expect(step.args.logs.map((l) => l.log_index)).toEqual([3, 4]);
     expect(step.args.logs.map((l) => l.block_number)).toEqual([real.number, real.number]);
+    // Paid, not yet recorded on NEAR: the purchase stays open, so no new one can start.
+    expect(await store.load(purchaseKey(CONTRACT, FILE, BUYER))).not.toBeNull();
     w.paymentUsed = true;
-    expect(await nextStep(paidJob, { nearRpc: NEAR, baseRpc: BASE })).toEqual({
+    expect(await nextStep(record, { nearRpc: NEAR, baseRpc: BASE, store })).toEqual({
       step: 'reopen',
       txHash: TX,
     });
+    // Recorded on NEAR: the purchase is closed.
+    expect(await store.load(purchaseKey(CONTRACT, FILE, BUYER))).toBeNull();
   });
 
   it('says wait while a signed payment can still settle, and buy only once it never can', async () => {
     w.head = at(SIGNED + 2000);
     w.getLogs = [atBlock(canceledLog(), SIGNED + 10)];
     w.finalized = at(SIGNED + 9);
-    expect(await nextStep(job(), { nearRpc: NEAR, baseRpc: BASE })).toEqual({ step: 'wait' });
+    const { store, record } = await opened(job());
+    expect(await nextStep(record, { nearRpc: NEAR, baseRpc: BASE, store })).toEqual({
+      step: 'wait',
+    });
+    expect(await store.load(purchaseKey(CONTRACT, FILE, BUYER))).not.toBeNull();
     w.finalized = at(SIGNED + 10);
-    expect(await nextStep(job(), { nearRpc: NEAR, baseRpc: BASE })).toEqual({ step: 'buy' });
+    expect(await nextStep(record, { nearRpc: NEAR, baseRpc: BASE, store })).toEqual({
+      step: 'buy',
+    });
+    // Closed: a new purchase can start.
+    expect(await store.load(purchaseKey(CONTRACT, FILE, BUYER))).toBeNull();
   });
 
-  it('two tabs at once: a store that holds one job per wallet and file lets only one sign', async () => {
-    const saved = new Map<string, PaymentJob>();
-    const persist = async (j: PaymentJob) => {
-      if (saved.has(purchaseKey(j)))
-        throw new Error('a purchase of this file is already under way');
-      saved.set(purchaseKey(j), j);
-    };
+  it('says resend with the recorded payload, byte for byte, while it can still settle', async () => {
+    w.head = at(SIGNED + 100);
+    const { store, record } = await opened(job({ payload: 'eyJyZWNvcmRlZCI6dHJ1ZX0=' }));
+    expect(await nextStep(record, { nearRpc: NEAR, baseRpc: BASE, store })).toEqual({
+      step: 'resend',
+      header: 'eyJyZWNvcmRlZCI6dHJ1ZX0=',
+    });
+    // Past its deadline by this clock: nothing to resend, wait for Base to say.
+    vi.mocked(Date.now).mockReturnValue((NOW + 301) * 1000);
+    expect(await nextStep(record, { nearRpc: NEAR, baseRpc: BASE, store })).toEqual({
+      step: 'wait',
+    });
+  });
+
+  it('closes the purchase and says reopen once NEAR has this wallet as a buyer by another payment', async () => {
+    w.head = at(SIGNED + 100);
+    w.isBuyer = true;
+    const { store, record } = await opened(job({ payload: 'eyJyZWNvcmRlZCI6dHJ1ZX0=' }));
+    expect(await nextStep(record, { nearRpc: NEAR, baseRpc: BASE, store })).toEqual({
+      step: 'reopen',
+    });
+    expect(await store.load(purchaseKey(CONTRACT, FILE, BUYER))).toBeNull();
+  });
+
+  it('closes a paid purchase not yet unlocked once the wallet is a buyer by another payment', async () => {
+    const real = headers.cases[0] as (typeof headers.cases)[number];
+    const inBlock = (l: RpcLog) => ({ ...atBlock(l, real.number), blockHash: real.hash });
+    w.head = at(real.number + 30);
+    w.getLogs = [inBlock(used(ANNON))];
+    w.receipt = receipt(x402Receipt().map(inBlock));
+    w.isBuyer = true;
+    const { store, record } = await opened(
+      job({ block: real.number - 20, validBefore: String(at(real.number + 30).timestamp + 300) }),
+    );
+    expect(await nextStep(record, { nearRpc: NEAR, baseRpc: BASE, store })).toEqual({
+      step: 'reopen',
+      txHash: TX,
+    });
+    expect(await store.load(purchaseKey(CONTRACT, FILE, BUYER))).toBeNull();
+  });
+
+  it('refuses to close a purchase another tab changed meanwhile', async () => {
+    w.head = at(SIGNED + 2000);
+    w.finalized = at(SIGNED + 2000);
+    const { store, record } = await opened(job());
+    const newer = { ...record, revision: 1 };
+    await store.compareAndSet(purchaseKey(CONTRACT, FILE, BUYER), record, newer);
+    expect(await codeOf(nextStep(record, { nearRpc: NEAR, baseRpc: BASE, store }))).toBe(
+      'store_conflict',
+    );
+    expect(await store.load(purchaseKey(CONTRACT, FILE, BUYER))).toEqual(newer);
+  });
+
+  it('searches every attempt: from the earliest block to the latest deadline', async () => {
+    const two = job({ block: SIGNED + 50, validBefore: String(NOW + 100) });
+    two.attempts.push({
+      ...(two.attempts[0] as PurchaseRecord['attempts'][number]),
+      attemptId: 'attempt-2',
+      searchFromBlock: SIGNED,
+      validBefore: String(NOW + 300),
+    });
+    w.head = at(SIGNED + 2000);
+    // Past the first deadline, not the second: still pending.
+    w.finalized = at(SIGNED + 1000);
+    expect(await status(BASE, two)).toEqual({ state: 'pending' });
+    expect(Number(getLogsQuery().fromBlock)).toBe(SIGNED);
+    w.finalized = at(SIGNED + 1500);
+    expect(await status(BASE, two)).toEqual({ state: 'expired' });
+  });
+
+  it('two tabs at once on one store: only one signs', async () => {
+    const store = memoryStore<PurchaseRecord>();
     const wallet = {
       address: buyerAccount.address,
       signTypedData: vi.fn((t: ReturnType<typeof typedData>) =>
@@ -1459,11 +1707,36 @@ describe('status', () => {
     };
     const q = await preflight(opts());
     const tabs = await Promise.allSettled([
-      authorize(q, { buyerKey, wallet, persist }),
-      authorize(q, { buyerKey: bls.G1.Point.BASE.multiply(8n).toBytes(true), wallet, persist }),
+      authorize(q, { buyerKey, wallet, store }),
+      authorize(q, { buyerKey: bls.G1.Point.BASE.multiply(8n).toBytes(true), wallet, store }),
     ]);
     expect(tabs.map((t) => t.status).sort()).toEqual(['fulfilled', 'rejected']);
     expect(wallet.signTypedData).toHaveBeenCalledTimes(1);
+  });
+
+  it('never calls a payment expired that landed while it was reading the chain', async () => {
+    // The payment lands, and finalized passes the deadline, between the SDK's reads.
+    let moved = false;
+    w.onTag = (tag) => {
+      if (tag !== 'finalized' || moved) return;
+      moved = true;
+      w.head = at(SIGNED + 2000);
+      w.getLogs = [atBlock(used(ANNON), SIGNED + 1400)];
+      w.receipt = receipt(x402Receipt().map((l) => atBlock(l, SIGNED + 1400)));
+      w.finalized = at(SIGNED + 2000);
+    };
+    expect(await status(BASE, job())).toMatchObject({ state: 'paid' });
+  });
+
+  it('finds a cancellation made after the deadline, and counts it once finalized', async () => {
+    const late = atBlock(canceledLog(), SIGNED + 1700);
+    w.head = at(SIGNED + 2500);
+    w.getLogs = [late];
+    w.authorizationState = true;
+    w.finalized = at(SIGNED + 1699);
+    expect(await status(BASE, job())).toEqual({ state: 'pending' });
+    w.finalized = at(SIGNED + 1700);
+    expect(await status(BASE, job())).toEqual({ state: 'canceled' });
   });
 
   it('never calls a used authorization expired, even when the RPC misses its log', async () => {
@@ -1598,7 +1871,10 @@ describe('x402 v2 envelope', () => {
       'untrusted_contract',
     );
     expect(code(withInfo(undefined), [CONTRACT])).toBe('file_mismatch');
-    expect(code(withInfo(annonInfo({ version: 2 })), [CONTRACT])).toBe('file_mismatch');
+    // v1.1 servers say 2, v1 servers 1; anything else is a profile this client does not know.
+    expect(code(withInfo(annonInfo({ version: 2 })), [CONTRACT])).toBe('ok');
+    expect(code(withInfo(annonInfo({ version: 3 })), [CONTRACT])).toBe('file_mismatch');
+    expect(code(withInfo(annonInfo({ version: '2' })), [CONTRACT])).toBe('file_mismatch');
     expect(code(withInfo(annonInfo({ network: 'near:testnet' })), [CONTRACT])).toBe(
       'file_mismatch',
     );
@@ -1744,7 +2020,7 @@ describe('the official x402 library accepts what the SDK sends', () => {
         address: buyerAccount.address,
         signTypedData: (t) => buyerAccount.signTypedData(asViem(t)),
       },
-      persist: async () => {},
+      store: memoryStore(),
     });
     const payload = decodePaymentSignatureHeader(header);
     expect(parsePaymentPayload(payload).success).toBe(true);
@@ -1761,12 +2037,15 @@ describe('the official x402 library accepts what the SDK sends', () => {
         address: buyerAccount.address,
         signTypedData: (t) => buyerAccount.signTypedData(asViem(t)),
       },
-      persist: async () => {},
+      store: memoryStore(),
     });
     const { signer, calls } = facilitatorSigner();
     const scheme = new ExactEvmScheme(signer as never);
     // The seller's adapter: the same signed payment, named `exact` for a standard facilitator.
-    const { paymentPayload, paymentRequirements } = forFacilitator(header, pr.accepts[0] as never);
+    const body = forFacilitator(header, pr.accepts[0] as never);
+    // The request body a facilitator's /verify and /settle take (x402 v2 section 7).
+    expect(body.x402Version).toBe(2);
+    const { paymentPayload, paymentRequirements } = body;
     const v = await scheme.verify(paymentPayload as never, paymentRequirements as never);
     expect(v).toMatchObject({ isValid: true, payer: BUYER });
     expect(calls).toContain('simulate:true');
@@ -1781,7 +2060,7 @@ describe('the official x402 library accepts what the SDK sends', () => {
         address: buyerAccount.address,
         signTypedData: (t) => buyerAccount.signTypedData(asViem(t)),
       },
-      persist: async () => {},
+      store: memoryStore(),
     });
     const { signer } = facilitatorSigner();
     const v = await new ExactEvmScheme(signer as never)
@@ -1847,7 +2126,7 @@ describe('offerFor and checkPayment', () => {
       download: 'https://seller.example/f/1/download',
     });
     expect(pr.extensions?.annon?.info).toEqual({
-      ...annonInfo(),
+      ...annonInfo({ version: 2 }),
       header: 'https://seller.example/f/1/header',
       download: 'https://seller.example/f/1/download',
     });
@@ -1877,7 +2156,7 @@ describe('offerFor and checkPayment', () => {
     const { header } = await authorize(q, {
       buyerKey,
       wallet: wallet(),
-      persist: async () => {},
+      store: memoryStore(),
     });
     expect(checkPayment(header, pr)).toMatchObject({
       payer: BUYER,
@@ -1921,6 +2200,106 @@ describe('offerFor and checkPayment', () => {
     expect(paymentRequirements.scheme).toBe('exact');
   });
 
+  it('keeps every extension of the payload for the facilitator, the payment id included', async () => {
+    const pr = await offerFor(offerOpts);
+    const q = await preflight(opts({ paymentRequired: pr }));
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
+    const sent = decodePaymentSignatureHeader(header);
+    const { paymentPayload } = forFacilitator(header, pr.accepts[0] as never);
+    expect((paymentPayload as unknown as { extensions: unknown }).extensions).toEqual(
+      sent.extensions,
+    );
+    expect(extractPaymentIdentifier(paymentPayload as never)).toBe(extractPaymentIdentifier(sent));
+  });
+
+  it('advertises profile v1.1: annon version 2, and payment-identifier as the official helper declares it', async () => {
+    const pr = await offerFor(offerOpts);
+    expect(pr.extensions?.annon?.info.version).toBe(2);
+    expect(pr.extensions?.annon?.schema).toMatchObject({ properties: { version: { const: 2 } } });
+    expect(pr.extensions?.['payment-identifier']).toEqual(declarePaymentIdentifierExtension(false));
+  });
+
+  it('takes a payment id only as advertised, and only a valid one', async () => {
+    const pr = await offerFor(offerOpts);
+    const q = await preflight(opts({ paymentRequired: pr }));
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
+    expect(checkPayment(header, pr, NOW).paymentId).toMatch(/^pay_[0-9a-f]{32}$/);
+    const edit = (
+      f: (ext: { info: Record<string, unknown> } & Record<string, unknown>) => void,
+    ) => {
+      const p = decodePaymentSignatureHeader(header) as unknown as {
+        extensions: Record<string, { info: Record<string, unknown> } & Record<string, unknown>>;
+      };
+      f(p.extensions['payment-identifier'] as never);
+      return Buffer.from(JSON.stringify(p)).toString('base64');
+    };
+    for (const bad of ['short', 'has space in it!!', 'x'.repeat(129), 7]) {
+      expect(
+        reject(() =>
+          checkPayment(
+            edit((e) => {
+              e.info.id = bad;
+            }),
+            pr,
+            NOW,
+          ),
+        ),
+      ).toMatch(/^bad_requirements/);
+    }
+    expect(
+      reject(() =>
+        checkPayment(
+          edit((e) => {
+            e.info.required = true;
+          }),
+          pr,
+          NOW,
+        ),
+      ),
+    ).toMatch(/^bad_requirements/);
+    expect(
+      reject(() =>
+        checkPayment(
+          edit((e) => {
+            e.schema = {};
+          }),
+          pr,
+          NOW,
+        ),
+      ),
+    ).toMatch(/^bad_requirements/);
+    // Echoed without an id: fine while optional, refused when the server requires one.
+    const bare = edit((e) => {
+      delete e.info.id;
+    });
+    expect(checkPayment(bare, pr, NOW).paymentId).toBeUndefined();
+    const requiring = {
+      ...pr,
+      extensions: {
+        ...pr.extensions,
+        'payment-identifier': declarePaymentIdentifierExtension(true),
+      },
+    } as PaymentRequired;
+    const bareRequired = (() => {
+      const p = decodePaymentSignatureHeader(bare) as unknown as {
+        extensions: Record<string, { info: Record<string, unknown> }>;
+      };
+      (p.extensions['payment-identifier'] as { info: Record<string, unknown> }).info.required =
+        true;
+      return Buffer.from(JSON.stringify(p)).toString('base64');
+    })();
+    expect(reject(() => checkPayment(bareRequired, requiring, NOW))).toMatch(/^bad_requirements/);
+    // Optional: a payload without it is a payment like any other.
+    const without = (() => {
+      const p = decodePaymentSignatureHeader(header) as unknown as {
+        extensions: Record<string, unknown>;
+      };
+      delete p.extensions['payment-identifier'];
+      return Buffer.from(JSON.stringify(p)).toString('base64');
+    })();
+    expect(checkPayment(without, pr, NOW).paymentId).toBeUndefined();
+  });
+
   it('refuses a payment signed for the identity key, which would put the key in the clear', async () => {
     w.file = file();
     const pr = await offerFor(offerOpts);
@@ -1953,7 +2332,7 @@ describe('offerFor and checkPayment', () => {
     w.file = file();
     const pr = await offerFor(offerOpts);
     const q = await preflight(opts({ paymentRequired: pr }));
-    const { header } = await authorize(q, { buyerKey, wallet: wallet(), persist: async () => {} });
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
     const p = JSON.parse(Buffer.from(header, 'base64').toString());
     p.accepted = Object.fromEntries(Object.entries(p.accepted).reverse());
     p.extensions.annon.info = Object.fromEntries(Object.entries(p.extensions.annon.info).reverse());
@@ -1992,7 +2371,7 @@ describe('offerFor and checkPayment', () => {
     w.file = file();
     const pr = await offerFor(offerOpts);
     const q = await preflight(opts({ paymentRequired: pr }));
-    const { header } = await authorize(q, { buyerKey, wallet: wallet(), persist: async () => {} });
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
     expect(await verifyPayment(header, { ...offerOpts, baseRpc: BASE })).toMatchObject({
       payer: BUYER,
     });
@@ -2047,7 +2426,7 @@ describe('offerFor and checkPayment', () => {
     w.file = file();
     const pr = await offerFor(offerOpts);
     const q = await preflight(opts({ paymentRequired: pr }));
-    const { header } = await authorize(q, { buyerKey, wallet: wallet(), persist: async () => {} });
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
     w.calls = [];
     await verifyPayment(header, { ...offerOpts, baseRpc: BASE });
     const order = w.calls.map((c) => c.method);
@@ -2059,7 +2438,7 @@ describe('offerFor and checkPayment', () => {
     w.file = file();
     const pr = await offerFor(offerOpts);
     const q = await preflight(opts({ paymentRequired: pr }));
-    const { header } = await authorize(q, { buyerKey, wallet: wallet(), persist: async () => {} });
+    const { header } = await authorize(q, { buyerKey, wallet: wallet(), store: memoryStore() });
     const base = JSON.parse(Buffer.from(header, 'base64').toString());
     const edit = (f: (p: typeof base) => void) => {
       const p = structuredClone(base);
@@ -2147,5 +2526,700 @@ describe('offerFor and checkPayment', () => {
         name,
       ).toMatch(/^(bad_requirements|bad_signature)/);
     }
+  });
+});
+
+// ---------- profile section 10: a seller settles each purchase once ----------
+
+describe('settle (profile section 10)', () => {
+  const offerOpts = {
+    nearRpc: NEAR,
+    baseRpc: BASE,
+    contractId: CONTRACT,
+    fileId: FILE,
+    url: 'https://seller.example/f/1',
+    header: 'https://seller.example/f/1/header',
+    download: 'https://seller.example/f/1/file',
+  };
+  const wallet = () => ({
+    address: buyerAccount.address,
+    signTypedData: (t: ReturnType<typeof typedData>) => buyerAccount.signTypedData(asViem(t)),
+  });
+  const PAID_AT = SIGNED + 20;
+  const landPayment = (block = PAID_AT, nonce = ANNON) => {
+    const atB = (l: RpcLog) => ({ ...l, blockNumber: `0x${block.toString(16)}` });
+    w.getLogs = [atB(used(nonce))];
+    w.receipt = receipt(
+      [
+        transfer(`0x${'77'.repeat(20)}`, `0x${'78'.repeat(20)}`, 5n, 2),
+        used(nonce),
+        transfer(BUYER, PAY_TO, 10_000n, 4),
+      ].map(atB),
+    );
+  };
+  /** A standard facilitator that settles on Base and answers with the transaction. */
+  const facilitator = (answer?: SettleResponse) =>
+    vi.fn(async (_body: unknown) => {
+      if (!answer) landPayment();
+      return answer ?? { success: true, transaction: TX, network: 'eip155:8453', payer: BUYER };
+    });
+  const buy = async (key = buyerKey) => {
+    const pr = await offerFor(offerOpts);
+    const q = await preflight(opts({ paymentRequired: pr }));
+    return (await authorize(q, { buyerKey: key, wallet: wallet(), store: memoryStore() })).header;
+  };
+  const sellerStore = () => memoryStore<SellerRecord>();
+  const run = (
+    header: string,
+    store: ReturnType<typeof sellerStore>,
+    f: ReturnType<typeof facilitator>,
+  ) => settle(header, { ...offerOpts, store, facilitator: f });
+  beforeEach(() => {
+    w.head = at(SIGNED + 50);
+  });
+
+  it('settles a new payment once, through a standard facilitator request', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = facilitator();
+    const out = await run(header, store, f);
+    expect(out).toMatchObject({
+      state: 'settled',
+      transaction: TX,
+      network: 'eip155:8453',
+      payer: BUYER,
+      nonce: ANNON,
+      buyerKey: hex(buyerKey),
+    });
+    expect(f).toHaveBeenCalledTimes(1);
+    const body = f.mock.calls[0]?.[0] as {
+      x402Version: number;
+      paymentPayload: { accepted: { scheme: string } };
+      paymentRequirements: { scheme: string };
+    };
+    expect(body.x402Version).toBe(2);
+    expect(body.paymentRequirements.scheme).toBe('exact');
+    expect(body.paymentPayload.accepted.scheme).toBe('exact');
+  });
+
+  it('records the purchase as processing before calling the facilitator', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const seen: (string | undefined)[] = [];
+    const cas = store.compareAndSet.bind(store);
+    store.compareAndSet = async (key, expected, next) => {
+      if (next && 'state' in next) seen.push(next.state);
+      return cas(key, expected, next);
+    };
+    const f = vi.fn(async () => {
+      seen.push('facilitator');
+      landPayment();
+      return { success: true, transaction: TX, network: 'eip155:8453' };
+    });
+    await run(header, store, f);
+    expect(seen.slice(0, 2)).toEqual(['processing', 'facilitator']);
+    expect(seen.at(-1)).toBe('settled');
+  });
+
+  it('answers a retry of a settled purchase from its state, after a stop and past the deadline, settling nothing again', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = facilitator();
+    await run(header, store, f);
+    w.file = file({ sales_stopped_at: NOW + 1 });
+    vi.mocked(Date.now).mockReturnValue((NOW + 3600) * 1000);
+    w.head = at(SIGNED + 5 * 3600);
+    expect(await run(header, store, f)).toMatchObject({ state: 'settled', transaction: TX });
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not refuse a paid buyer because the seller's settings changed since", async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = facilitator();
+    await run(header, store, f);
+    const changed = { ...offerOpts, maxTimeoutSeconds: 60, header: 'https://cdn.example/h' };
+    expect(await settle(header, { ...changed, store, facilitator: f })).toMatchObject({
+      state: 'settled',
+    });
+  });
+
+  it('refuses a taken-down file first, whatever the state, a settled purchase included', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = facilitator();
+    await run(header, store, f);
+    w.file = file({ taken_down: 'court_order' });
+    expect(await codeOf(run(header, store, f))).toBe('taken_down');
+  });
+
+  it('binds an id to its payload: the same payload gets the same answer, another payload 409', async () => {
+    const first = await buy();
+    const store = sellerStore();
+    const f = facilitator();
+    expect(await run(first, store, f)).toMatchObject({ state: 'settled' });
+    expect(await run(first, store, f)).toMatchObject({ state: 'settled' });
+    const id = extractPaymentIdentifier(decodePaymentSignatureHeader(first));
+    // Another valid payment (another one-time key) sent under the first one's id.
+    w.getLogs = [];
+    w.receipt = null;
+    const second = decodePaymentSignatureHeader(
+      await buy(bls.G1.Point.BASE.multiply(8n).toBytes(true)),
+    ) as unknown as {
+      extensions: Record<string, { info: Record<string, unknown> }>;
+    };
+    (second.extensions['payment-identifier'] as { info: Record<string, unknown> }).info.id = id;
+    const reused = Buffer.from(JSON.stringify(second)).toString('base64');
+    expect(await codeOf(run(reused, store, f))).toBe('payment_id_conflict');
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps an id per seller scope: another route may see the same id with another payload', async () => {
+    const first = await buy();
+    const f = facilitator();
+    const store = sellerStore();
+    await settle(first, { ...offerOpts, store, facilitator: f, scope: 'route-a' });
+    const id = extractPaymentIdentifier(decodePaymentSignatureHeader(first));
+    w.getLogs = [];
+    w.receipt = null;
+    const second = decodePaymentSignatureHeader(
+      await buy(bls.G1.Point.BASE.multiply(8n).toBytes(true)),
+    ) as unknown as { extensions: Record<string, { info: Record<string, unknown> }> };
+    (second.extensions['payment-identifier'] as { info: Record<string, unknown> }).info.id = id;
+    const reused = Buffer.from(JSON.stringify(second)).toString('base64');
+    const g = vi.fn(async () => ({ success: false, errorReason: 'insufficient_funds' }));
+    // Not a conflict on route b: its own purchase, settled (or not) on its own.
+    expect(
+      await codeOf(settle(reused, { ...offerOpts, store, facilitator: g, scope: 'route-b' })),
+    ).toBe('settlement_processing');
+    expect(
+      await codeOf(settle(reused, { ...offerOpts, store, facilitator: g, scope: 'route-a' })),
+    ).toBe('payment_id_conflict');
+  });
+
+  it('answers pending with the hash when the facilitator says settlement_pending, and settled once Base shows it', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = facilitator({
+      success: false,
+      errorReason: 'settlement_pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    expect(await run(header, store, f)).toEqual({
+      state: 'pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    landPayment();
+    expect(await run(header, store, f)).toMatchObject({ state: 'settled', transaction: TX });
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts a payment as settled only at Base safe; before that it is pending with its hash', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = facilitator();
+    w.safe = at(PAID_AT - 1);
+    expect(await run(header, store, f)).toEqual({
+      state: 'pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    w.safe = at(PAID_AT);
+    expect(await run(header, store, f)).toMatchObject({ state: 'settled' });
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it('after a crash with the call in flight: finds the payment on Base by its nonce, never calling again', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const crash = vi.fn(async () => {
+      landPayment();
+      throw new Error('connection reset');
+    });
+    expect(await codeOf(run(header, store, crash))).toBe('settlement_processing');
+    const f = facilitator();
+    expect(await run(header, store, f)).toMatchObject({ state: 'settled', transaction: TX });
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('after a crash with nothing on Base: sends the same payload again while it can still settle', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const lost = vi.fn(async () => {
+      throw new Error('connection reset');
+    });
+    expect(await codeOf(run(header, store, lost))).toBe('settlement_processing');
+    const f = facilitator();
+    expect(await run(header, store, f)).toMatchObject({ state: 'settled' });
+    expect(f).toHaveBeenCalledTimes(1);
+    const [body] = f.mock.calls[0] ?? [];
+    const sent = (body as { paymentPayload: unknown }).paymentPayload;
+    expect(sent).toEqual(
+      forFacilitator(header, (await offerFor(offerOpts)).accepts[0] as never).paymentPayload,
+    );
+  });
+
+  it('a seller that lost its state finds a payment settled elsewhere and answers it, sales stopped or not', async () => {
+    const header = await buy();
+    landPayment();
+    w.file = file({ sales_stopped_at: NOW + 1 });
+    const f = facilitator();
+    expect(await run(header, sellerStore(), f)).toMatchObject({
+      state: 'settled',
+      transaction: TX,
+    });
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('takes no payment from authorizationState or a cancellation: canceled is unpaid, and refused', async () => {
+    const header = await buy();
+    const canceled = rpcLog(
+      USDC,
+      encodeEventTopics({
+        abi: USDC_ABI,
+        eventName: 'AuthorizationCanceled',
+        args: { authorizer: BUYER as `0x${string}`, nonce: ANNON as `0x${string}` },
+      }) as string[],
+      '0x',
+      3,
+    );
+    w.getLogs = [canceled];
+    w.authorizationState = true;
+    w.head = at(SIGNED + 2000);
+    w.finalized = at(SIGNED + 2000);
+    const f = facilitator();
+    expect(await codeOf(run(header, sellerStore(), f))).toBe('payment_expired');
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('two payloads of one purchase at once: the facilitator is called once', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = vi.fn(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      landPayment();
+      return { success: true, transaction: TX, network: 'eip155:8453' };
+    });
+    const both = await Promise.all([codeOf(run(header, store, f)), codeOf(run(header, store, f))]);
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(both).toContain('ok');
+  });
+
+  it('refuses before recording anything: another file, a forged signature, a wrong nonce', async () => {
+    const header = await buy();
+    type P = {
+      payload: { signature: string; authorization: { nonce: string } };
+      extensions: { annon: { info: { fileId: string } } };
+      accepted: { amount: string };
+    };
+    const p = decodePaymentSignatureHeader(header) as unknown as P;
+    const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64');
+    const store = sellerStore();
+    const cas = vi.spyOn(store, 'compareAndSet');
+    const f = facilitator();
+    const forged = structuredClone(p);
+    forged.payload.signature = `0x${'11'.repeat(65)}`;
+    const wrongNonce = structuredClone(p);
+    wrongNonce.payload.authorization.nonce = `0x${'ab'.repeat(32)}`;
+    const otherFile = structuredClone(p);
+    otherFile.extensions.annon.info.fileId = `0x${'12'.repeat(32)}`;
+    const otherPrice = structuredClone(p);
+    otherPrice.accepted.amount = '9999';
+    for (const bad of [forged, wrongNonce, otherFile, otherPrice]) {
+      expect(await codeOf(run(enc(bad), store, f))).toMatch(/^(bad_signature|bad_requirements)$/);
+    }
+    expect(cas).not.toHaveBeenCalled();
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('refuses a payment signed for less than the registered price, even when its offer says so', async () => {
+    const header = await buy();
+    const p = decodePaymentSignatureHeader(header) as unknown as {
+      accepted: { amount: string };
+      payload: { signature: string; authorization: Record<string, string> };
+    };
+    // A valid signature by the buyer over 9999, with the echoed offer asking 9999 too.
+    const a: Record<string, string> = { ...p.payload.authorization, value: '9999' };
+    p.accepted.amount = '9999';
+    p.payload.authorization = a;
+    p.payload.signature = await buyerAccount.signTypedData(
+      asViem(
+        typedData(USDC, {
+          from: a.from as string,
+          to: a.to as string,
+          value: 9999n,
+          validAfter: 0n,
+          validBefore: BigInt(a.validBefore as string),
+          nonce: a.nonce as string,
+        }),
+      ),
+    );
+    const store = sellerStore();
+    const f = facilitator();
+    const under = () => Buffer.from(JSON.stringify(p)).toString('base64');
+    expect(await codeOf(run(under(), store, f))).toBe('bad_requirements');
+    expect(f).not.toHaveBeenCalled();
+    // The same purchase waiting to be settled again: the underpayment, valid one second longer,
+    // must not be the payload sent.
+    await codeOf(run(header, store, facilitator({ success: false, errorReason: 'x' })));
+    const later: Record<string, string> = {
+      ...a,
+      validBefore: String(BigInt(a.validBefore as string) + 1n),
+    };
+    p.payload.authorization = later;
+    p.payload.signature = await buyerAccount.signTypedData(
+      asViem(
+        typedData(USDC, {
+          from: later.from as string,
+          to: later.to as string,
+          value: 9999n,
+          validAfter: 0n,
+          validBefore: BigInt(later.validBefore as string),
+          nonce: later.nonce as string,
+        }),
+      ),
+    );
+    expect(await codeOf(run(under(), store, f))).toBe('bad_requirements');
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('settles a recorded purchase only with its recorded payload, never a longer one sent later', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    await codeOf(run(header, store, facilitator({ success: false, errorReason: 'x' })));
+    const pr = await offerFor(offerOpts);
+    // Sales stop; 399 s later the buyer's key signs the same nonce again, valid for a day.
+    w.file = file({ sales_stopped_at: NOW + 1 });
+    vi.mocked(Date.now).mockReturnValue((NOW + 399) * 1000);
+    w.head = at(SIGNED + 5 * 399);
+    const p = decodePaymentSignatureHeader(header) as unknown as {
+      payload: { signature: string; authorization: Record<string, string> };
+    };
+    const long: Record<string, string> = {
+      ...p.payload.authorization,
+      validBefore: String(NOW + 399 + 86_400),
+    };
+    p.payload.authorization = long;
+    (p as unknown as { accepted: { maxTimeoutSeconds: number } }).accepted.maxTimeoutSeconds =
+      86_400;
+    p.payload.signature = await buyerAccount.signTypedData(
+      asViem(
+        typedData(USDC, {
+          from: long.from as string,
+          to: long.to as string,
+          value: 10_000n,
+          validAfter: 0n,
+          validBefore: BigInt(long.validBefore as string),
+          nonce: long.nonce as string,
+        }),
+      ),
+    );
+    const f = facilitator({
+      success: false,
+      errorReason: 'invalid_exact_evm_payload_authorization_valid_before',
+    });
+    // A changed payload carries a new id (the old one would be a 409 at once).
+    (p as unknown as { extensions: Record<string, { info: Record<string, unknown> }> }).extensions[
+      'payment-identifier'
+    ] = {
+      ...declarePaymentIdentifierExtension(false),
+      info: { required: false, id: 'pay_0123456789abcdef0123456789abcdef' },
+    };
+    await codeOf(run(Buffer.from(JSON.stringify(p)).toString('base64'), store, f));
+    expect(f).toHaveBeenCalled();
+    for (const [body] of f.mock.calls) {
+      expect((body as { paymentPayload: unknown }).paymentPayload).toEqual(
+        forFacilitator(header, pr.accepts[0] as never).paymentPayload,
+      );
+    }
+  });
+
+  it('runs the new-payment checks for a purchase never settled: a stop refuses it', async () => {
+    const header = await buy();
+    w.file = file({ sales_stopped_at: NOW });
+    const f = facilitator();
+    const store = sellerStore();
+    expect(await codeOf(run(header, store, f))).toBe('sales_stopped');
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('keeps a refused settlement processing and retryable, and tries again on the next payload', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const refused = facilitator({ success: false, errorReason: 'insufficient_funds' });
+    expect(await codeOf(run(header, store, refused))).toBe('settlement_processing');
+    const f = facilitator();
+    expect(await run(header, store, f)).toMatchObject({ state: 'settled' });
+  });
+
+  it('does not count a payment at a safe height whose block a reorg replaced', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = facilitator();
+    w.blockHashes = { [PAID_AT]: `0x${'cd'.repeat(32)}` };
+    expect(await run(header, store, f)).toEqual({
+      state: 'pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    w.blockHashes = {};
+    expect(await run(header, store, f)).toMatchObject({ state: 'settled' });
+  });
+
+  it('keeps answering pending with the hash when a later call for a broadcast purchase fails', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const pending = facilitator({
+      success: false,
+      errorReason: 'settlement_pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    expect(await run(header, store, pending)).toMatchObject({ state: 'pending' });
+    vi.mocked(Date.now).mockReturnValue((NOW + 61) * 1000);
+    const broken = vi.fn(async () => {
+      throw new Error('connection reset');
+    });
+    expect(await run(header, store, broken)).toEqual({
+      state: 'pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+  });
+
+  it('aborts a facilitator call that hangs, before another request may call again', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    let aborted = false;
+    const hang = vi.fn(
+      (_body: unknown, o: { signal: AbortSignal }) =>
+        new Promise<SettleResponse>((_, no) =>
+          o.signal.addEventListener('abort', () => {
+            aborted = true;
+            no(o.signal.reason);
+          }),
+        ),
+    );
+    expect(
+      await codeOf(
+        settle(header, { ...offerOpts, store, facilitator: hang, facilitatorTimeoutMs: 30 }),
+      ),
+    ).toBe('settlement_processing');
+    expect(aborted).toBe(true);
+    // Given up and aborted: the next payload may call again at once.
+    const f = facilitator();
+    expect(await run(header, store, f)).toMatchObject({ state: 'settled' });
+  });
+
+  it('never answers settled for a payment on Base below the registered price', async () => {
+    const header = await buy();
+    const atB = (l: RpcLog) => ({ ...l, blockNumber: `0x${PAID_AT.toString(16)}` });
+    w.getLogs = [atB(used(ANNON))];
+    w.receipt = receipt([used(ANNON), transfer(BUYER, PAY_TO, 9_999n, 4)].map(atB));
+    const f = facilitator();
+    expect(await codeOf(run(header, sellerStore(), f))).not.toBe('ok');
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('scopes payment ids by contract, file and url unless told otherwise', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    await run(header, store, facilitator());
+    const id = extractPaymentIdentifier(decodePaymentSignatureHeader(header));
+    expect(
+      await store.load(`annon/seller/id/${CONTRACT}/${FILE}/${offerOpts.url}/${id}`),
+    ).toMatchObject({ kind: 'id' });
+  });
+
+  it('gives the x402 PAYMENT-RESPONSE for both answers, as the official codec reads it', () => {
+    const settled: X402SettleResponse = paymentResponse({
+      state: 'settled',
+      transaction: TX,
+      network: 'eip155:8453',
+      payer: BUYER,
+      buyerKey: hex(buyerKey),
+      nonce: ANNON,
+    }) as X402SettleResponse;
+    expect(decodePaymentResponseHeader(encodePaymentResponseHeader(settled))).toEqual({
+      success: true,
+      transaction: TX,
+      network: 'eip155:8453',
+      payer: BUYER,
+    });
+    const pending = paymentResponse({ state: 'pending', transaction: TX, network: 'eip155:8453' });
+    expect(pending).toEqual({
+      success: false,
+      errorReason: 'settlement_pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+  });
+
+  it('never calls the facilitator once a slow write has used up the lease', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const cas = store.compareAndSet.bind(store);
+    store.compareAndSet = async (key, expected, next) => {
+      // The write that claims the purchase takes longer than the lease.
+      if (next && 'state' in next && next.leaseUntil > 0) {
+        vi.mocked(Date.now).mockReturnValue((NOW + 3600) * 1000);
+      }
+      return cas(key, expected, next);
+    };
+    const f = facilitator();
+    expect(await codeOf(run(header, store, f))).toBe('settlement_processing');
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('answers from the record that won when another request recorded the payment meanwhile', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = vi.fn(async () => {
+      // While this call runs, another request finds the transaction and records it.
+      const key = `annon/seller/purchase/eip155:8453/${USDC}/${BUYER}/${ANNON}`;
+      const r = (await store.load(key)) as SellerRecord & { revision: number };
+      await store.compareAndSet(key, r, {
+        ...(r as object),
+        revision: r.revision + 1,
+        state: 'submitted',
+        transaction: TX,
+      } as SellerRecord);
+      throw new Error('connection reset');
+    });
+    expect(await run(header, store, f)).toEqual({
+      state: 'pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+  });
+
+  const purchaseKeyOf = () => `annon/seller/purchase/eip155:8453/${USDC}/${BUYER}/${ANNON}`;
+  /** Another request writes the purchase record while this one's facilitator call runs. */
+  const meanwhile = (store: ReturnType<typeof sellerStore>, change: Record<string, unknown>) =>
+    (async () => {
+      const r = (await store.load(purchaseKeyOf())) as SellerRecord & { revision: number };
+      await store.compareAndSet(purchaseKeyOf(), r, {
+        ...(r as object),
+        ...change,
+        revision: r.revision + 1,
+      } as SellerRecord);
+    })();
+
+  it('answers settled when another request recorded the settlement while its own call succeeded', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = vi.fn(async () => {
+      await meanwhile(store, { state: 'settled', transaction: TX });
+      return { success: true, transaction: TX, network: 'eip155:8453' };
+    });
+    expect(await run(header, store, f)).toMatchObject({ state: 'settled', transaction: TX });
+  });
+
+  it('answers expired when another request found the purchase unpaid while its own call failed', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const f = vi.fn(async () => {
+      await meanwhile(store, { state: 'unpaid' });
+      throw new Error('connection reset');
+    });
+    expect(await codeOf(run(header, store, f))).toBe('payment_expired');
+  });
+
+  it('keeps the pending answer of a broadcast purchase when a slow write leaves no time to call', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const pending = facilitator({
+      success: false,
+      errorReason: 'settlement_pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    await run(header, store, pending);
+    vi.mocked(Date.now).mockReturnValue((NOW + 61) * 1000);
+    const cas = store.compareAndSet.bind(store);
+    store.compareAndSet = async (key, expected, next) => {
+      if (next && 'state' in next && next.leaseUntil > 0) {
+        vi.mocked(Date.now).mockReturnValue((NOW + 3600) * 1000);
+      }
+      return cas(key, expected, next);
+    };
+    const f = facilitator();
+    expect(await run(header, store, f)).toEqual({
+      state: 'pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('gives the facilitator only what is left of the lease after a slow write', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const cas = store.compareAndSet.bind(store);
+    store.compareAndSet = async (key, expected, next) => {
+      // The claim takes 4 of the 15 s lease (5 s timeout + 10 s margin): 1 s is left for the call.
+      if (next && 'state' in next && next.leaseUntil > 0) {
+        vi.mocked(Date.now).mockReturnValue((NOW + 4) * 1000);
+      }
+      return cas(key, expected, next);
+    };
+    const hang = vi.fn(
+      (_body: unknown, o: { signal: AbortSignal }) =>
+        new Promise<SettleResponse>((_, no) =>
+          o.signal.addEventListener('abort', () => no(o.signal.reason)),
+        ),
+    );
+    const start = performance.now();
+    expect(
+      await codeOf(
+        settle(header, { ...offerOpts, store, facilitator: hang, facilitatorTimeoutMs: 5_000 }),
+      ),
+    ).toBe('settlement_processing');
+    expect(performance.now() - start).toBeLessThan(3_000);
+  });
+
+  it('answers from the winning record when every write of its own keeps losing', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    // Broadcast earlier: submitted with its hash; the lease has run out since.
+    await run(
+      header,
+      store,
+      facilitator({
+        success: false,
+        errorReason: 'settlement_pending',
+        transaction: TX,
+        network: 'eip155:8453',
+      }),
+    );
+    vi.mocked(Date.now).mockReturnValue((NOW + 61) * 1000);
+    landPayment();
+    w.safe = at(PAID_AT - 1);
+    // Another request wins every write from now on.
+    store.compareAndSet = async () => false;
+    expect(await run(header, store, facilitator())).toEqual({
+      state: 'pending',
+      transaction: TX,
+      network: 'eip155:8453',
+    });
+  });
+
+  it('answers settled when another request recorded it right after this one recorded the broadcast', async () => {
+    const header = await buy();
+    const store = sellerStore();
+    const cas = store.compareAndSet.bind(store);
+    store.compareAndSet = async (key, expected, next) => {
+      const ok = await cas(key, expected, next);
+      if (ok && next && 'state' in next && next.state === 'submitted') {
+        await meanwhile(store, { state: 'settled', transaction: TX });
+      }
+      return ok;
+    };
+    expect(await run(header, store, facilitator())).toMatchObject({
+      state: 'settled',
+      transaction: TX,
+    });
   });
 });
