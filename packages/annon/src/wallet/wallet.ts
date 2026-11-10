@@ -1,6 +1,15 @@
 /** Wallet adapters: authoritative text in, checked authorization out. No browser globals. */
+import { base64 } from '@scure/base';
+import type { Account } from 'near-api-js';
+import { signMessage as signNearMessage } from 'near-api-js/nep413';
 import { createWalletClient, custom, type EIP1193Provider } from 'viem';
 import { base } from 'viem/chains';
+import {
+  type NearMessage,
+  type NearSignedMessage,
+  proveNearControl,
+  type RecoveryProofContext,
+} from '../near/nep413.js';
 import type { TypedData } from '../pay/eip3009.js';
 import { hex } from '../settle-near/codec.js';
 import {
@@ -11,7 +20,7 @@ import {
   verifyAuthorization,
 } from '../settle-near/identity.js';
 import { parsePurchaseMessage } from '../settle-near/purchase.js';
-import { NEAR_USDC } from '../settle-near/terms.js';
+import type { SettlementAssets } from '../settle-near/terms.js';
 
 export interface IdentityWallet {
   identity: Identity;
@@ -102,9 +111,9 @@ export interface NearCall {
 }
 export interface NearWallet extends IdentityWallet {
   call(call: NearCall): Promise<unknown>;
-  transferPurchase(message: string): Promise<unknown>;
-  /** Proof supplied by an integration using an account-bound NEAR wallet challenge. Required before using a NEAR identity as recovery. */
-  proveControl?: (text: string) => Promise<void>;
+  transferPurchase(message: string, assets?: SettlementAssets): Promise<unknown>;
+  /** Adapters default to NEP-413 plus a final full-access-key check before using NEAR recovery. */
+  proveControl?: (text: string, context: RecoveryProofContext) => Promise<void>;
 }
 function nearWallet(
   accountId: string,
@@ -124,15 +133,14 @@ function nearWallet(
       await selected();
       return call(request);
     },
-    async transferPurchase(message) {
-      const p = parsePurchaseMessage(message);
-      if (p.route !== 'near-usdc' || p.asset !== NEAR_USDC)
-        throw new TypeError('not a NEAR USDC purchase');
+    async transferPurchase(message, assets) {
+      const p = parsePurchaseMessage(message, assets);
+      if (p.route !== 'near-usdc') throw new TypeError('not a NEAR USDC purchase');
       if (BigInt(p.expires_at) <= BigInt(Math.floor(Date.now() / 1000)))
         throw new Error('purchase expired');
       await selected();
       return call({
-        receiverId: NEAR_USDC,
+        receiverId: p.asset,
         method: 'ft_transfer_call',
         args: { receiver_id: p.contract, amount: p.price, msg: message },
         gas: 150000000000000n,
@@ -142,6 +150,7 @@ function nearWallet(
   };
 }
 export interface SelectorWallet {
+  signMessage?: (p: NearMessage) => Promise<NearSignedMessage | undefined>;
   getAccounts(): Promise<readonly { accountId: string }[]>;
   signAndSendTransaction(tx: {
     signerId: string;
@@ -179,13 +188,23 @@ export function nearSelectorWallet(
           },
         ],
       }),
-    proveControl,
+    proveControl ??
+      ((text, context) => {
+        if (!wallet.signMessage) throw new Error('NEAR recovery requires NEP-413 signMessage');
+        return proveNearControl(
+          accountId,
+          text,
+          context,
+          (p) => wallet.signMessage?.(p) ?? Promise.resolve(undefined),
+        );
+      }),
   );
 }
 /** Pass a near-api-js Account constructed with a KeyPair signer. The account sends the call itself. */
 export function nearKeyPairWallet(
   account: {
     accountId: string;
+    getSigner?: Account['getSigner'];
     callFunction(args: {
       contractId: string;
       methodName: string;
@@ -207,6 +226,17 @@ export function nearKeyPairWallet(
         gas: call.gas ?? 300000000000000n,
         deposit: call.deposit ?? 0n,
       }),
-    proveControl,
+    proveControl ??
+      (async (text, context) => {
+        if (!account.getSigner) throw new Error('NEAR recovery requires a NEP-413 signer');
+        await proveNearControl(account.accountId, text, context, async (payload) => {
+          const result = await signNearMessage({ signerAccount: account as Account, payload });
+          return {
+            accountId: result.accountId,
+            publicKey: result.publicKey.toString(),
+            signature: base64.encode(result.signature),
+          };
+        });
+      }),
   );
 }

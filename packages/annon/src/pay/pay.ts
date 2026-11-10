@@ -18,7 +18,6 @@ import {
   type Purchase,
   purchaseId,
 } from '../settle-near/purchase.js';
-import { termsHash } from '../settle-near/terms.js';
 import {
   balanceOf,
   block,
@@ -193,6 +192,12 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
     fail('unknown_moderator', `the file's moderator ${file.moderator} is not one you trust`);
   }
   const config = await getConfig(o.nearRpc, o.contractId);
+  if (
+    file.terms.network !== config.network ||
+    file.terms.near.token !== config.nearUsdc ||
+    (file.terms.base && file.terms.base.usdc !== config.usdc)
+  )
+    fail('network_mismatch');
   if (!(o.pay2 instanceof Uint8Array)) throw new TypeError('pay2 must be the PAY2 header bytes');
   const checked = await checkPay2(o.pay2, info?.public === true, o.contractId, o.fileId, file);
 
@@ -293,13 +298,13 @@ export async function authorize(
   if (lower(o.wallet.address) !== q.buyer)
     throw new TypeError('the wallet is not the buyer the quote was made for');
   const p = o.purchase;
-  const id = purchaseId(p);
-  const message = buildPurchaseMessage(p);
+  const id = purchaseId(p, { baseUsdc: q.usdc });
+  const message = buildPurchaseMessage(p, { baseUsdc: q.usdc });
   if (
     p.route !== 'base-usdc' ||
     p.contract !== q.contractId ||
     p.file_id !== q.fileId ||
-    p.terms_hash !== termsHash(q.file.terms) ||
+    p.terms_hash !== q.file.termsHash ||
     p.price !== q.price.toString() ||
     p.asset !== q.usdc ||
     toHex(keyFromSecret(o.buyerSecret).publicKeyBytes) !== p.buyer_key ||
@@ -317,7 +322,7 @@ export async function authorize(
   // The quote may be old: the file must still be for sale on the same terms.
   const now = await forSale(q.nearRpc, q.contractId, q.fileId);
   if (
-    termsHash(now.terms) !== termsHash(q.file.terms) ||
+    now.termsHash !== q.file.termsHash ||
     now.price !== q.price ||
     now.payTo !== q.file.payTo ||
     now.moderator !== q.file.moderator ||

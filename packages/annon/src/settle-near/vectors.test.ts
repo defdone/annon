@@ -24,6 +24,7 @@ import {
   encodePurchase,
   type Purchase,
   parsePurchaseMessage,
+  parseRefundPrefix,
   purchaseId,
   type ReopenV2,
   reopenTextV2,
@@ -40,6 +41,13 @@ import { encodeTerms, publishTextV2, registerTextV2, type Terms, termsHash } fro
 const v = JSON.parse(
   readFileSync(new URL('../../../../specs/vectors/near-settlement.json', import.meta.url), 'utf8'),
 ) as {
+  negative: {
+    id: string;
+    kind: 'purchase' | 'refund_prefix' | 'terms' | 'authorization' | 'merkle';
+    input: unknown;
+    expected: { sdk: 'reject' | false; contract: string };
+    context?: { network: string; asset: string; route: number; contract: string };
+  }[];
   identities: {
     identity: Identity;
     borsh: string;
@@ -72,7 +80,7 @@ const v = JSON.parse(
   merkle: {
     count: number;
     leaves: string[];
-    frontier: (string | null)[];
+    sdk_frontier: (string | null)[];
     root: string;
     proofs: { index: number; proof: string[] }[];
   }[];
@@ -122,6 +130,23 @@ const collect = async (s: ReadableStream<Uint8Array>) =>
   new Uint8Array(await new Response(s).arrayBuffer());
 
 describe('independent near-settlement wire vectors', () => {
+  it('publishes negative vectors with explicit contract and SDK expectations', () => {
+    expect(v.negative.length).toBeGreaterThanOrEqual(15);
+    for (const x of v.negative) {
+      expect(x.expected.contract.length).toBeGreaterThan(0);
+      if (x.kind === 'purchase') expect(() => parsePurchaseMessage(x.input as string)).toThrow();
+      else if (x.kind === 'refund_prefix')
+        expect(() => parseRefundPrefix(x.input as string)).toThrow();
+      else if (x.kind === 'terms') expect(() => encodeTerms(x.input as Terms)).toThrow();
+      else if (x.kind === 'authorization') {
+        const a = x.input as { identity: Identity; text: string; auth: Authorization };
+        expect(verifyAuthorization(a.identity, a.text, a.auth)).toBe(x.expected.sdk);
+      } else {
+        const m = x.input as { leaf: string; index: number; proof: string[]; root: string };
+        expect(verifyRefundProof(m.leaf, m.index, m.proof, m.root)).toBe(x.expected.sdk);
+      }
+    }
+  });
   for (const x of v.identities)
     it(`identity ${x.text}`, () => {
       expect(hex(encodeIdentity(x.identity))).toBe(x.borsh);
@@ -156,7 +181,7 @@ describe('independent near-settlement wire vectors', () => {
       const tree = new RefundTree();
       for (const leaf of x.leaves) tree.append(leaf);
       expect(tree.root).toBe(x.root);
-      expect(tree.frontier).toEqual(x.frontier);
+      expect(tree.frontier).toEqual(x.sdk_frontier);
       for (const p of x.proofs) {
         expect(RefundTree.proof(x.leaves, p.index)).toEqual(p.proof);
         expect(verifyRefundProof(x.leaves[p.index] as string, p.index, p.proof, x.root)).toBe(true);

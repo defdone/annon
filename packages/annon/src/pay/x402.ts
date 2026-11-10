@@ -159,15 +159,15 @@ export function paymentSignature(
     info: { ...(bc?.info ?? {}), s: [...new Set([ANNON_SERVICE_CODE, ...declaredS])] },
   };
   const advertised = pr.extensions?.annon;
-  buildPurchaseMessage(purchase);
+  buildPurchaseMessage(purchase, { baseUsdc: offer.asset });
   const info = {
     ...(advertised?.info ?? {}),
     version: 3,
     network: 'near:mainnet',
     contract: purchase.contract,
     fileId: purchase.file_id,
-    purchase,
-    purchase_id: purchaseId(purchase),
+    purchase: buildPurchaseMessage(purchase, { baseUsdc: offer.asset }),
+    purchase_id: purchaseId(purchase, { baseUsdc: offer.asset }),
   };
   return b64encode(
     JSON.stringify({

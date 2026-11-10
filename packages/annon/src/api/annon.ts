@@ -10,6 +10,7 @@ import {
 import { fileAppId, keyFromSecret, oneTimeKey, openAnswer } from '../keys/near-ckd.js';
 import {
   type FileInfo,
+  getConfig,
   getFile,
   getGrant,
   getPurchase,
@@ -50,7 +51,7 @@ import {
   parsePurchaseMessage,
   purchaseId,
 } from '../settle-near/purchase.js';
-import { BASE_USDC, NEAR_USDC, type Terms, termsHash } from '../settle-near/terms.js';
+import { type Terms, termsHash } from '../settle-near/terms.js';
 import type { EvmWallet, IdentityWallet, NearWallet } from '../wallet/wallet.js';
 
 export interface AnnonOptions {
@@ -189,10 +190,20 @@ export class Annon {
     if (!f) throw new PayError('unknown_file');
     if (f.takenDown) throw new PayError('taken_down');
     if (forSale && f.salesStoppedAt !== null) throw new PayError('sales_stopped');
-    if (f.terms.network !== this.o.network) throw new PayError('network_mismatch');
+    const config = await getConfig(this.o.nearRpc, this.o.contractId);
+    if (
+      f.terms.network !== this.o.network ||
+      config.network !== this.o.network ||
+      f.terms.near.token !== config.nearUsdc ||
+      (f.terms.base && f.terms.base.usdc !== config.usdc)
+    )
+      throw new PayError('network_mismatch');
     return f;
   }
   async sell(o: SellOptions) {
+    const config = await getConfig(this.o.nearRpc, this.o.contractId);
+    if (config.network !== this.o.network) throw new PayError('network_mismatch');
+    const assets = { nearUsdc: config.nearUsdc, baseUsdc: config.usdc };
     const seller = parseIdentity(o.seller.identity);
     const fileId = o.fileId ?? `0x${randomHex(32)}`;
     const s = await seal(o.data, {
@@ -216,10 +227,10 @@ export class Annon {
       pay2_version: 2,
       cipher_hash: hex(s.cipherHash),
       moderator: o.moderator ?? null,
-      near: { token: NEAR_USDC, price: o.near.price, recipients, remainder },
+      near: { token: config.nearUsdc, price: o.near.price, recipients, remainder },
       base: null,
     };
-    termsHash(terms); // Validate all local terms before even creating a Base split.
+    termsHash(terms, assets); // Validate all local terms before even creating a Base split.
     if (o.base) {
       if (recipients.some((r) => r.identity.kind !== 'evm'))
         throw new TypeError('Base split requires only EVM recipients');
@@ -233,13 +244,13 @@ export class Annon {
         },
         `0x${randomHex(32)}`,
       );
-      terms.base = { usdc: BASE_USDC, price: o.base.price, pay_to: split.address };
-      termsHash(terms);
+      terms.base = { usdc: config.usdc, price: o.base.price, pay_to: split.address };
+      termsHash(terms, assets);
       await o.base.sendTransaction(split);
     }
     const key = oneTimeKey();
     const args = { terms, seller_key: hex(key.publicKeyBytes), deadline: this.now() + 600 };
-    const auth = await this.auth(o.seller, registerText(this.o.contractId, args));
+    const auth = await this.auth(o.seller, registerText(this.o.contractId, args, assets));
     const result = await this.call('register', { args, ...(auth ? { auth } : {}) }, o.seller);
     const file = await s.finish({
       contractId: this.o.contractId,
@@ -295,24 +306,28 @@ export class Annon {
       network: route === 'base-usdc' ? 'eip155:8453' : this.o.network,
       contract: this.o.contractId,
       route,
-      asset: route === 'base-usdc' && f.terms.base ? f.terms.base.usdc : NEAR_USDC,
+      asset: route === 'base-usdc' && f.terms.base ? f.terms.base.usdc : f.terms.near.token,
       file_id: o.fileId,
-      terms_hash: termsHash(f.terms),
+      terms_hash: f.termsHash,
       price,
       nonce: `0x${randomHex(32)}`,
       buyer_key: hex(key.publicKeyBytes),
       recovery,
       expires_at: String(this.now() + 3600),
     };
-    const id = purchaseId(p);
-    const message = buildPurchaseMessage(p);
-    parsePurchaseMessage(message);
+    const assets = {
+      nearUsdc: f.terms.near.token,
+      ...(f.terms.base ? { baseUsdc: f.terms.base.usdc } : {}),
+    };
+    const id = purchaseId(p, assets);
+    const message = buildPurchaseMessage(p, assets);
+    parsePurchaseMessage(message, assets);
     const proofText = `Annon: verify purchase recovery\ncontract: ${this.o.contractId}\npurchase: ${id}\nrecovery: ${identityText(recovery)}`;
     if (recovery.kind === 'near') {
       const w = asNear(o.recovery);
       if (!w.proveControl)
         throw new Error('NEAR recovery requires an account ownership proof before payment');
-      await w.proveControl(proofText);
+      await w.proveControl(proofText, { contractId: this.o.contractId, nearRpc: this.o.nearRpc });
     } else await this.auth(o.recovery, proofText);
     if (route === 'base-usdc') {
       if (!o.paymentRequired || !o.url || !o.payer || !('signTypedData' in o.payer))
@@ -372,7 +387,7 @@ export class Annon {
     if (!(await this.store.compareAndSet(purchaseKey(id), null, record)))
       throw new PayError('store_conflict');
     if (o.payer?.identity.kind === 'near') {
-      await asNear(o.payer).transferPurchase(message);
+      await asNear(o.payer).transferPurchase(message, assets);
       return { route, record };
     }
     if (!o.origin) throw new TypeError('a 1Click origin is required for cross-chain payment');
@@ -402,7 +417,7 @@ export class Annon {
           baseRpc: this.o.baseRpc,
           store: this.store,
         });
-        if (next.step === 'unlock') await this.call('unlock', next.args);
+        if (next.step === 'unlock') await this.call('unlock', { args: next.args });
         else throw new Error(`purchase is not accepted: ${next.step}`);
       } else throw new Error('purchase is not accepted');
     }

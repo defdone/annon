@@ -176,6 +176,9 @@ describe('views', () => {
     );
   it('reads get_config and refuses an answer that is not what the contract returns', async () => {
     const config = {
+      network: 'near:mainnet',
+      near_usdc: 'usdc.near',
+      intents: 'intents.near',
       mpc: 'v1.signer',
       ckd_domain: 2,
       foreign_tx_domain: 3,
@@ -184,6 +187,9 @@ describe('views', () => {
     respond({ result: { result: bytes(config) } });
     expect(await getConfig('https://rpc', CONTRACT)).toEqual({
       mpc: 'v1.signer',
+      network: 'near:mainnet',
+      nearUsdc: 'usdc.near',
+      intents: 'intents.near',
       ckdDomain: 2,
       foreignTxDomain: 3,
       usdc: config.usdc,

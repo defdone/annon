@@ -351,7 +351,7 @@ const merkle = [0, 1, 3, 5].map((count) => {
   return {
     count,
     leaves: refunds.slice(0, count).map((v) => v.leaf),
-    frontier,
+    sdk_frontier: frontier,
     root: hex(layers[32][0] ?? zero[32]),
     proofs,
   };
@@ -496,11 +496,133 @@ for (const [kind, seller] of [evm, solana, near].entries()) {
     },
   });
 }
+
+// Negative wire fixtures carry independent, explicit Rust parser outcomes. The contract
+// context is required: parse validates against the deployed route/network/token/account.
+const negative = [];
+const context = { network: 'near:mainnet', asset: usdc, route: 0, contract };
+const message = purchases[0].message;
+const invalidMessage = (id, input, outcome = 'unusable') =>
+  negative.push({
+    id,
+    kind: 'purchase',
+    context,
+    input,
+    expected: { sdk: 'reject', contract: outcome },
+  });
+invalidMessage('leading-space', ` ${message}`, 'foreign');
+invalidMessage('trailing-newline', `${message}\n`);
+invalidMessage('body-whitespace', message.replace('"purchase":{', '"purchase": {'));
+invalidMessage(
+  'duplicate-body-key',
+  message.replace('"price":"200000"', '"price":"200000","price":"200000"'),
+);
+invalidMessage(
+  'unknown-body-key',
+  message.replace('"price":"200000"', '"price":"200000","extra":1'),
+);
+invalidMessage('noncanonical-number', message.replace('"price":"200000"', '"price":"0200000"'));
+invalidMessage('escaped-body-string', message.replace('"near:mainnet"', '"near:main\\u006eet"'));
+invalidMessage(
+  'wrong-purchase-id',
+  message.replace(purchases[0].purchase_id, `0x${'00'.repeat(32)}`),
+);
+invalidMessage('oversize-body', `${message}${' '.repeat(1025)}`);
+const wire = (p) => {
+  const id = tagged('annon/purchase/v2', encodePurchase(p));
+  const { version: _, refund, ...body } = p;
+  return JSON.stringify({ annon: 2, refund, purchase: { ...body, purchase_id: id } });
+};
+invalidMessage(
+  'uppercase-recovery',
+  wire({
+    ...purchases[1].purchase,
+    recovery: { kind: 'evm', id: evm.id.toUpperCase().replace('0X', '0x') },
+  }),
+);
+invalidMessage(
+  'bad-bls-key-infinity',
+  wire({ ...purchases[0].purchase, buyer_key: `0xc0${'00'.repeat(47)}` }),
+);
+invalidMessage(
+  'bad-bls-compression',
+  wire({ ...purchases[0].purchase, buyer_key: `0x00${'00'.repeat(47)}` }),
+);
+invalidMessage('base-wrong-network', wire({ ...purchases[3].purchase, network: 'near:mainnet' }));
+negative.at(-1).context = {
+  ...context,
+  network: 'eip155:8453',
+  route: 1,
+  asset: terms[0].terms.base.usdc,
+};
+invalidMessage(
+  'base-wrong-asset',
+  wire({ ...purchases[3].purchase, asset: `0x${'99'.repeat(20)}` }),
+);
+negative.at(-1).context = {
+  ...context,
+  network: 'eip155:8453',
+  route: 1,
+  asset: terms[0].terms.base.usdc,
+};
+for (const [id, refund] of [
+  ['uppercase-evm', { kind: 'evm', id: evm.id.toUpperCase().replace('0X', '0x') }],
+  ['base58-solana', { kind: 'solana', id: base58(raw(solana.id)) }],
+]) {
+  negative.push({
+    id: `prefix-${id}`,
+    kind: 'refund_prefix',
+    input: `{"annon":2,"refund":${JSON.stringify(refund)},`,
+    expected: { sdk: 'reject', contract: 'foreign' },
+  });
+}
+const invalidTerms = (id, t) =>
+  negative.push({
+    id,
+    kind: 'terms',
+    context,
+    input: t,
+    expected: { sdk: 'reject', contract: 'problem' },
+  });
+invalidTerms('unsorted-split', {
+  ...terms[1].terms,
+  near: { ...terms[1].terms.near, recipients: [...terms[1].terms.near.recipients].reverse() },
+});
+invalidTerms('duplicate-split-valid-sum', {
+  ...terms[0].terms,
+  near: {
+    ...terms[0].terms.near,
+    recipients: [
+      { identity: evm, bps: 5000 },
+      { identity: evm, bps: 5000 },
+    ],
+  },
+});
+invalidTerms('pay2-version-one', { ...terms[0].terms, pay2_version: 1 });
+invalidTerms('wrong-near-token', {
+  ...terms[0].terms,
+  near: { ...terms[0].terms.near, token: 'fake.near' },
+});
+const wrong = authorizations.find((a) => a.identity.kind === 'evm');
+negative.push({
+  id: 'wrong-kind-authorization',
+  kind: 'authorization',
+  input: { ...wrong, auth: { ...wrong.auth, kind: 'solana' } },
+  expected: { sdk: false, contract: 'false' },
+});
+const tree = merkle.find((m) => m.count === 1);
+negative.push({
+  id: 'aliased-proof-index',
+  kind: 'merkle',
+  input: { leaf: tree.leaves[0], index: 2 ** 32, proof: tree.proofs[0].proof, root: tree.root },
+  expected: { sdk: false, contract: 'false' },
+});
 const output = {
-  spec: 'near-settlement.md draft v2',
+  spec: 'near-settlement.md draft 3 (contract e08df29)',
   encoding:
     'All binary hex uses 0x; Solana JSON id is lowercase hex without prefix. Merkle proofs are bottom-up, indexed from zero. PUBLIC test fixtures only.',
   fixtures: { evm_private_key: evmSeed, solana_seed: hex(edSeed) },
+  negative,
   identities,
   terms,
   purchases,
@@ -514,5 +636,5 @@ writeFileSync(
   `${JSON.stringify(output, null, 2)}\n`,
 );
 console.log(
-  `near-settlement.json: ${identities.length} identities, ${terms.length} terms, ${purchases.length} purchases, ${refunds.length} refund leaves, ${merkle.length} trees, ${pay2.length} PAY2 v2 files`,
+  `near-settlement.json: ${identities.length} identities, ${terms.length} terms, ${purchases.length} purchases, ${refunds.length} refund leaves, ${merkle.length} trees, ${pay2.length} PAY2 v2 files, ${negative.length} negative cases`,
 );

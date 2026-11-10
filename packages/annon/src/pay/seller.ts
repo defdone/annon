@@ -8,11 +8,10 @@ import { secureUrl } from '../download/download.js';
 import { type FileInfo, getConfig, getFile } from '../near/rpc.js';
 import {
   baseNonceV2,
-  buildPurchaseMessage,
   type Purchase,
+  parsePurchaseMessage,
   purchaseId,
 } from '../settle-near/purchase.js';
-import { termsHash } from '../settle-near/terms.js';
 import { fail, head } from './base.js';
 import { digest, signer } from './eip3009.js';
 import { MAX_CLOCK_SKEW_SECONDS, MAX_VALIDITY_SECONDS } from './pay.js';
@@ -136,7 +135,14 @@ export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
   if (!file) return fail('unknown_file', 'the file is not registered on the Annon contract');
   if (file.takenDown) fail('taken_down', `the file was taken down (${file.takenDown})`);
   if (file.salesStoppedAt !== null) fail('sales_stopped', 'the seller stopped selling this file');
-  return paymentRequired(o, file, (await getConfig(o.nearRpc, o.contractId)).usdc);
+  const config = await getConfig(o.nearRpc, o.contractId);
+  if (
+    file.terms.network !== config.network ||
+    file.terms.near.token !== config.nearUsdc ||
+    (file.terms.base && file.terms.base.usdc !== config.usdc)
+  )
+    fail('network_mismatch');
+  return paymentRequired(o, file, config.usdc);
 }
 
 /**
@@ -211,7 +217,7 @@ export function paymentRequired(o: OfferOptions, file: FileInfo, usdc: string): 
               extra: {
                 contract: o.contractId,
                 file_id: o.fileId,
-                terms_hash: termsHash(file.terms),
+                terms_hash: file.termsHash,
               },
             },
             ...(file.terms.base ? [offer] : []),
@@ -335,11 +341,11 @@ function paymentIdOf(p: Payload): string | undefined {
  */
 function checkSigned(p: Payload, contract: string, fileId: string, offer: Offer) {
   const info = p.extensions?.annon?.info;
-  const purchase = info?.purchase as Purchase;
+  let purchase: Purchase;
   let id: string;
   try {
-    buildPurchaseMessage(purchase);
-    id = purchaseId(purchase);
+    purchase = parsePurchaseMessage(info?.purchase as string, { baseUsdc: offer.asset });
+    id = purchaseId(purchase, { baseUsdc: offer.asset });
   } catch {
     return fail('bad_requirements', 'invalid purchase commitment');
   }
@@ -370,6 +376,8 @@ function checkSigned(p: Payload, contract: string, fileId: string, offer: Offer)
   if (str('validAfter') !== '0') fail('bad_requirements', 'validAfter must be 0');
   const from = str('from').toLowerCase();
   const validBefore = BigInt(str('validBefore'));
+  if (validBefore > BigInt(purchase.expires_at))
+    fail('bad_requirements', 'authorization exceeds purchase expiry');
   const auth = {
     from,
     to: offer.payTo.toLowerCase(),
@@ -422,11 +430,11 @@ export function checkTerms(
   if (info.contract !== t.contractId || info.fileId !== t.fileId) {
     fail('bad_requirements', 'the payment is for another Annon contract or file');
   }
-  if ((info.purchase as Purchase)?.terms_hash !== t.termsHash)
-    fail('bad_requirements', 'wrong terms hash');
+  const checked = checkSigned(p, t.contractId, t.fileId, o as Offer);
+  if (checked.purchase.terms_hash !== t.termsHash) fail('bad_requirements', 'wrong terms hash');
   const paymentId = paymentIdOf(p);
   return {
-    ...checkSigned(p, t.contractId, t.fileId, o as Offer),
+    ...checked,
     ...(paymentId ? { paymentId } : {}),
   };
 }

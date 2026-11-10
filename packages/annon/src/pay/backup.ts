@@ -71,8 +71,20 @@ export function validatePurchaseRecord(r: PurchaseRecord): void {
     r?.schemaVersion !== 2 ||
     !Number.isSafeInteger(r.revision) ||
     r.revision < 0 ||
-    r.id !== purchaseId(r.purchase) ||
-    r.message !== buildPurchaseMessage(r.purchase) ||
+    r.id !==
+      purchaseId(
+        r.purchase,
+        r.purchase.route === 'base-usdc'
+          ? { baseUsdc: r.purchase.asset }
+          : { nearUsdc: r.purchase.asset },
+      ) ||
+    r.message !==
+      buildPurchaseMessage(
+        r.purchase,
+        r.purchase.route === 'base-usdc'
+          ? { baseUsdc: r.purchase.asset }
+          : { nearUsdc: r.purchase.asset },
+      ) ||
     hex(keyFromSecret(bytes(r.buyerSecret, 32)).publicKeyBytes) !== r.purchase.buyer_key ||
     identityJson(r.recovery) !== identityJson(r.purchase.recovery) ||
     !Array.isArray(r.attempts) ||

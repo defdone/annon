@@ -101,3 +101,19 @@ describe('small wallet adapters with Node doubles', () => {
     await expect(wallet.transferPurchase(buildPurchaseMessage(purchase))).rejects.toThrow();
   });
 });
+
+it('sends a configured NEAR token only when explicitly pinned for the deployment', async () => {
+  const token = 'usdc.fakes.testnet';
+  const p = { ...purchase, route: 'near-usdc' as const, network: 'near:mainnet', asset: token };
+  const message = buildPurchaseMessage(p, { nearUsdc: token });
+  const callFunction = vi.fn(async () => null);
+  const wallet = nearKeyPairWallet({ accountId: 'buyer.near', callFunction });
+  await expect(wallet.transferPurchase(message)).rejects.toThrow();
+  await wallet.transferPurchase(message, { nearUsdc: token });
+  expect(callFunction).toHaveBeenCalledWith(
+    expect.objectContaining({
+      contractId: token,
+      args: { receiver_id: p.contract, amount: p.price, msg: message },
+    }),
+  );
+});

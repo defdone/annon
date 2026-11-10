@@ -16,7 +16,7 @@ USDC EIP-3009 TransferWithAuthorization; `annon-near-usdc` identifies native NEA
 A 402 carries base64 JSON. `extensions.annon.info` contains `version: 3`, `network: near:mainnet`,
 `contract`, `fileId`, `header`, and optional `public: true`. The contract is explicitly trusted by
 the client; no deployment is implicitly pinned by this draft. `accepts` is derived from final
-`get_file` / `get_terms`, with the NEAR offer first:
+`get_file(file_id)` (including `terms` and `terms_hash`), with the NEAR offer first:
 
 | Field | NEAR | Optional Base |
 |---|---|---|
@@ -34,8 +34,8 @@ There are no offers after stop. Takedown answers 410. Previous buyers retain gra
 ## 3. PAYMENT-SIGNATURE
 
 The Base payload echoes the selected offer and advertised extensions, carries the EIP-3009
-signature and authorization, and adds `purchase` (the complete decoded §5.2 commitment including
-version and refund) and `purchase_id` to `extensions.annon.info`. It never contains a buyer secret.
+signature and authorization, and adds `purchase` (the canonical §5.1 MESSAGE string, including the refund prefix and embedded
+`purchase_id`, byte-for-byte identical to the message used by the NEAR route) and `purchase_id` to `extensions.annon.info`. It never contains a buyer secret.
 The seller recomputes the ID, requires route/network/asset/file/contract/terms_hash/price to match,
 then checks `authorization.nonce = base_nonce(purchase_id)`, recipient and amount exactly,
 `validAfter = 0`, deadline within purchase expiry, EOA signer and a short authorization window.
@@ -56,7 +56,13 @@ proof that payment failed. Purchase records are keyed by purchase_id, not paying
 
 ## 6. Key release
 
-Base logs are verified at Safe finality through MPC by `unlock(purchase, logs, header)`.
+Base logs are verified at Safe finality through MPC by
+`unlock({args:{purchase: message, logs, header}})`. `purchase` is the canonical message string.
+The SDK signs EIP-3009 `validBefore <= expires_at`; the seller enforces this bound. The Base
+contract does not check `expires_at`. A delayed unlock remains valid. The header may be null
+while sales are open; after stop it must prove the payment block's hash, number and time.
+Payment block time `<= sales_stopped_at + 300` seconds is allowed, inclusive
+(`STOP_SETTLEMENT_SECONDS = 300`), regardless of unlock time. Takedown blocks release.
 NEAR acceptance is observed through `get_purchase`; 1Click SUCCESS alone is not acceptance.
 `claim_key(purchase_id, grant)` is repeatable. Recovery calls `purchases_of` and authorized `reopen`
 with a fresh key, nonce and deadline. Earlier grants remain. No wallet address view grants access.

@@ -127,6 +127,7 @@ const TAKEDOWN = ['illegal_content', 'court_order', 'rights_holder_notice'] as c
 /** Validated final contract state; price/payTo describe the optional Base route. */
 export interface FileInfo {
   terms: Terms;
+  termsHash: string;
   seller: Identity;
   price: bigint;
   payTo: string;
@@ -141,15 +142,7 @@ export async function getTerms(
   contractId: string,
   fileId: string,
 ): Promise<Terms | null> {
-  const t = (await view(url, contractId, 'get_terms', { file_id: fileId })) as Terms | null;
-  if (t === null) return null;
-  try {
-    termsHash(t);
-    if (t.contract !== contractId || t.file_id !== fileId) throw new Error();
-  } catch {
-    return malformed('get_terms');
-  }
-  return t;
+  return (await getFile(url, contractId, fileId))?.terms ?? null;
 }
 export async function getFile(
   url: string,
@@ -158,13 +151,18 @@ export async function getFile(
 ): Promise<FileInfo | null> {
   const f = (await view(url, contractId, 'get_file', { file_id: fileId })) as {
     terms: Terms;
+    terms_hash: string;
     header_hash: string | null;
     sales_stopped_at: number | null;
     taken_down: string | null;
   } | null;
   if (f === null) return null;
   try {
-    termsHash(f.terms);
+    const commitment = termsHash(f.terms, {
+      nearUsdc: f.terms.near.token,
+      ...(f.terms.base ? { baseUsdc: f.terms.base.usdc } : {}),
+    });
+    if (f.terms_hash !== commitment) throw new Error();
     if (
       f.terms.contract !== contractId ||
       f.terms.file_id !== fileId ||
@@ -186,6 +184,7 @@ export async function getFile(
   const t = f.terms;
   return {
     terms: t,
+    termsHash: f.terms_hash,
     seller: parseIdentity(t.seller),
     price: BigInt(t.base?.price ?? t.near.price),
     payTo: t.base?.pay_to ?? '',
@@ -202,6 +201,9 @@ export interface PurchaseInfo {
   terms_hash: string;
   recovery: Identity;
   buyer_key: string;
+  route: 'near-usdc' | 'base-usdc';
+  delivery: number | null;
+  accepted_at: number;
   grants: number;
 }
 export interface GrantInfo {
@@ -222,7 +224,14 @@ export async function getPurchase(
       !isHex(p.file_id, 32) ||
       !isHex(p.terms_hash, 32) ||
       !Number.isSafeInteger(p.grants) ||
-      p.grants < 1
+      p.grants < 1 ||
+      p.grants > 0xffffffff ||
+      !Number.isSafeInteger(p.accepted_at) ||
+      p.accepted_at < 0 ||
+      !['near-usdc', 'base-usdc'].includes(p.route) ||
+      (p.route === 'base-usdc'
+        ? p.delivery !== null
+        : !Number.isSafeInteger(p.delivery) || (p.delivery as number) < 0)
     )
       throw new Error();
     buyerKey(p.buyer_key);
@@ -263,6 +272,7 @@ export async function purchasesOf(
   if (
     !Number.isSafeInteger(from) ||
     from < 0 ||
+    from > 0xffffffff ||
     !Number.isSafeInteger(limit) ||
     limit < 1 ||
     limit > 100
@@ -284,6 +294,9 @@ export interface Config {
   ckdDomain: number;
   foreignTxDomain: number;
   usdc: string;
+  network: string;
+  nearUsdc: string;
+  intents: string;
 }
 
 export async function getConfig(url: string, contractId: string): Promise<Config> {
@@ -292,7 +305,12 @@ export async function getConfig(url: string, contractId: string): Promise<Config
     !isAccount(c?.mpc) ||
     !Number.isSafeInteger(c?.ckd_domain) ||
     !Number.isSafeInteger(c?.foreign_tx_domain) ||
-    !isHex(c?.usdc, 20)
+    !isHex(c?.usdc, 20) ||
+    !['near:mainnet', 'near:testnet', 'near:sandbox'].includes(c?.network as string) ||
+    !isAccount(c?.near_usdc) ||
+    !isAccount(c?.intents) ||
+    (c?.ckd_domain as number) < 0 ||
+    (c?.foreign_tx_domain as number) < 0
   ) {
     return malformed('get_config');
   }
@@ -301,6 +319,9 @@ export async function getConfig(url: string, contractId: string): Promise<Config
     ckdDomain: c?.ckd_domain as number,
     foreignTxDomain: c?.foreign_tx_domain as number,
     usdc: c?.usdc as string,
+    network: c?.network as string,
+    nearUsdc: c?.near_usdc as string,
+    intents: c?.intents as string,
   };
 }
 
@@ -460,4 +481,19 @@ export async function txOutcome(
     wait_until: wait,
   });
   return readOutcome(r, contractId, { txHash, signer, ...call });
+}
+
+/** The current access key at finality, never an optimistic or wallet-supplied permission. */
+export async function isFullAccessKey(
+  url: string,
+  accountId: string,
+  publicKey: string,
+): Promise<boolean> {
+  const key = await rpc(url, 'query', {
+    request_type: 'view_access_key',
+    finality: 'final',
+    account_id: accountId,
+    public_key: publicKey,
+  });
+  return key.permission === 'FullAccess';
 }

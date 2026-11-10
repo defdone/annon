@@ -7,7 +7,6 @@
  */
 import { sha256 } from '@noble/hashes/sha2.js';
 import { getConfig, getFile } from '../near/rpc.js';
-import { termsHash } from '../settle-near/terms.js';
 import { block, fail, head, PayError, type PaymentStatus, paymentStatus } from './base.js';
 import { toHex } from './eip3009.js';
 import {
@@ -158,7 +157,7 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
     usdc,
     price: file.price,
     payTo: file.payTo,
-    termsHash: termsHash(file.terms),
+    termsHash: file.termsHash,
   });
   const scope = o.scope ?? `${o.contractId}/${o.fileId}/${o.url}`;
   if (c.paymentId) await bind(o, `annon/seller/id/${scope}/${c.paymentId}`, header, c);

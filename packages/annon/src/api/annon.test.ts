@@ -121,6 +121,7 @@ function harness(seller: Identity = wallet.identity) {
         q.params.method_name === 'get_file'
           ? {
               terms,
+              terms_hash: termsHash(terms),
               header_hash: header
                 ? hex(
                     await (await import('../envelope/pay2.js')).sha256(
@@ -132,7 +133,14 @@ function harness(seller: Identity = wallet.identity) {
               taken_down: null,
             }
           : q.params.method_name === 'get_purchase'
-            ? (purchases.get(a.purchase_id) ?? null)
+            ? purchases.has(a.purchase_id)
+              ? {
+                  route: 'near-usdc',
+                  delivery: 0,
+                  accepted_at: now,
+                  ...purchases.get(a.purchase_id),
+                }
+              : null
             : q.params.method_name === 'get_grant'
               ? grants.has(`${a.purchase_id}:${a.grant}`)
                 ? {
@@ -143,6 +151,9 @@ function harness(seller: Identity = wallet.identity) {
                 : null
               : q.params.method_name === 'get_config'
                 ? {
+                    network: 'near:mainnet',
+                    near_usdc: terms.near.token,
+                    intents: 'intents.near',
                     mpc: 'v1.signer',
                     ckd_domain: 2,
                     foreign_tx_domain: 3,

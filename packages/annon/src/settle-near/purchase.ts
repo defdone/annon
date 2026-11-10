@@ -1,7 +1,6 @@
 /** Purchase commitment, canonical wire message and recovery text, spec §§5,9. */
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
-import { utc } from '../near/texts.js';
 import {
   account,
   bytes,
@@ -13,6 +12,7 @@ import {
   network,
   str,
   uint,
+  utc,
   utf8,
 } from './codec.js';
 import {
@@ -22,7 +22,7 @@ import {
   identityText,
   parseIdentity,
 } from './identity.js';
-import { BASE_USDC, NEAR_USDC } from './terms.js';
+import { BASE_USDC, NEAR_USDC, type SettlementAssets } from './terms.js';
 
 export interface Purchase {
   version: 2;
@@ -46,7 +46,10 @@ export function buyerKey(key: string): Uint8Array<ArrayBuffer> {
     throw new TypeError('invalid buyer key');
   return raw;
 }
-export function encodePurchase(p: Purchase): Uint8Array<ArrayBuffer> {
+export function encodePurchase(
+  p: Purchase,
+  assets: SettlementAssets = {},
+): Uint8Array<ArrayBuffer> {
   exactKeys(p, [
     'version',
     'refund',
@@ -66,9 +69,14 @@ export function encodePurchase(p: Purchase): Uint8Array<ArrayBuffer> {
     throw new TypeError('invalid purchase version/route');
   if (p.route === 'near-usdc') {
     network(p.network);
-    if (p.asset !== NEAR_USDC) throw new TypeError('invalid NEAR asset');
+    account(p.asset);
+    if (
+      (assets.nearUsdc !== undefined || p.network === 'near:mainnet') &&
+      p.asset !== (assets.nearUsdc ?? NEAR_USDC)
+    )
+      throw new TypeError('invalid NEAR asset');
   } else {
-    if (p.network !== 'eip155:8453' || p.asset !== BASE_USDC)
+    if (p.network !== 'eip155:8453' || p.asset !== (assets.baseUsdc ?? BASE_USDC))
       throw new TypeError('invalid Base network/asset');
     bytes(p.asset, 20);
   }
@@ -91,13 +99,14 @@ export function encodePurchase(p: Purchase): Uint8Array<ArrayBuffer> {
     le(uint(p.expires_at, 64), 8),
   );
 }
-export const purchaseId = (p: Purchase): string => hash('annon/purchase/v2', encodePurchase(p));
+export const purchaseId = (p: Purchase, assets?: SettlementAssets): string =>
+  hash('annon/purchase/v2', encodePurchase(p, assets));
 export const baseNonceV2 = (id: string): string =>
   hex(keccak_256(concat(utf8.encode('annon/base-payment/v2'), le(0, 1), bytes(id, 32))));
 
 /** The API accepts normalized identities; the wire always has one canonical encoding. */
-export function buildPurchaseMessage(p: Purchase): string {
-  const id = purchaseId(p);
+export function buildPurchaseMessage(p: Purchase, assets?: SettlementAssets): string {
+  const id = purchaseId(p, assets);
   const msg = JSON.stringify({
     annon: 2,
     refund: parseIdentity(p.refund),
@@ -139,7 +148,7 @@ export function parseRefundPrefix(msg: string): Identity {
  * Bounds work before JSON.parse, then compares with the canonical serializer. This also rejects
  * duplicate/unknown fields at every level, alternate escapes, key order and whitespace.
  */
-export function parsePurchaseMessage(msg: string): Purchase {
+export function parsePurchaseMessage(msg: string, assets?: SettlementAssets): Purchase {
   if (typeof msg !== 'string' || msg.length > 1024 || utf8.encode(msg).length > 1024)
     throw new RangeError('purchase message exceeds 1024 UTF-8 bytes');
   const refund = parseRefundPrefix(msg);
@@ -176,7 +185,7 @@ export function parsePurchaseMessage(msg: string): Purchase {
     recovery: parseIdentity(p.recovery),
     expires_at: p.expires_at as string,
   };
-  if (buildPurchaseMessage(decoded) !== msg)
+  if (buildPurchaseMessage(decoded, assets) !== msg)
     throw new TypeError('noncanonical purchase message or incorrect purchase_id');
   return decoded;
 }

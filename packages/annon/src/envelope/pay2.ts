@@ -1,3 +1,4 @@
+import { account } from '../settle-near/codec.js';
 /**
  * PAY2, the Annon file format: `specs/pay2.md`. WebCrypto only, so the same code runs in browsers
  * and Node. `open` runs the checks of spec section 6 in its order and fails with its error codes.
@@ -740,7 +741,7 @@ export async function sealWithKey(
     }),
     async finish(finishOpts) {
       const { contractId, ckdSecret } = finishOpts;
-      if (!/^[a-z0-9._-]{2,64}$/.test(contractId)) throw new TypeError('bad NEAR account id');
+      account(contractId);
       const kw = await wrapKeyFor(ckdSecret, fileId, 'wrapKey');
       const fileKey = await subtle.importKey('raw', copy(K), 'AES-GCM', true, ['encrypt']);
       const wrapped = new Uint8Array(await subtle.wrapKey('raw', fileKey, kw, 'AES-KW'));

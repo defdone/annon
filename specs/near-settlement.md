@@ -41,13 +41,25 @@ Authorization of an identity over an authoritative text `T` (UTF-8, `\n` line en
 newline):
 
 - `evm`: EIP-191 `personal_sign` of `T`; 65 bytes `r ‖ s ‖ v`, `v` ∈ {27, 28}, low `s`; recovers to
-  the address. As in the current contract.
+  the address. The SDK requires this strict signature encoding.
 - `solana`: Ed25519 over exactly `UTF8(T)` (no prefix, no prehash), 64 bytes; checked with
   `env::ed25519_verify`. The SDK refuses a wallet whose returned signed bytes differ from `UTF8(T)`.
 - `near`: no signature; the call's predecessor must be the account (wallet transaction, 1 yocto
   attached where noted).
 
 Signatures travel as `{"kind":"evm"|"solana","sig":"0x…"}`; `near` sends no auth object.
+The contract additionally accepts EVM recovery bytes `v = 0/1`, uppercase hex and EVM signatures
+without `0x`; Solana signature hex may also be uppercase. The SDK deliberately requires lowercase
+`0x` signature hex and EVM `v = 27/28`. Identity JSON on the wire remains canonical on both sides.
+The SDK uses strict Ed25519 verification (`zip215: false`); the NEAR host uses dalek non-strict
+verification. Adversarial small-order or noncanonical owner-created signatures may therefore be
+accepted by the host and refused by the SDK.
+
+Distinct Identity kinds can share an Intents account: an implicit NEAR account equal to an EVM
+address or Solana hex key credits the same balance. They remain separate Borsh identities, split
+slots and recovery indexes (`purchases_of` indexes by Borsh Identity). This does not merge grants
+or authorizations.
+
 Smart-contract wallets (Safe, ERC-1271, PDAs) cannot authorize; they can still pay (§5).
 
 ## 3. Registration (`register`)
@@ -65,7 +77,9 @@ terms_hash  = SHA256("annon/terms/v2" ‖ 0x00 ‖ Borsh(Terms))
 
 Rules: `network` = `near:mainnet` (or `near:testnet`/sandbox in tests); 1 to 8 recipients, distinct,
 sorted by `Borsh(Identity)` bytes ascending; every `bps` > 0, sum 10 000; `remainder` < count;
-`price` > 0; `token` = the configured NEAR USDC. `base`, when present, is the Base route of
+`price` > 0; `token` = the configured NEAR USDC (`get_config.near_usdc`). Mainnet defaults to native USDC;
+testnet and sandbox use the deployment token. SDK commitment encoders accept explicit
+`nearUsdc` / `baseUsdc` expectations; payment flows compare with the final deployment config. `base`, when present, is the Base route of
 `x402-annon.md` for this file: `pay_to` is usually a 0xSplits split built by the SDK from the same
 recipients (only possible when all are EVM); the contract does not check that split.
 
@@ -151,7 +165,23 @@ purchase_id = SHA256("annon/purchase/v2" ‖ 0x00 ‖ Borsh(Purchase))
 Computed from decoded values, not JSON bytes; `purchase_id` in the message must equal it. The SDK
 generates `nonce` and the buyer key locally, checks that the buyer controls `recovery` (a signature)
 before showing payment instructions, and saves the encrypted purchase record first (§9). Default
-expiry: 1 hour after the quote. Anyone may pay for anyone's purchase.
+expiry: 1 hour after local quote preparation. Anyone may pay for anyone's purchase.
+
+The recovery challenge is exactly (no trailing newline):
+```
+Annon: verify purchase recovery
+contract: <contract>
+purchase: 0x<purchase_id>
+recovery: <identity text form>
+```
+For NEAR recovery, use [NEP-413 signMessage](https://github.com/near/NEPs/blob/master/neps/nep-0413.md):
+`message` is this challenge, `recipient` is the contract ID, and `nonce` is 32 fresh random bytes.
+Sign Ed25519 over SHA256 of Borsh `u32(2^31+413)`, `message: String`, `nonce: [u8;32]`,
+`recipient: String`, `callbackUrl: Option<String>` (absent in the SDK). Verify the signature and
+returned account, then query RPC `view_access_key` with `finality: "final"`, that account and
+public key. Require `permission: "FullAccess"`; a function-call key or absent key is refused
+before payment instructions or a payment signature. This off-chain proof does not authorize a
+contract method; NEAR contract authorization still uses the predecessor.
 
 ### 5.3 Base route with the same commitment
 
@@ -163,9 +193,19 @@ base_nonce = keccak256("annon/base-payment/v2" ‖ 0x00 ‖ purchase_id)
 
 For this route the commitment's `network` is exactly `eip155:8453` and `asset` the lowercase `0x`
 address of Base USDC configured in the contract; anything else is refused.
-`unlock(purchase, logs, header)` verifies the Base logs through MPC (Safe finality) against
+`unlock({"args":{"purchase":"<canonical §5.1 MESSAGE string>","logs":[...],"header":null}})` verifies the Base logs through MPC (Safe finality) against
 `terms.base` and this nonce, and records the purchase with its recovery identity. `refund` is
-carried but unused on Base (EIP-3009 moves exactly the price).
+carried but unused on Base (EIP-3009 moves exactly the price). The `purchase` field is the same
+canonical message string used by the NEAR route, not a decoded Purchase object.
+
+The SDK must set EIP-3009 `validBefore <= expires_at` and the seller checks that bound before
+settlement. The Base contract path does **not** check `expires_at`; USDC's authorization deadline
+bounds the payment. There is no unlock-time expiry check. While sales are open, `header` may be
+null. After sales stop, `header` must be `"0x<RLP of the payment block header>"`, matching the proved
+log's block hash and number. A payment is allowed if its Base block time is at most
+`sales_stopped_at + STOP_SETTLEMENT_SECONDS`, where `STOP_SETTLEMENT_SECONDS = 300` (inclusive).
+An allowed payment remains unlockable regardless of when unlock runs. A stop during the MPC
+callback can require a retry with the header. Takedown blocks release throughout.
 
 ## 6. Receiving USDC (`ft_on_transfer`)
 
@@ -256,7 +296,7 @@ obligation (§7). Events carry every leaf so anyone (the keeper) can build proof
   ```
   creates the next grant (identical request → same grant) and requests CKD. Earlier grants stay.
 - Seller: `reopen_seller` and `stop_sales` with the same identity authorization (texts in the
-  contract's `reopen_seller_text` / `stop_sales_text`, ending with `seller: <identity text form>`).
+  contract's `reopen_seller_text` / `stop_sales_text`, `seller:` before key/deadline, ending with `valid until: <UTC>`).
   Stop is final.
 - `purchases_of(recovery: Identity, from, limit)` finds purchases on a fresh device.
 - Downloads: the existing buyer proof (`specs/download.md`) plus `purchase_id` and `grant`; the
@@ -271,9 +311,29 @@ Events (`standard: "annon"`, `version: "2.0.0"`): `file_registered`, `header_pub
 `funded`, `slot_paid`, `key_requested`, `key_released`, `grant_created`, `sales_stopped`. Never log
 secrets.
 
-Views: `get_file`, `get_terms(file_id)`, `get_purchase(purchase_id)`, `get_grant`,
+Views: `get_file(file_id)`, `get_purchase(purchase_id)`, `get_grant`,
 `get_delivery(delivery_id)`, `list_deliveries(from, limit)`, `purchases_of(...)`,
 `refund_root()`, `get_config`, `storage_balance_of`.
+
+- `get_file` → `{terms, terms_hash, header_hash|null, sales_stopped_at|null, taken_down|null}`.
+- `get_purchase` → `{purchase_id, file_id, terms_hash, buyer_key, recovery: Identity,
+  route: "near-usdc"|"base-usdc", delivery: number|null, accepted_at: number, grants: number}`.
+- `get_grant({purchase_id, grant})` → `{purchase_id, grant, buyer_key}` or null.
+- `claim_key({purchase_id, grant?})` defaults to grant 0.
+- `purchases_of({recovery, from, limit})` → purchase ID strings, at most 100; offsets are u32.
+- `get_config` → `{mpc, ckd_domain, foreign_tx_domain, usdc, network, near_usdc, intents}`.
+- Keeper calls: `fund_delivery({delivery_id})` with 150 Tgas, `pay_slot({delivery_id, slot})`
+  with 80 Tgas; delivery views use numeric IDs, decimal-string USDC, and steps
+  `{state: 0|1|2, attempt: number}`. `list_deliveries({from, limit})` returns at most 50.
+- `refund_root()` → `{root, count}`. Payable
+  `materialize_refund({leaf:{delivery_id, refund: Identity, amount: string}, index, proof})`
+  takes 32 sibling hashes and a storage deposit; network/contract come from the deployment.
+
+Vectors label the SDK-only accumulator cache `sdk_frontier`; Rust keeps stale frontier slots.
+Only roots and proofs are cross-language wire commitments. Negative entries state `expected.sdk`
+and `expected.contract`; purchase parser outcomes are `foreign` (no valid refund prefix) or
+`unusable` (valid refund prefix, invalid body) under each entry's deployment context.
+UTC formatting follows Rust for all u64 seconds, including years beyond 9999.
 
 ## 11. Offer (x402 extension v3)
 

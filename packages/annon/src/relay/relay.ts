@@ -25,20 +25,18 @@ import { bytes, exactKeys, uint } from '../settle-near/codec.js';
 import { type Authorization, identityJson, verifyAuthorization } from '../settle-near/identity.js';
 import {
   baseNonceV2,
-  buildPurchaseMessage,
   buyerKey,
-  type Purchase,
   parsePurchaseMessage,
   purchaseId,
 } from '../settle-near/purchase.js';
-import { termsHash } from '../settle-near/terms.js';
+import { type SettlementAssets, termsHash } from '../settle-near/terms.js';
 
 export type RelayRequest =
   | { method: 'register'; args: RegisterArgs; auth: Authorization }
   | { method: 'reopen'; args: ReopenArgs; auth: Authorization }
   | { method: 'stop_sales' | 'reopen_seller'; args: SellerArgs; auth: Authorization }
-  | { method: 'claim_key'; args: { purchase_id: string; grant: number } }
-  | { method: 'unlock'; args: { purchase: Purchase; logs: EvmLog[]; header: string } };
+  | { method: 'claim_key'; args: { purchase_id: string; grant?: number } }
+  | { method: 'unlock'; args: { purchase: string; logs: EvmLog[]; header: string | null } };
 export type RelayErrorCode =
   | 'bad_request'
   | 'bad_signature'
@@ -81,10 +79,11 @@ export interface CheckOptions {
   baseRpc: string;
   contractId: string;
   usdc: string;
+  nearUsdc?: string;
   policy: RelayPolicy;
   now?: number;
 }
-export function canonicalRequest(input: unknown): RelayRequest {
+export function canonicalRequest(input: unknown, assets?: SettlementAssets): RelayRequest {
   try {
     const r = structuredClone(input) as RelayRequest;
     if (!r || typeof r !== 'object') throw new Error('expected request');
@@ -98,7 +97,7 @@ export function canonicalRequest(input: unknown): RelayRequest {
     switch (r.method) {
       case 'register':
         exactKeys(a, ['terms', 'seller_key', 'deadline']);
-        termsHash(r.args.terms);
+        termsHash(r.args.terms, assets);
         buyerKey(r.args.seller_key);
         break;
       case 'reopen':
@@ -115,18 +114,22 @@ export function canonicalRequest(input: unknown): RelayRequest {
         else if (r.args.key !== null) throw new Error('stop key must be null');
         break;
       case 'claim_key':
-        exactKeys(a, ['purchase_id', 'grant']);
+        exactKeys(a, ['purchase_id', ...('grant' in a ? ['grant'] : [])]);
         bytes(r.args.purchase_id, 32);
-        if (!Number.isInteger(r.args.grant) || r.args.grant < 0 || r.args.grant > 0xffffffff)
+        if (
+          r.args.grant !== undefined &&
+          (!Number.isInteger(r.args.grant) || r.args.grant < 0 || r.args.grant > 0xffffffff)
+        )
           throw new Error('invalid grant');
         break;
       case 'unlock':
         exactKeys(a, ['purchase', 'logs', 'header']);
-        parsePurchaseMessage(buildPurchaseMessage(r.args.purchase));
+        if (parsePurchaseMessage(r.args.purchase, assets).route !== 'base-usdc')
+          throw new Error('not a Base purchase');
         if (
           !Array.isArray(r.args.logs) ||
           r.args.logs.length !== 2 ||
-          !/^0x([0-9a-f]{2})+$/.test(r.args.header)
+          (r.args.header !== null && !/^0x([0-9a-f]{2})+$/.test(r.args.header))
         )
           throw new Error('invalid logs/header');
         r.args.logs = r.args.logs.map((input) => {
@@ -174,9 +177,9 @@ export function canonicalRequest(input: unknown): RelayRequest {
     return fail('bad_request', (e as Error).message);
   }
 }
-/** Flat args for claim_key/unlock; wrapped authoritative args for identity operations. */
+/** Contract wire shape: unlock and identity calls wrap args; claim_key is flat. */
 export const contractArgs = (r: RelayRequest): object =>
-  'auth' in r ? { args: r.args, auth: r.auth } : r.args;
+  'auth' in r ? { args: r.args, auth: r.auth } : r.method === 'unlock' ? { args: r.args } : r.args;
 const asRelayError = (e: unknown): never => {
   if (e instanceof RelayError) throw e;
   return fail(
@@ -195,7 +198,7 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
       r.method === 'register'
         ? r.args.terms.file_id
         : r.method === 'unlock'
-          ? r.args.purchase.file_id
+          ? parsePurchaseMessage(r.args.purchase, { baseUsdc: o.usdc }).file_id
           : 'file_id' in r.args
             ? r.args.file_id
             : undefined;
@@ -214,7 +217,10 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
       )
         fail('not_sponsored');
       if (file) fail('already_registered');
-      signedByItsWallet(r, o.contractId);
+      signedByItsWallet(r, o.contractId, {
+        baseUsdc: o.usdc,
+        ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
+      });
       if (
         o.policy.sellerAllowed &&
         !(await o.policy.sellerAllowed(identityJson(r.args.terms.seller)))
@@ -259,13 +265,13 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
     }
     if (r.method !== 'unlock') return;
     const a = r.args;
-    const purchase = a.purchase;
-    const id = purchaseId(purchase);
+    const purchase = parsePurchaseMessage(a.purchase, { baseUsdc: o.usdc });
+    const id = purchaseId(purchase, { baseUsdc: o.usdc });
     if (
       purchase.route !== 'base-usdc' ||
       purchase.contract !== o.contractId ||
       !file.terms.base ||
-      purchase.terms_hash !== termsHash(file.terms) ||
+      purchase.terms_hash !== file.termsHash ||
       purchase.price !== file.terms.base.price ||
       purchase.asset !== o.usdc
     )
@@ -287,10 +293,13 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
       (await block(o.baseRpc, auth.block_number)).hash !== `0x${auth.block_hash}`
     )
       fail('payment_not_safe');
-    if ((await blockHeader(o.baseRpc, `0x${auth.block_hash}`)) !== a.header) fail('bad_header');
-    const paidAt = (await block(o.baseRpc, auth.block_number)).timestamp;
-    if (BigInt(paidAt) > BigInt(purchase.expires_at)) fail('bad_deadline');
-    if (file.salesStoppedAt !== null && paidAt > file.salesStoppedAt) fail('sales_stopped');
+    if (a.header !== null && (await blockHeader(o.baseRpc, `0x${auth.block_hash}`)) !== a.header)
+      fail('bad_header');
+    if (file.salesStoppedAt !== null) {
+      if (a.header === null) fail('bad_header');
+      const paidAt = (await block(o.baseRpc, auth.block_number)).timestamp;
+      if (BigInt(paidAt) > BigInt(file.salesStoppedAt) + 300n) fail('sales_stopped');
+    }
   } catch (e) {
     asRelayError(e);
   }
@@ -456,17 +465,17 @@ function enqueue<T>(job: () => Promise<T>): Promise<T> {
  * includes the buyer's key, which only the buyer knows before it is sent.
  */
 const identity = (r: RelayRequest, _contract: string) => {
-  if (r.method === 'unlock') return `unlock:${purchaseId(r.args.purchase)}`;
-  if (r.method === 'claim_key') return `claim:${r.args.purchase_id}:${r.args.grant}`;
+  if (r.method === 'unlock') return `unlock:${JSON.parse(r.args.purchase).purchase.purchase_id}`;
+  if (r.method === 'claim_key') return `claim:${r.args.purchase_id}:${r.args.grant ?? 0}`;
   if (r.method === 'reopen')
     return `reopen:${r.args.purchase_id}:${r.args.fresh_key}:${r.args.nonce}`;
   if (r.method === 'register') return `register:${r.args.terms.file_id}`;
   return `${r.method}:${r.args.file_id}:${r.args.key ?? ''}`;
 };
-const signedByItsWallet = (r: RelayRequest, contract: string) => {
+const signedByItsWallet = (r: RelayRequest, contract: string, assets?: SettlementAssets) => {
   if (
     r.method === 'register' &&
-    !verifyAuthorization(r.args.terms.seller, registerText(contract, r.args), r.auth)
+    !verifyAuthorization(r.args.terms.seller, registerText(contract, r.args, assets), r.auth)
   )
     fail('bad_signature');
 };
@@ -506,9 +515,15 @@ export async function relay(
   input: unknown,
   o: CheckOptions & { sender: Sender },
 ): Promise<RelayResult> {
-  const r = canonicalRequest(input);
+  const r = canonicalRequest(input, {
+    baseUsdc: o.usdc,
+    ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
+  });
   // A forged request must not take another wallet's limit or hold its operation.
-  signedByItsWallet(r, o.contractId);
+  signedByItsWallet(r, o.contractId, {
+    baseUsdc: o.usdc,
+    ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
+  });
   await checkRelay(r, o);
   const now = Date.now();
   for (const [k, v] of held) if (v <= now) held.delete(k);
@@ -647,3 +662,16 @@ async function send(
     return unclear(`unexpected: ${(e as Error).message}`);
   }
 }
+
+export {
+  type DeliveryInfo,
+  type DeliveryStep,
+  fundDelivery,
+  getDelivery,
+  listDeliveries,
+  type MaterializeRefundArgs,
+  materializeRefund,
+  paySlot,
+  type RefundRoot,
+  refundRoot,
+} from './keeper.js';

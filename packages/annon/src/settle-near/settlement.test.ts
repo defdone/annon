@@ -428,3 +428,76 @@ describe('depth-32 refund accumulator', () => {
       expect(verifyRefundProof(leaves[0] as string, index, old, tree.root)).toBe(false);
   });
 });
+
+describe('independent review regressions', () => {
+  it('refuses noncanonical refund identities before looking at the body', () => {
+    for (const refund of [
+      { kind: 'evm', id: `0x${'AB'.repeat(20)}` },
+      { kind: 'solana', id: base58.encode(ed25519.getPublicKey(seed)) },
+    ])
+      expect(() => parseRefundPrefix(`{"annon":2,"refund":${JSON.stringify(refund)},`)).toThrow();
+  });
+  it('refuses a duplicate split whose length and sum are otherwise valid', () => {
+    expect(() =>
+      encodeTerms({
+        ...terms,
+        near: {
+          ...terms.near,
+          recipients: [
+            { identity: evm, bps: 5000 },
+            { identity: evm, bps: 5000 },
+          ],
+        },
+      }),
+    ).toThrow(/distinct/);
+  });
+  it('refuses zero price and NEAR purchases on the Base network or wrong mainnet token', () => {
+    for (const edit of [{ price: '0' }, { network: 'eip155:8453' }, { asset: 'fake.near' }])
+      expect(() => encodePurchase({ ...purchase, ...edit })).toThrow();
+  });
+  it('rejects an aliased Merkle index with a valid current proof', () => {
+    const leaf = h(5);
+    const tree = new RefundTree();
+    tree.append(leaf);
+    const proof = RefundTree.proof([leaf], 0);
+    expect(verifyRefundProof(leaf, 0, proof, tree.root)).toBe(true);
+    expect(verifyRefundProof(leaf, 2 ** 32, proof, tree.root)).toBe(false);
+  });
+  it('refuses even correctly signed texts containing CR or a final LF', () => {
+    for (const text of ['line\rbreak', 'line\n']) {
+      const sig = hex(ed25519.sign(new TextEncoder().encode(text), seed));
+      expect(verifyAuthorization(sol, text, { kind: 'solana', sig })).toBe(false);
+    }
+  });
+  it('refuses a ZIP-215 small-order identity and signature', () => {
+    const id = { kind: 'solana', id: `01${'00'.repeat(31)}` } as const;
+    const sig = `0x01${'00'.repeat(63)}`;
+    const msg = new TextEncoder().encode('small order');
+    expect(
+      ed25519.verify(Buffer.from(sig.slice(2), 'hex'), msg, Buffer.from(id.id, 'hex'), {
+        zip215: true,
+      }),
+    ).toBe(true);
+    expect(verifyAuthorization(id, 'small order', { kind: 'solana', sig })).toBe(false);
+  });
+});
+
+it('keeps SDK signatures strict despite the broader contract hex and recovery-byte acceptance', async () => {
+  const signer = privateKeyToAccount(`0x${'01'.repeat(32)}`);
+  const id = parseIdentity({ kind: 'evm', id: signer.address });
+  const sig = await signer.signMessage({ message: 'T' });
+  expect(verifyAuthorization(id, 'T', { kind: 'evm', sig })).toBe(true);
+  for (const encoding of [
+    sig.toUpperCase().replace('0X', '0x'),
+    sig.slice(2),
+    `${sig.slice(0, -2)}${(Number.parseInt(sig.slice(-2), 16) - 27).toString(16).padStart(2, '0')}`,
+  ])
+    expect(verifyAuthorization(id, 'T', { kind: 'evm', sig: encoding })).toBe(false);
+  const signature = hex(ed25519.sign(new TextEncoder().encode('T'), seed));
+  expect(
+    verifyAuthorization(sol, 'T', {
+      kind: 'solana',
+      sig: signature.toUpperCase().replace('0X', '0x'),
+    }),
+  ).toBe(false);
+});

@@ -1,5 +1,4 @@
 /** Borsh commitments and seller texts, near-settlement.md §3. */
-import { usdc, utc } from '../near/texts.js';
 import {
   account,
   bytes,
@@ -11,6 +10,8 @@ import {
   network,
   str,
   uint,
+  usdc,
+  utc,
 } from './codec.js';
 import { encodeIdentity, type Identity, identityText } from './identity.js';
 
@@ -43,7 +44,12 @@ const price = (p: string) => {
   if (n === 0n) throw new RangeError('price must be positive');
   return le(n, 16);
 };
-export function encodeTerms(t: Terms): Uint8Array<ArrayBuffer> {
+/** Expected deployed assets; non-mainnet NEAR tokens have no implicit default. */
+export interface SettlementAssets {
+  nearUsdc?: string;
+  baseUsdc?: string;
+}
+export function encodeTerms(t: Terms, assets: SettlementAssets = {}): Uint8Array<ArrayBuffer> {
   exactKeys(t, [
     'network',
     'contract',
@@ -58,14 +64,16 @@ export function encodeTerms(t: Terms): Uint8Array<ArrayBuffer> {
   exactKeys(t.near, ['token', 'price', 'recipients', 'remainder']);
   if (t.base !== null) {
     exactKeys(t.base, ['usdc', 'price', 'pay_to']);
-    if (t.base.usdc !== BASE_USDC) throw new TypeError('invalid Base USDC');
+    if (t.base.usdc !== (assets.baseUsdc ?? BASE_USDC)) throw new TypeError('invalid Base USDC');
   }
   network(t.network);
   account(t.contract);
   if (t.pay2_version !== 2) throw new TypeError('unsupported PAY2 version');
   const n = t.near;
+  account(n.token);
   if (
-    n.token !== NEAR_USDC ||
+    ((assets.nearUsdc !== undefined || t.network === 'near:mainnet') &&
+      n.token !== (assets.nearUsdc ?? NEAR_USDC)) ||
     n.recipients.length < 1 ||
     n.recipients.length > 8 ||
     !Number.isInteger(n.remainder) ||
@@ -104,9 +112,15 @@ export function encodeTerms(t: Terms): Uint8Array<ArrayBuffer> {
       : concat(le(1, 1), bytes(t.base.usdc, 20), price(t.base.price), bytes(t.base.pay_to, 20)),
   );
 }
-export const termsHash = (t: Terms): string => hash('annon/terms/v2', encodeTerms(t));
-export function registerTextV2(t: Terms, sellerKey: string, deadline: number): string {
-  const commitment = termsHash(t);
+export const termsHash = (t: Terms, assets?: SettlementAssets): string =>
+  hash('annon/terms/v2', encodeTerms(t, assets));
+export function registerTextV2(
+  t: Terms,
+  sellerKey: string,
+  deadline: number,
+  assets?: SettlementAssets,
+): string {
+  const commitment = termsHash(t, assets);
   bytes(sellerKey, 48);
   return [
     'Annon: list a file for sale',

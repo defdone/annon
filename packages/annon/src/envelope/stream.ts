@@ -1,3 +1,4 @@
+import { account } from '../settle-near/codec.js';
 /**
  * Bounded-memory PAY2 version 2 using Web Streams and the one-shot encoder's WebCrypto primitives.
  *
@@ -269,7 +270,7 @@ export async function sealStreamWithKey(
     cipherHash,
     async finish(replay, finishOpts) {
       const { contractId, ckdSecret } = finishOpts;
-      if (!/^[a-z0-9._-]{2,64}$/.test(contractId)) throw new TypeError('bad NEAR account id');
+      account(contractId);
       const kw = await wrapKeyFor(ckdSecret, fileId, 'wrapKey');
       const fileKey = await subtle.importKey('raw', key, 'AES-GCM', true, ['encrypt']);
       const wrapped = new Uint8Array(await subtle.wrapKey('raw', fileKey, kw, 'AES-KW'));

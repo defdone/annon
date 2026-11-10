@@ -1,7 +1,11 @@
+import { utc } from '../settle-near/codec.js';
+
+export { usdc, utc } from '../settle-near/codec.js';
+
 /** Authoritative contract arguments and texts (near-settlement §§3,9). */
 import { type Identity, identityText } from '../settle-near/identity.js';
 import { buyerKey, type ReopenV2, reopenTextV2 } from '../settle-near/purchase.js';
-import { registerTextV2, type Terms } from '../settle-near/terms.js';
+import { registerTextV2, type SettlementAssets, type Terms } from '../settle-near/terms.js';
 
 export interface RegisterArgs {
   terms: Terms;
@@ -29,29 +33,14 @@ export function hex0x(s: string, bytes: number, name: string): string {
   return `0x${h.toLowerCase()}`;
 }
 
-/** USDC base units as a person reads them: `10000` is `0.01`, `1000000` is `1`. */
-export function usdc(units: string | bigint): string {
-  const u = BigInt(units);
-  if (u < 0n || u >= 2n ** 128n) throw new RangeError('price is a u128');
-  const whole = u / 1_000_000n;
-  const part = u % 1_000_000n;
-  if (part === 0n) return whole.toString();
-  return `${whole}.${part.toString().padStart(6, '0').replace(/0+$/, '')}`;
-}
-
-/** Unix seconds as `YYYY-MM-DD HH:MM:SS UTC`. */
-export function utc(secs: number): string {
-  // ponytail: Date covers years up to 9999; the SDK only signs deadlines minutes ahead.
-  if (!Number.isSafeInteger(secs) || secs < 0 || secs > 253_402_300_799) {
-    throw new RangeError('deadline out of range');
-  }
-  return `${new Date(secs * 1000).toISOString().slice(0, 19).replace('T', ' ')} UTC`;
-}
-
-export function registerText(contractId: string, a: RegisterArgs): string {
+export function registerText(
+  contractId: string,
+  a: RegisterArgs,
+  assets?: SettlementAssets,
+): string {
   if (contractId !== a.terms.contract) throw new TypeError('terms contract mismatch');
   buyerKey(a.seller_key);
-  return registerTextV2(a.terms, a.seller_key, a.deadline);
+  return registerTextV2(a.terms, a.seller_key, a.deadline, assets);
 }
 export const reopenText = (a: ReopenV2): string => reopenTextV2(a);
 export function reopenSellerText(contract: string, a: SellerArgs, seller: Identity): string {

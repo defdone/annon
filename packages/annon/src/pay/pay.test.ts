@@ -53,7 +53,13 @@ const p = (): Purchase => ({
   buyer_key: toHex(key.publicKeyBytes),
   expires_at: String(now() + 3600),
 });
-const file = { terms, header_hash: null, sales_stopped_at: null, taken_down: null };
+const file = {
+  terms,
+  terms_hash: termsHash(terms),
+  header_hash: null,
+  sales_stopped_at: null,
+  taken_down: null,
+};
 const options = {
   nearRpc: 'https://near.rpc',
   baseRpc: 'https://base.rpc',
@@ -75,7 +81,15 @@ function rpc() {
           method === 'get_file'
             ? file
             : method === 'get_config'
-              ? { mpc: 'v1.signer', ckd_domain: 2, foreign_tx_domain: 3, usdc: sample.asset }
+              ? {
+                  network: 'near:mainnet',
+                  near_usdc: terms.near.token,
+                  intents: 'intents.near',
+                  mpc: 'v1.signer',
+                  ckd_domain: 2,
+                  foreign_tx_domain: 3,
+                  usdc: sample.asset,
+                }
               : (state[method] ?? null);
         return {
           json: async () => ({
@@ -178,8 +192,13 @@ describe('purchase settlement model', () => {
     const x = await payload();
     expect(checkPayment(x.header, x.pr).purchaseId).toBe(purchaseId(x.purchase));
     const decoded = () => JSON.parse(Buffer.from(x.header, 'base64').toString());
+    expect(decoded().extensions.annon.info.purchase).toBe(buildPurchaseMessage(x.purchase));
     for (const edit of [
-      (o: ReturnType<typeof decoded>) => (o.extensions.annon.info.purchase.price = '1'),
+      (o: ReturnType<typeof decoded>) =>
+        (o.extensions.annon.info.purchase = o.extensions.annon.info.purchase.replace(
+          '200000',
+          '1',
+        )),
       (o: ReturnType<typeof decoded>) => (o.payload.authorization.nonce = terms.file_id),
       (o: ReturnType<typeof decoded>) => (o.extensions.annon.info.version = 2),
     ]) {
@@ -246,6 +265,9 @@ describe('purchase settlement model', () => {
       terms_hash: termsHash(terms),
       recovery: sample.recovery,
       buyer_key: sample.buyer_key,
+      route: 'base-usdc',
+      delivery: null,
+      accepted_at: now(),
       grants: 1,
     };
     await expect(
@@ -293,6 +315,9 @@ describe('purchase settlement model', () => {
       terms_hash: termsHash(terms),
       recovery: purchase.recovery,
       buyer_key: purchase.buyer_key,
+      route: 'base-usdc',
+      delivery: null,
+      accepted_at: now(),
       grants: 1,
     };
     state.get_grant = { purchase_id: id, grant: 0, buyer_key: purchase.buyer_key };
@@ -315,4 +340,46 @@ describe('purchase settlement model', () => {
       expect(await blockHeader('https://base.rpc', v.hash)).toBe(v.rlp);
     }
   });
+});
+
+it('caps the buyer authorization at purchase expiry and rejects longer signed payloads', async () => {
+  rpc();
+  const pr = await requirements();
+  const purchase = { ...p(), expires_at: String(now() + 30) };
+  const q = await preflight({
+    ...options,
+    buyer: payer.address,
+    paymentRequired: pr,
+    pay2: header,
+    maxPrice: 200000n,
+  });
+  const result = await authorize(q, {
+    purchase,
+    buyerSecret: secret,
+    store: memoryStore(),
+    wallet: { address: payer.address, signTypedData: (t) => payer.signTypedData(t as never) },
+  });
+  const signed = checkPayment(result.header, pr);
+  expect(signed.validBefore).toBeLessThanOrEqual(BigInt(purchase.expires_at));
+  const a = {
+    from: payer.address.toLowerCase(),
+    to: must(terms.base).pay_to,
+    value: 200000n,
+    validAfter: 0n,
+    validBefore: BigInt(purchase.expires_at) + 1n,
+    nonce: baseNonceV2(purchaseId(purchase)),
+  };
+  const signature = await payer.signTypedData(typedData(sample.asset, a) as never);
+  const invalid = paymentSignature(pr, must(pr.accepts[1]), a, signature, purchase);
+  expect(() => checkPayment(invalid, pr)).toThrow();
+  expect(() =>
+    checkTerms(invalid, {
+      contractId: terms.contract,
+      fileId: terms.file_id,
+      usdc: sample.asset,
+      price: 200000n,
+      payTo: must(terms.base).pay_to,
+      termsHash: termsHash(terms),
+    }),
+  ).toThrow();
 });

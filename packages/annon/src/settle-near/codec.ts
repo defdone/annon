@@ -76,3 +76,27 @@ export const compare = (a: Uint8Array, b: Uint8Array) => {
   }
   return a.length - b.length;
 };
+
+/** USDC base units in authoritative human-readable text. */
+export function usdc(units: string | bigint): string {
+  const u = uint(units, 128);
+  const part = u % 1_000_000n;
+  return `${u / 1_000_000n}${part ? `.${part.toString().padStart(6, '0').replace(/0+$/, '')}` : ''}`;
+}
+/** Rust text::utc, including every u64 timestamp (no JavaScript Date limit). */
+export function utc(secs: number | bigint): string {
+  if (typeof secs === 'number' && !Number.isSafeInteger(secs))
+    throw new RangeError('deadline out of range');
+  const n = uint(BigInt(secs), 64);
+  const z = n / 86400n + 719468n;
+  const era = z / 146097n;
+  const doe = z % 146097n;
+  const yoe = (doe - doe / 1460n + doe / 36524n - doe / 146096n) / 365n;
+  const doy = doe - (365n * yoe + yoe / 4n - yoe / 100n);
+  const mp = (5n * doy + 2n) / 153n;
+  const day = doy - (153n * mp + 2n) / 5n + 1n;
+  const month = mp < 10n ? mp + 3n : mp - 9n;
+  const year = era * 400n + yoe + (month <= 2n ? 1n : 0n);
+  const pad = (v: bigint) => v.toString().padStart(2, '0');
+  return `${year.toString().padStart(4, '0')}-${pad(month)}-${pad(day)} ${pad((n % 86400n) / 3600n)}:${pad((n / 60n) % 60n)}:${pad(n % 60n)} UTC`;
+}

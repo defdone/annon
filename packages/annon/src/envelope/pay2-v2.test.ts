@@ -188,3 +188,57 @@ for (const authKind of [0, 1, 2] as const)
       }
     });
   });
+
+it('rejects invalid contract accounts in buffered and streaming NEAR headers', async () => {
+  const opts = { fileId, name: '', mime: '', authKind: 2 as const };
+  const finish = {
+    contractId: 'a..b',
+    seller: { kind: 'near', id: 'seller.near' } as const,
+    ckdSecret: ckd,
+  };
+  const buffered = await sealWithKey(K, data, opts);
+  const streamed = await sealStreamWithKey(K, stream(data), data.length, opts);
+  await expect(buffered.finish(finish)).rejects.toThrow();
+  await expect(streamed.finish(stream(data), finish)).rejects.toThrow();
+});
+
+it('checks preview kinds even when all signed body bytes are unchanged', async () => {
+  const seller = { kind: 'near', id: 'seller.near' } as const;
+  const sealed = await sealWithKey(K, data, { fileId, name: '', mime: '', authKind: 2 });
+  const file = await sealed.finish({ contractId, ckdSecret: ckd, seller });
+  const h = parseHeader(file);
+  const pkg = await sealed.preview({ meta: true });
+  const listing = {
+    fileId,
+    cipherHash: sealed.cipherHash,
+    seller,
+    publishedHeaderHash: await sha256(file.subarray(0, h.headerLen - 65)),
+  };
+  await verifyPreview(pkg, listing);
+  for (const kind of [0, 1, 3, 255]) {
+    const header = Uint8Array.from(Buffer.from(pkg.header, 'base64'));
+    header[7] = kind;
+    await expect(
+      verifyPreview({ ...pkg, header: Buffer.from(header).toString('base64') }, listing),
+    ).rejects.toHaveProperty('name', 'Pay2Error');
+  }
+});
+
+it('binds kind to seller even with a valid EVM signature over the altered header', async () => {
+  const seller = { kind: 'evm', id: account.address.toLowerCase() } as const;
+  const sealed = await sealWithKey(K, data, { fileId, name: '', mime: '', authKind: 0 });
+  const file = await sealed.finish({ contractId, ckdSecret: ckd, seller, sign: signEvm });
+  const h = parseHeader(file);
+  file[7] = 1;
+  const hash = Buffer.from(await sha256(file.subarray(0, h.headerLen - 65))).toString('hex');
+  const text = `Annon: publish a file\ncontract: ${contractId}\nfile: 0x${Buffer.from(fileId).toString('hex')}\nheader: 0x${hash}`;
+  file.set(Buffer.from((await signEvm(text)).slice(2), 'hex'), h.headerLen - 65);
+  const { inspectHeader } = await import('./pay2.js');
+  await expect(
+    inspectHeader(file, { seller, fileId, cipherHash: sealed.cipherHash }, contractId),
+  ).rejects.toHaveProperty('code', 'seller_signature_invalid');
+  for (const kind of [3, 255]) {
+    file[7] = kind;
+    expect(() => parseHeader(file)).toThrowError(expect.objectContaining({ code: 'bad_header' }));
+  }
+});

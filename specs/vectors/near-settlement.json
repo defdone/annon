@@ -1,10 +1,538 @@
 {
-  "spec": "near-settlement.md draft v2",
+  "spec": "near-settlement.md draft 3 (contract e08df29)",
   "encoding": "All binary hex uses 0x; Solana JSON id is lowercase hex without prefix. Merkle proofs are bottom-up, indexed from zero. PUBLIC test fixtures only.",
   "fixtures": {
     "evm_private_key": "0x0101010101010101010101010101010101010101010101010101010101010101",
     "solana_seed": "0x0707070707070707070707070707070707070707070707070707070707070707"
   },
+  "negative": [
+    {
+      "id": "leading-space",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": " {\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "foreign"
+      }
+    },
+    {
+      "id": "trailing-newline",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\"}}\n",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "body-whitespace",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\": {\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "duplicate-body-key",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "unknown-body-key",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"extra\":1,\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "noncanonical-number",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"0200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "escaped-body-string",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:main\\u006eet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "wrong-purchase-id",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0x0000000000000000000000000000000000000000000000000000000000000000\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "oversize-body",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\"}}                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "uppercase-recovery",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"evm\",\"id\":\"0x1A642F0E3C3AF545E7ACBD38B07251B3990914F1\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0x9bd1d620f2603306c1b79786326fc57641a7e0b0577c9e3bac2d625a5946bf8f\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "bad-bls-key-infinity",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0xc00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0x568b8cb96066e71a0a6fe2a555d334789823bd28cab7b857dca684e345c440c1\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "bad-bls-compression",
+      "kind": "purchase",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1a642f0e3c3af545e7acbd38b07251b3990914f1\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"near-usdc\",\"asset\":\"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\",\"recovery\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0x819871154e7a40f126a9be9acfcb63a49dfa1cf942b2c80ad6c5b12c51b7e708\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "base-wrong-network",
+      "kind": "purchase",
+      "context": {
+        "network": "eip155:8453",
+        "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "route": 1,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"purchase\":{\"network\":\"near:mainnet\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"base-usdc\",\"asset\":\"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"near\",\"id\":\"seller.near\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0xcc5af3e4c9091f947fe49ca5371394e4d11bd86d4a03e4ac420c83b5f3659dfe\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "base-wrong-asset",
+      "kind": "purchase",
+      "context": {
+        "network": "eip155:8453",
+        "asset": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "route": 1,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"solana\",\"id\":\"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c\"},\"purchase\":{\"network\":\"eip155:8453\",\"contract\":\"v2.annon.defdone.near\",\"route\":\"base-usdc\",\"asset\":\"0x9999999999999999999999999999999999999999\",\"file_id\":\"0x0303030303030303030303030303030303030303030303030303030303030303\",\"terms_hash\":\"0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\",\"price\":\"200000\",\"nonce\":\"0x0606060606060606060606060606060606060606060606060606060606060606\",\"buyer_key\":\"0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\",\"recovery\":{\"kind\":\"near\",\"id\":\"seller.near\"},\"expires_at\":\"1794350000\",\"purchase_id\":\"0x31ec0ed75100c8b388002454061deb07bbf46e6235b8f0253971d4f553c77d18\"}}",
+      "expected": {
+        "sdk": "reject",
+        "contract": "unusable"
+      }
+    },
+    {
+      "id": "prefix-uppercase-evm",
+      "kind": "refund_prefix",
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"evm\",\"id\":\"0x1A642F0E3C3AF545E7ACBD38B07251B3990914F1\"},",
+      "expected": {
+        "sdk": "reject",
+        "contract": "foreign"
+      }
+    },
+    {
+      "id": "prefix-base58-solana",
+      "kind": "refund_prefix",
+      "input": "{\"annon\":2,\"refund\":{\"kind\":\"solana\",\"id\":\"GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB\"},",
+      "expected": {
+        "sdk": "reject",
+        "contract": "foreign"
+      }
+    },
+    {
+      "id": "unsorted-split",
+      "kind": "terms",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "seller": {
+          "kind": "solana",
+          "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        "pay2_version": 2,
+        "cipher_hash": "0x0404040404040404040404040404040404040404040404040404040404040404",
+        "moderator": "moderator.near",
+        "near": {
+          "token": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+          "price": "200000",
+          "recipients": [
+            {
+              "identity": {
+                "kind": "near",
+                "id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "near",
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "near",
+                "id": "seller.near"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "near",
+                "id": "ab"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "solana",
+                "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "solana",
+                "id": "0000000000000000000000000000000000000000000000000000000000000000"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "evm",
+                "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+              },
+              "bps": 1250
+            },
+            {
+              "identity": {
+                "kind": "evm",
+                "id": "0x0000000000000000000000000000000000000000"
+              },
+              "bps": 1250
+            }
+          ],
+          "remainder": 7
+        },
+        "base": null
+      },
+      "expected": {
+        "sdk": "reject",
+        "contract": "problem"
+      }
+    },
+    {
+      "id": "duplicate-split-valid-sum",
+      "kind": "terms",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "seller": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "pay2_version": 2,
+        "cipher_hash": "0x0404040404040404040404040404040404040404040404040404040404040404",
+        "moderator": null,
+        "near": {
+          "token": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+          "price": "200000",
+          "recipients": [
+            {
+              "identity": {
+                "kind": "evm",
+                "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+              },
+              "bps": 5000
+            },
+            {
+              "identity": {
+                "kind": "evm",
+                "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+              },
+              "bps": 5000
+            }
+          ],
+          "remainder": 0
+        },
+        "base": {
+          "usdc": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "price": "200000",
+          "pay_to": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        }
+      },
+      "expected": {
+        "sdk": "reject",
+        "contract": "problem"
+      }
+    },
+    {
+      "id": "pay2-version-one",
+      "kind": "terms",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "seller": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "pay2_version": 1,
+        "cipher_hash": "0x0404040404040404040404040404040404040404040404040404040404040404",
+        "moderator": null,
+        "near": {
+          "token": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+          "price": "200000",
+          "recipients": [
+            {
+              "identity": {
+                "kind": "evm",
+                "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+              },
+              "bps": 10000
+            }
+          ],
+          "remainder": 0
+        },
+        "base": {
+          "usdc": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "price": "200000",
+          "pay_to": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        }
+      },
+      "expected": {
+        "sdk": "reject",
+        "contract": "problem"
+      }
+    },
+    {
+      "id": "wrong-near-token",
+      "kind": "terms",
+      "context": {
+        "network": "near:mainnet",
+        "asset": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+        "route": 0,
+        "contract": "v2.annon.defdone.near"
+      },
+      "input": {
+        "network": "near:mainnet",
+        "contract": "v2.annon.defdone.near",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "seller": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "pay2_version": 2,
+        "cipher_hash": "0x0404040404040404040404040404040404040404040404040404040404040404",
+        "moderator": null,
+        "near": {
+          "token": "fake.near",
+          "price": "200000",
+          "recipients": [
+            {
+              "identity": {
+                "kind": "evm",
+                "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+              },
+              "bps": 10000
+            }
+          ],
+          "remainder": 0
+        },
+        "base": {
+          "usdc": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+          "price": "200000",
+          "pay_to": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        }
+      },
+      "expected": {
+        "sdk": "reject",
+        "contract": "problem"
+      }
+    },
+    {
+      "id": "wrong-kind-authorization",
+      "kind": "authorization",
+      "input": {
+        "identity": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 0.2 USDC on NEAR\nsplit: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1 100.00%\nremainder: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nbase: 0.2 USDC on Base to 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\ncipher: 0x0404040404040404040404040404040404040404040404040404040404040404\nmoderator: (none)\nterms: 0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\nseller key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC",
+        "auth": {
+          "kind": "solana",
+          "sig": "0x113c182d9210585c03c7e8cbe08b4a2805c363f0a542495d514b0424852bc71517ab9b0a07eda15f27fb6c74ed4ee79c62898a9687ffb1354866abc330bc44551c"
+        }
+      },
+      "expected": {
+        "sdk": false,
+        "contract": "false"
+      }
+    },
+    {
+      "id": "aliased-proof-index",
+      "kind": "merkle",
+      "input": {
+        "leaf": "0xf043908c07e6e1f0082a706a6bced99fe5c786e38b0d026a40df1daf6d8ae3ca",
+        "index": 4294967296,
+        "proof": [
+          "0x0000000000000000000000000000000000000000000000000000000000000000",
+          "0xae0798d0ecaed2b778eddebf18f071a561c53658c05e76cedecc27cafbdbc577",
+          "0x90534fe0aff6db9edb29eee74e78a386916a581c8e6465349493e1a6c87241e1",
+          "0xbea16162721bca4b6e1782cbdc695a471522157c6716f508db47c599195340f4",
+          "0x30765fef341bdfe749c391bf956a9f03d363941b2eb8f85ab16bb6eb0d3c4def",
+          "0xf1a0a71a6550c41bc8d4dac4f186b6d274a839f2f95ad9e3bb651d45810c5a1f",
+          "0xc6984907d2e534964351393bc85f04374065b63870cc859c68192def090c1017",
+          "0xdc0606b906238dd157e69cb261e75696007e4d9a3f707a7ce10ce410d08bcfec",
+          "0x8e4b3745e5f2f7d48e36b192cb39242fa0f7a76fac1e36a519d8ebe00f3e21fb",
+          "0xbd752b8e76f5f891e5d3a10352dbf3ac25123b6eb48a3ad154020cd0c84d2176",
+          "0x29398d48e1a1a9f3c8e0f97b0f8c066d2beaf88a319baef02a5482d6157ebd2b",
+          "0x76dc94f187362590f6fd2f1e2b1b8c8f06d7439080b4a499ae6b267ab1b5cc31",
+          "0xd100399f607ba956d68737045ea9eb3e75475dfa633b7cabecf0afa05c9f3af8",
+          "0x3e46222c092b9baa5a16df1dc2864c7cb5fb79609d096ac2a10d64f824d1c73a",
+          "0x8cf2c9bd2369a3b9e0bbdd2cee634605440adb2d70b15263dbe7d0d16ebfc03d",
+          "0xfbbb942587ef256738d2bbb0506423880206cfbfa2ed4d340d796b0f7e290980",
+          "0xbbc84bb1eca9b98b546708cadcf829983dd03da168f65aeae21724003072c21a",
+          "0x669b03f8ec7153d9f9db779449f504489942359aab734d938417889394394b09",
+          "0xa3f6714a23c8f9b91fb3dd6e311bd1cf5f8bcb3618dee8ae5cd7ab0ec40c0876",
+          "0x0bd2118fbd68fa6bb6733596bb879f571bd648821f7437419dcf49f5078f1db8",
+          "0x51c20d66008024c04cf114564a998e49ef8f6e044e2d13a03a66521d6e200503",
+          "0xb29e665a5be928c888cae79638ea9f6febb5e0da9c0adb8eef892895fdeb34f3",
+          "0xe39d25ebb3238dd9c246e22cceeffe7a6def739037e7ddb41889d3ed2bdb54cb",
+          "0xc39d9328c5e0bef02e859ce63d15d3a5240a4c52ee34bb87ac5ba231910bf5f0",
+          "0xfd153e6be1763177c1d43f43661a359214d26256cf62b811d8442382dbca7470",
+          "0xe8123d755c5a32140ea87605c18ef7f342dc7461e1fd470a158356eaed68503d",
+          "0x16022e1fc087982698d7861ece2506bc8f21626c03a30c424259d3f7fde28633",
+          "0x655542f14a719ca624255c59096d3afb83ccef5bb29ce05d37d540e939a3d7d1",
+          "0x259debd0f2289401c7da9aeb0057abb1d4a8c7a2cffe0af3ec42910497936a75",
+          "0xdd363ae2d13611d37dac77e653436745bcda1f4e2d76b04b2723930947d94602",
+          "0x5a62aaa41541242cf12e482743eedf403c08e920330f6736825bfe27f2da8237",
+          "0xe69e674ae78b120925d53f10daccf990ddd831c025415bdf41b4d594157d23cf"
+        ],
+        "root": "0x55003afc1b2ad3fb52e94baf454054b61400d7a562dff0c123740c30cc313e04"
+      },
+      "expected": {
+        "sdk": false,
+        "contract": "false"
+      }
+    }
+  ],
   "identities": [
     {
       "identity": {
@@ -495,7 +1023,7 @@
     {
       "count": 0,
       "leaves": [],
-      "frontier": [
+      "sdk_frontier": [
         null,
         null,
         null,
@@ -537,7 +1065,7 @@
       "leaves": [
         "0xf043908c07e6e1f0082a706a6bced99fe5c786e38b0d026a40df1daf6d8ae3ca"
       ],
-      "frontier": [
+      "sdk_frontier": [
         "0xf043908c07e6e1f0082a706a6bced99fe5c786e38b0d026a40df1daf6d8ae3ca",
         null,
         null,
@@ -619,7 +1147,7 @@
         "0xdb99f71f7b15b7b808749fbe7d3baa17a1b1bc988f9997a111db169dcac9740c",
         "0x9b25dc4ef1760fff4c7f779fd7076765811b9fe64a9f86ebe29ba8bf5bc65a2d"
       ],
-      "frontier": [
+      "sdk_frontier": [
         "0x9b25dc4ef1760fff4c7f779fd7076765811b9fe64a9f86ebe29ba8bf5bc65a2d",
         "0x0074eba7928f1d0d5f2be8dc8fb233568235b6e97063bcf6f16b10250140ea67",
         null,
@@ -777,7 +1305,7 @@
         "0xcc250e024cefff4aee4afaea72bb0d54d150cac37869c1c6c3bebca8036f6af3",
         "0xa4beef55b68ac43a01aa3d20254431b051690843131ab4f1b86234635c838478"
       ],
-      "frontier": [
+      "sdk_frontier": [
         "0xa4beef55b68ac43a01aa3d20254431b051690843131ab4f1b86234635c838478",
         null,
         "0x567c685fb7a7cf6d1621d2b9d06efd4ae8a702f4bac547377e61e168463dd86e",
