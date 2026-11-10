@@ -238,6 +238,12 @@ impl Annon {
         self.reserve += env::attached_deposit().as_yoctonear();
     }
 
+    /// NEAR (yocto) left for the storage of future deliveries; below 4096 bytes' worth, a delivery
+    /// becomes a refund leaf.
+    pub fn receiver_reserve(&self) -> U128 {
+        U128(self.reserve)
+    }
+
     /// Turns a refund leaf into an ordinary refund; the caller pays its storage.
     #[payable]
     pub fn materialize_refund(&mut self, leaf: LeafArgs, index: u64, proof: Vec<String>) {
@@ -548,6 +554,7 @@ pub(crate) mod tests {
         let before = c.reserve;
         deliver(&mut c, 10_000, &message(&near_purchase()));
         let used = before - c.reserve;
+        assert_eq!(c.receiver_reserve(), U128(c.reserve));
         assert!(
             used > 0 && used < NearToken::from_millinear(41).as_yoctonear(),
             "{used}"
