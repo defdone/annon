@@ -1,15 +1,17 @@
-# Annon payment profile for x402 v2 (v1)
+# Annon payment profile for x402 v2 (v1.1 draft)
 
 How a server sells an Annon file over x402 v2, and what an Annon client sends. It is plain x402 v2
 ([spec](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md),
 [HTTP transport](https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/http.md),
 [exact on EVM](https://github.com/x402-foundation/x402/blob/main/specs/schemes/exact/scheme_exact_evm.md))
-with one scheme of its own, one extension, `annon`, and the payment nonce of [nonce.md](nonce.md).
+with one scheme of its own, one extension, `annon`, the standard
+[`payment-identifier`](https://github.com/x402-foundation/x402/blob/main/specs/extensions/payment_identifier.md)
+extension, and the payment nonce of [nonce.md](nonce.md).
 The SDK builds and checks all of it (`offerFor`, `verifyPayment`, `forFacilitator` on the seller's
 side; `discover`, `preflight`, `authorize` on the buyer's); integrators don't write these objects.
 
-Status: v1, frozen on 9 Nov 2026. Any change to what a client or server sends or checks is a new
-version.
+Status: v1.1, draft. v1 was frozen on 9 Nov 2026 (commit `1676d96`); section 11 lists what v1.1
+changes. Any change to what a client or server sends or checks is a new version.
 
 ## 1. Why its own scheme
 
@@ -30,7 +32,7 @@ A `402` with the `PAYMENT-REQUIRED` header (base64 JSON `PaymentRequired`, `x402
 
 | Field | Value |
 |---|---|
-| `version` | `1` |
+| `version` | `2` (v1.1; `1` was v1) |
 | `network` | `near:mainnet` |
 | `contract` | the Annon contract account, e.g. `v1.annon.defdone.near` |
 | `fileId` | `0x` and 32 bytes, lowercase |
@@ -38,7 +40,8 @@ A `402` with the `PAYMENT-REQUIRED` header (base64 JSON `PaymentRequired`, `x402
 | `download` | URL of the PAY2 file for buyers (section 7) |
 | `public` | optional, `true` when the seller publishes the body too |
 
-`extensions.annon.schema` is the JSON Schema of that object (`ANNON_SCHEMA` in the SDK).
+`extensions.annon.schema` is the JSON Schema of that object (`ANNON_SCHEMA` in the SDK); in v1.1
+its `version` is `const: 2`.
 
 `accepts` holds one offer, every value from the registration (`get_file`) and the contract's
 configuration (`get_config`):
@@ -53,6 +56,9 @@ configuration (`get_config`):
 | `maxTimeoutSeconds` | the server's choice; the Annon client signs for at most 180 seconds |
 | `extra` | `name: "USD Coin"`, `version: "2"`; no `assetTransferMethod`, no `paymentFlow` other than `authorization` |
 
+`extensions["payment-identifier"]`: as the extension defines it, with `info.required: false`
+(section 10).
+
 A stopped or taken-down file is not offered: `410`.
 
 ## 3. Payment
@@ -66,6 +72,8 @@ The client sends `PAYMENT-SIGNATURE` (base64 JSON `PaymentPayload`, `x402Version
   EVM.
 - `extensions.annon.info`: the info received, plus `buyerKey`: the buyer's one-time BLS12-381 G1
   key, `0x` and 48 bytes compressed, not the identity.
+- `extensions["payment-identifier"]`: when the server advertised it, the advertised object with
+  `info.id` added (section 10).
 
 EIP-712: primary type `TransferWithAuthorization`; domain `name`, `version` from `extra`, chain
 8453, `verifyingContract` = `asset`.
@@ -84,9 +92,11 @@ Base's, read before the registration is read again:
 3. The nonce is `annonNonce` computed by the server from `buyerKey`; the signature recovers to
    `from` over it; `validAfter` is 0; `validBefore` is at most 240 seconds after "now".
 
-Anything else: refuse, settle nothing. Then `forFacilitator` renames the scheme to `exact` in both
-the payload's `accepted` and the requirements (the official facilitator checks both), and any
-standard facilitator settles it.
+Anything else: refuse, settle nothing. A retry of a payment already settled or being settled is
+recognized first and never reaches these checks (section 10). Then `forFacilitator` renames the
+scheme to `exact` in both the payload's `accepted` and the requirements (the official facilitator
+checks both), keeps every extension of the payload, and returns the facilitator's request body with
+`x402Version: 2`; any standard facilitator settles it.
 
 ## 5. Settlement response
 
@@ -186,6 +196,101 @@ nobody until more arrive.
 
 ## 9. Browser clients
 
-As the HTTP transport requires: `Access-Control-Expose-Headers: PAYMENT-REQUIRED, PAYMENT-RESPONSE`,
-`Access-Control-Allow-Headers: PAYMENT-SIGNATURE, Content-Type`, preflight answered without
-payment, `Vary: Origin` when origins are reflected.
+As the HTTP transport requires ([browser clients](https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/http.md#browser-clients)):
+
+- `Access-Control-Allow-Origin` for the calling origin on every response: the `402`, the paid
+  response, a retry's answer and every error. Without it the browser hides the whole response;
+- `Access-Control-Expose-Headers: PAYMENT-REQUIRED, PAYMENT-RESPONSE`, merged with any value already
+  there;
+- a preflight answered without payment, allowing the actual method,
+  `Access-Control-Allow-Headers: PAYMENT-SIGNATURE, Content-Type`, and a non-trivial
+  `Access-Control-Max-Age`;
+- `Vary: Origin` when origins are reflected, and the `402` kept out of shared caches.
+
+## 10. Retries: one purchase, one settlement
+
+A buyer may lose the answer, close the tab or crash anywhere between signing and settlement. The
+rules below make every retry land on the same payment, so a buyer never pays twice for one
+purchase and a seller never refuses a buyer who already paid.
+
+**A purchase** is identified by `(network, asset, from, nonce)`. The nonce commits to the contract,
+the file and the one-time key ([nonce.md](nonce.md)), and USDC executes at most one transfer per
+`(from, nonce)`. A client keeps at most one open purchase per wallet and file: it does not make a
+second one-time key, and so a second nonce, while the first purchase is open.
+
+**The client records before it acts.** Before the wallet is asked to sign, the client durably
+records the purchase, the authorization it is about to sign (all six fields), the Base block to
+search from, the `PaymentRequired` it answers, and the PAY2 header it checked (its bytes, or their
+`SHA256` as defined in section 7, so that a download after a crash is checked against exactly those
+bytes). After signing, and before the payload leaves the client in any form (a dry run on an RPC
+included), it durably records the complete `PaymentPayload`. That record is a signed authorization
+anyone can submit until `validBefore`: keep it as such.
+
+**When a purchase closes.** It closes when the buyer is recorded on NEAR (`is_buyer`), or when it
+is unpaid: every recorded authorization has expired at a finalized Base block, or was canceled by
+an `AuthorizationCanceled` in a finalized block, and no payment was found. A payment found on Base
+but not yet recorded on NEAR keeps the purchase open; the next step is `unlock`, never a new
+purchase.
+
+**A retry resends the recorded payload.** It is the same `PaymentPayload`, with the same
+`payment-identifier` id, never one rebuilt from a new `402`. Signing a new authorization for the
+same purchase (a new deadline, the same nonce) is not part of v1.1.
+
+**`payment-identifier`.** The id names one payload, not the purchase: the same payload is sent with
+the same id; a changed payload gets a new id. The id follows the extension (16 to 128 characters,
+letters, digits, `-` and `_`); the SDK makes `pay_` and 32 random hex digits. The id is a
+correlation key, never an entitlement, and it never opens a session.
+
+**What the server keeps.** Two records, each updated atomically:
+
+1. **The id binding.** The id, scoped to the seller and the route, is bound to the payload it first
+   came with. The same id with another payload is refused with `409`. The binding is kept at least
+   until that payload can no longer settle (its `validBefore` has passed at a finalized Base block);
+   while it is kept, the `409` holds. After that the purchase record still prevents a second
+   settlement.
+2. **The purchase.** `(network, asset, from, nonce)` has one state:
+
+| State | Meaning | Answer to the payload |
+|---|---|---|
+| `processing` | accepted and recorded before the facilitator is called; a settle call may be in flight or may have broadcast, but no transaction hash is known | the server reconciles first (below); if that does not settle it, a retryable error with no transaction: never `settlement_pending` without a hash, never a made-up hash |
+| `submitted` | broadcast; the transaction hash is known | `PAYMENT-RESPONSE` with `errorReason: "settlement_pending"`, the `transaction` and `network` ([x402 v2 §9](https://github.com/x402-foundation/x402/blob/main/specs/x402-specification-v2.md#9-error-handling)) |
+| `settled` | the payment of this purchase is on Base in a block at or before Base `safe` | the success `PAYMENT-RESPONSE` with that `transaction`, however often asked |
+| `unpaid` | every authorization of the purchase expired at a finalized block, or was canceled in one, with no payment | refused like a new payment would be |
+
+The answer always follows the purchase's state at the time of the request, never a frozen first
+answer. A retry of a `processing` or `submitted` purchase, and any such purchase left behind by a
+crash, is reconciled from Base by its nonce, whether or not a hash is known: if its payment is on
+Base it is `settled`; if not and the payload can still settle, the server calls the facilitator
+again with the same payload (the same nonce settles at most once); if it can no longer settle, it
+is `unpaid`. The purchase stays open until one of these is certain.
+
+**Payment evidence.** A purchase is `settled` only on the same evidence NEAR's `unlock` checks: a
+successful Base transaction whose USDC `AuthorizationUsed(from, nonce)` log is followed by the
+`Transfer` from `from` to the registered `pay_to` of at least the registered price, with `nonce` =
+`annonNonce` of the payload's `buyerKey`. `authorizationState(from, nonce)` alone is not a payment:
+it is also true after a cancellation. A server with no state for a purchase (its first sight of
+the payload, or state lost to a restart) reads Base for that evidence before deciding, searching
+the blocks from `validBefore` minus 240 seconds to `validBefore`; it never asks for a new payment
+because it forgot one.
+
+**Order of checks for a payload.** First a takedown refuses (`410`), whatever the state. Then the
+purchase terms, which come from the registration and the contract's configuration and never
+change: `accepted.scheme`, `network`, `asset`, `amount` and `payTo`, and the EIP-712 `name` and
+`version` in `extra`; `extensions.annon.info.contract` and `fileId` naming this file; a valid
+`buyerKey`; the nonce; the signature recovering to `from`; `validAfter` 0. Then the purchase state
+above: a purchase that is `processing`, `submitted` or `settled` is answered from its state, even
+if sales have stopped or the seller's settings have changed since, or the authorization has
+expired. Only a purchase the server has not started settling goes through the rest of section 4:
+"still on sale", the deadline, and the comparison of the whole offer and info, seller settings
+(`maxTimeoutSeconds`, the `header` and `download` URLs, `public`) included. A facilitator may also
+use the id; a seller does not rely on it.
+
+## 11. Changes from v1
+
+| Section | v1.1 |
+|---|---|
+| 2 | `extensions.annon.info.version` is `2`; the server advertises `payment-identifier` |
+| 3 | the client sends a `payment-identifier` id when advertised |
+| 4 | retries are recognized before the checks of a new payment; `forFacilitator` keeps every extension and returns `x402Version: 2` |
+| 9 | `Access-Control-Allow-Origin` on every response, the preflight allows the method and is cached |
+| 10 | new: purchase identity, what the client records and when, when a purchase closes, retries, the id binding and its lifetime, purchase states and their answers, reconciliation by nonce, payment evidence, order of checks (purchase terms before seller settings) |
