@@ -157,6 +157,7 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
     usdc,
     price: file.price,
     payTo: file.payTo,
+    termsHash: file.termsHash,
   });
   const scope = o.scope ?? `${o.contractId}/${o.fileId}/${o.url}`;
   if (c.paymentId) await bind(o, `annon/seller/id/${scope}/${c.paymentId}`, header, c);

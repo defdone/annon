@@ -1,11 +1,12 @@
 // Real Base mainnet block headers: the RPC's JSON fields, their RLP encoding and the block hash.
 // The contract hashes the RLP and reads the timestamp; the SDK rebuilds the RLP from the JSON.
-// Fetches from a Base RPC, so it is not part of the CI drift check:
+// Re-encodes the recorded RPC responses offline by default; refresh explicitly with:
 //   BASE_RPC=https://base-rpc.publicnode.com node specs/vectors/base-headers.mjs
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 
-const RPC = process.env.BASE_RPC ?? 'https://mainnet.base.org';
+const RPC = process.env.BASE_RPC;
+const recorded = JSON.parse(readFileSync(new URL('./base-headers.json', import.meta.url))).cases;
 const BLOCKS = [
   [53466533, 'a 2 s block before Denim'],
   [53556127, 'the last 2 s block'],
@@ -74,7 +75,10 @@ const rpc = async (method, params) => {
 
 const cases = [];
 for (const [n, note] of BLOCKS) {
-  const b = await rpc('eth_getBlockByNumber', [`0x${n.toString(16)}`, false]);
+  const snapshot = recorded.find((c) => c.number === n);
+  const b = RPC
+    ? await rpc('eth_getBlockByNumber', [`0x${n.toString(16)}`, false])
+    : { ...snapshot.json, hash: snapshot.hash };
   const json = Object.fromEntries(FIELDS.map(([k]) => [k, b[k]]));
   const rlp = list(FIELDS.map(([k, t]) => (t === 'int' ? int(b[k]) : fromHex(b[k]))));
   const hash = toHex(keccak_256(rlp));

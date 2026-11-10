@@ -1,7 +1,10 @@
+import { type Identity, parseIdentity } from '../settle-near/identity.js';
+import { buyerKey } from '../settle-near/purchase.js';
+import { type Terms, termsHash } from '../settle-near/terms.js';
 /**
  * Reading the Annon contract over NEAR JSON-RPC: views, and the outcome of a transaction sent to
  * it. Two rules, from how NEAR executes a call:
- * - Whether a payment or a listing was recorded is read from contract state (`is_payment_used`,
+ * - Whether a payment or a listing was recorded is read from contract state (`get_purchase`,
  *   `get_file`), never from logs: a receipt that fails keeps its logs while its changes roll back,
  *   and a callback can fail after an earlier receipt committed.
  * - Events count only from successful receipts executed by the trusted contract: any contract can
@@ -119,56 +122,170 @@ const isHex = (v: unknown, bytes: number) =>
 const isAccount = (v: unknown) =>
   typeof v === 'string' &&
   /^(?=.{2,64}$)(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/.test(v);
-const U128_MAX = 2n ** 128n - 1n;
 const TAKEDOWN = ['illegal_content', 'court_order', 'rights_holder_notice'] as const;
 
-/** The contract's `get_file`, with the price as a bigint. `null` for an unknown file. */
+/** Validated final contract state; price/payTo describe the optional Base route. */
 export interface FileInfo {
-  seller: string;
+  terms: Terms;
+  termsHash: string;
+  seller: Identity;
   price: bigint;
-  /** Where buyers pay, `0x` and lowercase. */
   payTo: string;
   cipherHash: string;
   moderator: string | null;
+  headerHash: string | null;
   salesStoppedAt: number | null;
-  takenDown: (typeof TAKEDOWN)[number] | null;
+  takenDown: string | null;
 }
-
+export async function getTerms(
+  url: string,
+  contractId: string,
+  fileId: string,
+): Promise<Terms | null> {
+  return (await getFile(url, contractId, fileId))?.terms ?? null;
+}
 export async function getFile(
   url: string,
   contractId: string,
   fileId: string,
 ): Promise<FileInfo | null> {
-  const f = (await view(url, contractId, 'get_file', { file_id: fileId })) as Record<
-    string,
-    unknown
-  > | null;
+  const f = (await view(url, contractId, 'get_file', { file_id: fileId })) as {
+    terms: Terms;
+    terms_hash: string;
+    header_hash: string | null;
+    sales_stopped_at: number | null;
+    taken_down: string | null;
+  } | null;
   if (f === null) return null;
-  const price = typeof f?.price === 'string' && /^\d{1,39}$/.test(f.price) ? BigInt(f.price) : 0n;
-  if (
-    !isHex(f?.seller, 20) ||
-    price < 1n ||
-    price > U128_MAX ||
-    !isHex(f.pay_to, 20) ||
-    !isHex(f.cipher_hash, 32) ||
-    !(f.moderator === null || isAccount(f.moderator)) ||
-    !(
-      f.sales_stopped_at === null ||
-      (Number.isSafeInteger(f.sales_stopped_at) && (f.sales_stopped_at as number) > 0)
-    ) ||
-    !(f.taken_down === null || TAKEDOWN.includes(f.taken_down as (typeof TAKEDOWN)[number]))
-  ) {
+  try {
+    const commitment = termsHash(f.terms, {
+      nearUsdc: f.terms.near.token,
+      ...(f.terms.base ? { baseUsdc: f.terms.base.usdc } : {}),
+    });
+    if (f.terms_hash !== commitment) throw new Error();
+    if (
+      f.terms.contract !== contractId ||
+      f.terms.file_id !== fileId ||
+      !(f.header_hash === null || isHex(f.header_hash, 32)) ||
+      !(
+        f.sales_stopped_at === null ||
+        (Number.isSafeInteger(f.sales_stopped_at) && f.sales_stopped_at > 0)
+      ) ||
+      !(
+        f.taken_down === null ||
+        (typeof f.taken_down === 'string' &&
+          TAKEDOWN.includes(f.taken_down as (typeof TAKEDOWN)[number]))
+      )
+    )
+      throw new Error();
+  } catch {
     return malformed('get_file');
   }
+  const t = f.terms;
   return {
-    seller: f.seller as string,
-    price,
-    payTo: f.pay_to as string,
-    cipherHash: f.cipher_hash as string,
-    moderator: f.moderator as string | null,
-    salesStoppedAt: f.sales_stopped_at as number | null,
-    takenDown: f.taken_down as FileInfo['takenDown'],
+    terms: t,
+    termsHash: f.terms_hash,
+    seller: parseIdentity(t.seller),
+    price: BigInt(t.base?.price ?? t.near.price),
+    payTo: t.base?.pay_to ?? '',
+    cipherHash: t.cipher_hash,
+    moderator: t.moderator,
+    headerHash: f.header_hash,
+    salesStoppedAt: f.sales_stopped_at,
+    takenDown: f.taken_down,
   };
+}
+export interface PurchaseInfo {
+  purchase_id: string;
+  file_id: string;
+  terms_hash: string;
+  recovery: Identity;
+  buyer_key: string;
+  route: 'near-usdc' | 'base-usdc';
+  delivery: number | null;
+  accepted_at: number;
+  grants: number;
+}
+export interface GrantInfo {
+  purchase_id: string;
+  grant: number;
+  buyer_key: string;
+}
+export async function getPurchase(
+  url: string,
+  contract: string,
+  id: string,
+): Promise<PurchaseInfo | null> {
+  const p = (await view(url, contract, 'get_purchase', { purchase_id: id })) as PurchaseInfo | null;
+  if (p === null) return null;
+  try {
+    if (
+      p.purchase_id !== id ||
+      !isHex(p.file_id, 32) ||
+      !isHex(p.terms_hash, 32) ||
+      !Number.isSafeInteger(p.grants) ||
+      p.grants < 1 ||
+      p.grants > 0xffffffff ||
+      !Number.isSafeInteger(p.accepted_at) ||
+      p.accepted_at < 0 ||
+      !['near-usdc', 'base-usdc'].includes(p.route) ||
+      (p.route === 'base-usdc'
+        ? p.delivery !== null
+        : !Number.isSafeInteger(p.delivery) || (p.delivery as number) < 0)
+    )
+      throw new Error();
+    buyerKey(p.buyer_key);
+    parseIdentity(p.recovery);
+  } catch {
+    return malformed('get_purchase');
+  }
+  return p;
+}
+export async function getGrant(
+  url: string,
+  contract: string,
+  id: string,
+  grant = 0,
+): Promise<GrantInfo | null> {
+  if (!Number.isInteger(grant) || grant < 0 || grant > 0xffffffff)
+    throw new TypeError('invalid grant');
+  const g = (await view(url, contract, 'get_grant', {
+    purchase_id: id,
+    grant,
+  })) as GrantInfo | null;
+  if (g === null) return null;
+  try {
+    if (g.purchase_id !== id || g.grant !== grant) throw new Error();
+    buyerKey(g.buyer_key);
+  } catch {
+    return malformed('get_grant');
+  }
+  return g;
+}
+export async function purchasesOf(
+  url: string,
+  contract: string,
+  recovery: Identity,
+  from = 0,
+  limit = 50,
+): Promise<string[]> {
+  if (
+    !Number.isSafeInteger(from) ||
+    from < 0 ||
+    from > 0xffffffff ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > 100
+  )
+    throw new TypeError('invalid page');
+  const ids = await view(url, contract, 'purchases_of', {
+    recovery: parseIdentity(recovery),
+    from,
+    limit,
+  });
+  if (!Array.isArray(ids) || ids.length > limit || !ids.every((id) => isHex(id, 32)))
+    return malformed('purchases_of');
+  return ids;
 }
 
 /** The contract's `get_config`: the token it accepts on Base and the MPC it asks. */
@@ -177,6 +294,9 @@ export interface Config {
   ckdDomain: number;
   foreignTxDomain: number;
   usdc: string;
+  network: string;
+  nearUsdc: string;
+  intents: string;
 }
 
 export async function getConfig(url: string, contractId: string): Promise<Config> {
@@ -185,7 +305,12 @@ export async function getConfig(url: string, contractId: string): Promise<Config
     !isAccount(c?.mpc) ||
     !Number.isSafeInteger(c?.ckd_domain) ||
     !Number.isSafeInteger(c?.foreign_tx_domain) ||
-    !isHex(c?.usdc, 20)
+    !isHex(c?.usdc, 20) ||
+    !['near:mainnet', 'near:testnet', 'near:sandbox'].includes(c?.network as string) ||
+    !isAccount(c?.near_usdc) ||
+    !isAccount(c?.intents) ||
+    (c?.ckd_domain as number) < 0 ||
+    (c?.foreign_tx_domain as number) < 0
   ) {
     return malformed('get_config');
   }
@@ -194,20 +319,11 @@ export async function getConfig(url: string, contractId: string): Promise<Config
     ckdDomain: c?.ckd_domain as number,
     foreignTxDomain: c?.foreign_tx_domain as number,
     usdc: c?.usdc as string,
+    network: c?.network as string,
+    nearUsdc: c?.near_usdc as string,
+    intents: c?.intents as string,
   };
 }
-
-async function flag(url: string, contractId: string, method: string, args: object) {
-  const v = await view(url, contractId, method, args);
-  return typeof v === 'boolean' ? v : malformed(method);
-}
-
-export const isBuyer = (url: string, contractId: string, fileId: string, wallet: string) =>
-  flag(url, contractId, 'is_buyer', { file_id: fileId, wallet });
-
-/** Whether an `unlock` for this Base payment was recorded: the truth after any failed release. */
-export const isPaymentUsed = (url: string, contractId: string, baseTx: string, logIndex: number) =>
-  flag(url, contractId, 'is_payment_used', { base_tx: baseTx, log_index: logIndex });
 
 /** An NEP-297 event the trusted contract logged in a receipt that succeeded. */
 export interface AnnonEvent {
@@ -216,7 +332,7 @@ export interface AnnonEvent {
 }
 
 /** Calls whose result is the CKD answer. */
-const RELEASES = new Set(['register', 'unlock', 'reopen']);
+const RELEASES = new Set(['register', 'unlock', 'reopen', 'reopen_seller', 'claim_key']);
 
 export type Outcome =
   /** Not finished yet: ask again. */
@@ -225,7 +341,7 @@ export type Outcome =
   | { state: 'released'; method: string; answer: unknown; events: AnnonEvent[] }
   /**
    * `register`, `unlock` or `reopen` ended without a key. Whether the listing or the payment was
-   * recorded is a question for the contract (`get_file`, `is_payment_used`): if it was, `reopen`
+   * recorded is a question for the contract (`get_file`, `get_purchase`): if it was, `reopen`
    * gets the key; if not, the call can be sent again.
    */
   | { state: 'not_released'; method: string; reason: string; events: AnnonEvent[] }
@@ -307,7 +423,7 @@ export function readOutcome(result: unknown, contractId: string, expect?: Expect
       if (typeof log !== 'string' || !log.startsWith('EVENT_JSON:')) continue;
       try {
         const e = JSON.parse(log.slice('EVENT_JSON:'.length));
-        if (e.standard === 'annon' && e.version === '1.0.0' && typeof e.event === 'string') {
+        if (e.standard === 'annon' && e.version === '2.0.0' && typeof e.event === 'string') {
           events.push({ event: e.event, data: e.data?.[0] ?? {} });
         }
       } catch {}
@@ -365,4 +481,19 @@ export async function txOutcome(
     wait_until: wait,
   });
   return readOutcome(r, contractId, { txHash, signer, ...call });
+}
+
+/** The current access key at finality, never an optimistic or wallet-supplied permission. */
+export async function isFullAccessKey(
+  url: string,
+  accountId: string,
+  publicKey: string,
+): Promise<boolean> {
+  const key = await rpc(url, 'query', {
+    request_type: 'view_access_key',
+    finality: 'final',
+    account_id: accountId,
+    public_key: publicKey,
+  });
+  return key.permission === 'FullAccess';
 }

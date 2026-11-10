@@ -25,7 +25,12 @@ describe('relayer HTTP', () => {
     const cap = await handle(config(), 'GET', '/v1/capabilities', '1.1.1.1', '');
     expect(cap).toMatchObject({
       status: 200,
-      body: { contract: 'v1.annon.defdone.near', minPrice: '10000', disabled: false },
+      body: {
+        contract: 'v1.annon.defdone.near',
+        minPrice: '10000',
+        disabled: false,
+        methods: ['register', 'unlock', 'claim_key', 'reopen', 'reopen_seller', 'stop_sales'],
+      },
     });
     expect(await handle(config(), 'POST', '/v1/relay', '1.1.1.1', body, ok)).toEqual({
       status: 200,
@@ -170,9 +175,16 @@ describe('relayer limits memory', () => {
 });
 
 describe('relayer HTTP server', () => {
-  it('survives a null body, an oversized body and an aborted upload', async () => {
+  it('survives a null body, an oversized body and an aborted upload', async (context) => {
     const server = serve(config(), 0);
-    await new Promise((r) => server.once('listening', r));
+    const listenError = await new Promise<Error | undefined>((resolve) => {
+      server.once('listening', () => resolve(undefined));
+      server.once('error', resolve);
+    });
+    // Managed workspaces may prohibit socket binding. Exercise handle() above in every environment.
+    if (listenError && 'code' in listenError && listenError.code === 'EPERM')
+      return context.skip('sandbox prohibits binding a local HTTP socket');
+    if (listenError) throw listenError;
     const port = (server.address() as AddressInfo).port;
     const post = (b: string) =>
       fetch(`http://127.0.0.1:${port}/v1/relay`, { method: 'POST', body: b }).then((r) => r.status);

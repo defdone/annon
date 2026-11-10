@@ -1,7 +1,8 @@
+import type { Identity } from '../settle-near/identity.js';
+import type { Purchase } from '../settle-near/purchase.js';
 /**
  * A purchase on the buyer's side (profile section 10): what is recorded before the wallet signs,
- * and the signed payload recorded before anything else sees it. One open purchase per wallet and
- * file; it closes when NEAR records the buyer, or when it can never be paid.
+ * and the signed payload recorded before anything else sees it. Records are addressed by purchase commitment; the original grant secret remains available after acceptance.
  */
 
 import type { Versioned } from './store.js';
@@ -9,18 +10,18 @@ import type { PaymentRequired } from './x402.js';
 
 /** What the purchase pays for; fixed when it is created. */
 export interface PurchaseTerms {
-  network: 'eip155:8453';
+  network: string;
   contractId: string;
   fileId: string;
   buyer: string;
-  seller: string;
+  seller: Identity;
   /** The registered `pay_to`. */
   to: string;
   usdc: string;
   price: string;
   /** The one-time key the nonce commits to, 0x and 48 bytes. */
   buyerKey: string;
-  /** `annonNonce(contractId, fileId, buyerKey)`: the same for every attempt. */
+  /** base_nonce for the purchase commitment. */
   nonce: string;
   /** `SHA256` of the PAY2 header checked before signing (profile section 7), 0x and lowercase. */
   headerHash: string;
@@ -28,7 +29,7 @@ export interface PurchaseTerms {
   moderator: string | null;
 }
 
-/** One authorization of the purchase. v1.1 makes exactly one; a later version may add more. */
+/** A saved Base payment authorization attempt. */
 export interface PaymentAttempt {
   attemptId: string;
   /** The `payment-identifier` id of its payload, when the server advertised the extension. */
@@ -48,14 +49,19 @@ export interface PaymentAttempt {
 }
 
 export interface PurchaseRecord extends Versioned {
-  schemaVersion: 1;
+  schemaVersion: 2;
+  purchase: Purchase;
+  message: string;
+  buyerSecret: string;
+  quote: unknown;
+  recovery: Identity;
+  checkedHeaderHash: string;
   terms: PurchaseTerms;
   attempts: PaymentAttempt[];
 }
 
-/** Where a store keeps the purchase of a file by a wallet: one at a time. */
-export const purchaseKey = (contractId: string, fileId: string, buyer: string) =>
-  `annon/purchase/${contractId}/${fileId}/${buyer.toLowerCase()}`;
+/** Records are addressed by the commitment, independent of the paying wallet. */
+export const purchaseKey = (purchaseId: string) => `annon/purchase/${purchaseId}`;
 
 /** What a search over every attempt covers: the earliest start, the latest deadline. */
 export function bounds(r: PurchaseRecord): { block: number; validBefore: bigint } {

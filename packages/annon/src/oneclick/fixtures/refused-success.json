@@ -1,0 +1,44 @@
+{
+  "status": "SUCCESS",
+  "updatedAt": "2026-11-10T20:05:40.000Z",
+  "swapDetails": {
+    "depositedAmount": "202064",
+    "depositedAmountUsd": "0.201980749632",
+    "depositedAmountFormatted": "0.202064",
+    "intentHashes": [
+      "2MNus2KCpxwXnp19iyXNpWSFtBD2UGjQBAL8AbtywfT9",
+      "2RJD1KnDRGEkvuFfAGrJ7PD28LRE9LRDjZznDywagzmr"
+    ],
+    "nearTxHashes": [
+      "2VDW9dFE1ZXz4zWAbaBDQFynNVdRpQ73HyfSHMzBSL6Z",
+      "2Z8oHviEbrqDD5kg2sW8h8kYceqdVTnrrPL6Lk2nBfRG",
+      "2d46SEBFCA8SMB1BUAq3z1XJrp3qAXUgQnzkQ85Nvzjy",
+      "2gyPaXeFnTRfVGFguU9yGtJ56yG2qbAVyCfQTW7ygL4g"
+    ],
+    "amountIn": "200043",
+    "amountInFormatted": "0.200043",
+    "amountInUsd": "0.199958781897",
+    "amountOut": "200000",
+    "amountOutFormatted": "0.2",
+    "amountOutUsd": "0.199915800000",
+    "slippage": 0,
+    "refundedAmount": "0",
+    "refundedAmountFormatted": "0",
+    "refundedAmountUsd": "0",
+    "refundReason": null,
+    "refundFee": "2400",
+    "withdrawFee": "0",
+    "originChainTxHashes": [
+      {
+        "hash": "0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+        "explorerUrl": ""
+      }
+    ],
+    "destinationChainTxHashes": [
+      {
+        "hash": "2gyPaXeFnTRfVGFguU9yGtJ56yG2qbAVyCfQTW7ygL4g",
+        "explorerUrl": ""
+      }
+    ]
+  }
+}

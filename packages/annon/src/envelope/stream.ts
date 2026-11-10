@@ -1,5 +1,6 @@
+import { account } from '../settle-near/codec.js';
 /**
- * Bounded-memory PAY2 v1 using Web Streams and the one-shot encoder's WebCrypto primitives.
+ * Bounded-memory PAY2 version 2 using Web Streams and the one-shot encoder's WebCrypto primitives.
  *
  * The format puts all hashes before the body, and registration precedes the final stanza/MAC/
  * signature. Sealing therefore consumes TWO streams: sealStream's first pass computes the
@@ -14,7 +15,7 @@
 import {
   type Bytes,
   bodyHash,
-  checkRegistration,
+  checkSigned,
   chunkCount,
   chunkKey,
   commitment,
@@ -24,8 +25,8 @@ import {
   FIXED,
   type FileMeta,
   type FinishOptions,
+  finishTrailer,
   gcm,
-  hexBytes,
   hkdf,
   int,
   MAC,
@@ -37,15 +38,12 @@ import {
   nearCkd,
   type OpenOptions,
   Pay2Error,
-  parseHeader,
   parseMeta,
   previewLimit,
-  publishText,
   type SealOptions,
   SIG,
-  sellerAddress,
+  sealAuth,
   sha256,
-  signedBy,
   TAG,
   wrapKeyFor,
 } from './pay2.js';
@@ -181,6 +179,7 @@ export async function sealStreamWithKey(
     throw new TypeError('fileId and K are 32 bytes');
   if (!Number.isSafeInteger(size) || size < 0)
     throw new RangeError('size must be a safe unsigned integer');
+  const { version, authKind } = sealAuth(opts);
   const fileId = copy(opts.fileId);
   const key = copy(K);
   const previewLen = opts.previewLen ?? 0;
@@ -219,7 +218,7 @@ export async function sealStreamWithKey(
   // This is at most 32,886 bytes, even for the largest allowed file. Hashes live directly in it.
   const prefix = concat(
     new Uint8Array(MAGIC),
-    new Uint8Array([1, chunkLog2, 1, 0]),
+    new Uint8Array([version, chunkLog2, 1, authKind]),
     new Uint8Array(4),
     fileId,
     int(metaLen, 2),
@@ -256,13 +255,22 @@ export async function sealStreamWithKey(
     await input.cancel();
     input.release();
   }
-  const cipherHash = await bodyHash({ chunkLog2, fileId, metaLen, previewLen, n, commits, hashes });
+  const cipherHash = await bodyHash({
+    version,
+    chunkLog2,
+    fileId,
+    metaLen,
+    previewLen,
+    n,
+    commits,
+    hashes,
+  });
   return {
     fileId: copy(fileId),
     cipherHash,
-    async finish(replay, { contractId, ckdSecret, seller, sign }) {
-      const address = sellerAddress(seller);
-      if (!/^[a-z0-9._-]{2,64}$/.test(contractId)) throw new TypeError('bad NEAR account id');
+    async finish(replay, finishOpts) {
+      const { contractId, ckdSecret } = finishOpts;
+      account(contractId);
       const kw = await wrapKeyFor(ckdSecret, fileId, 'wrapKey');
       const fileKey = await subtle.importKey('raw', key, 'AES-GCM', true, ['encrypt']);
       const wrapped = new Uint8Array(await subtle.wrapKey('raw', fileKey, kw, 'AES-KW'));
@@ -279,9 +287,13 @@ export async function sealStreamWithKey(
         ['sign'],
       );
       const mac = new Uint8Array(await subtle.sign('HMAC', macKey, header));
-      const text = publishText(contractId, fileId, await sha256(header, mac));
-      const sig = hexBytes(await sign(text), SIG);
-      if (!signedBy(text, sig, address)) throw new Error('the signature is not from the seller');
+      const sig = await finishTrailer(
+        version,
+        authKind,
+        finishOpts,
+        fileId,
+        await sha256(header, mac),
+      );
       const finalHeader = concat(header, mac, sig);
       return output(replay, async function* (reader) {
         yield finalHeader;
@@ -313,7 +325,7 @@ async function readHeader(input: ByteReader): Promise<Bytes> {
   if (fixed.length < 4 || !MAGIC.every((byte, i) => fixed[i] === byte))
     throw new Pay2Error('bad_magic');
   if (fixed.length < FIXED) throw new Pay2Error('bad_header');
-  if (fixed[4] !== 1) throw new Pay2Error('unsupported_version');
+  if (fixed[4] !== 2) throw new Pay2Error('unsupported_version');
   const chunkLog2 = fixed[5] ?? 0;
   if (chunkLog2 < 16 || chunkLog2 > 24) throw new Pay2Error('bad_chunk_size');
   const dv = new DataView(fixed.buffer);
@@ -335,16 +347,8 @@ export function openStream(
   opts: OpenStreamOptions,
 ): ReadableStream<Uint8Array> {
   return output(file, async function* (input) {
-    const seller = sellerAddress(opts.listing.seller);
     const header = await readHeader(input);
-    const h = await checkRegistration(parseHeader(header), opts.listing);
-    const text = publishText(
-      opts.contractId,
-      h.fileId,
-      await sha256(header.subarray(0, h.headerLen - SIG)),
-    );
-    if (!signedBy(text, header.subarray(h.headerLen - SIG), seller))
-      throw new Pay2Error('seller_signature_invalid');
+    const h = await checkSigned(header, opts.listing, opts.contractId);
     const stanza = h.stanzas
       .map((s) => (s.type === NEAR_CKD ? nearCkd(s.body) : undefined))
       .find((s) => s?.contractId === opts.contractId);

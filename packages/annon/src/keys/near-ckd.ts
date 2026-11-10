@@ -37,7 +37,7 @@ const fail = (code: CkdErrorCode, message?: string): never => {
 };
 
 export interface OneTimeKey {
-  /** The scalar `a`, 32 bytes big-endian. Keep it in memory only, drop it after `openAnswer`. */
+  /** The scalar `a`, 32 bytes big-endian. Persist only in an encrypted purchase or recovery record. */
   secret: Uint8Array;
   /** `A = a·G1` as the contract takes it: `bls12381g1:<base58 of 48 bytes>`. */
   publicKey: string;

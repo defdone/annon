@@ -1,6 +1,7 @@
 // Writes buyer-proof.json: the Annon-Buyer-Proof of specs/download.md section 3, a BLS signature
 // (public key in G1, signature in G2) by a purchase's one-time key over the file URL.
 //   node specs/vectors/buyer-proof.mjs
+import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 
@@ -30,7 +31,12 @@ const valid = cases.map((c) => {
   const sk = Buffer.from(c.secret.toString(16).padStart(64, '0'), 'hex');
   const pk = sigs.getPublicKey(sk).toBytes(true);
   const sig = sigs.sign(sigs.hash(message(c.url), DST), sk).toBytes(true);
+  const purchase_id = `0x${createHash('sha256').update(c.id).digest('hex')}`;
+  const grant = c.id === 'small-scalar' ? 0 : 7;
   return {
+    purchase_id,
+    grant,
+    header: b64url(Buffer.from(JSON.stringify({ purchase_id, grant, signature: b64url(sig) }))),
     id: c.id,
     secret: `0x${hex(sk)}`,
     buyerKey: `0x${hex(pk)}`,

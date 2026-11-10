@@ -122,16 +122,3 @@ export function signer(digestBytes: Uint8Array, signature: string): string | nul
     return null;
   }
 }
-
-/** `keccak256("annon/v1" ‖ contractId ‖ fileId ‖ buyerKey)`. */
-export const annonNonce = (contractId: string, fileId: string, buyerKey: Uint8Array) =>
-  toHex(
-    keccak_256(
-      concat(
-        utf8.encode('annon/v1'),
-        utf8.encode(contractId),
-        fromHex(fileId, 32, 'fileId'),
-        buyerKey,
-      ),
-    ),
-  );

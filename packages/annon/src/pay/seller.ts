@@ -3,14 +3,21 @@
  * registration, and the check a server runs on `PAYMENT-SIGNATURE` before it settles. Settlement
  * itself stays with the server's facilitator: any standard x402 one, through `forFacilitator`.
  */
-import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
+
 import { secureUrl } from '../download/download.js';
 import { type FileInfo, getConfig, getFile } from '../near/rpc.js';
+import {
+  baseNonceV2,
+  type Purchase,
+  parsePurchaseMessage,
+  purchaseId,
+} from '../settle-near/purchase.js';
 import { fail, head } from './base.js';
-import { annonNonce, digest, fromHex, signer } from './eip3009.js';
+import { digest, signer } from './eip3009.js';
 import { MAX_CLOCK_SKEW_SECONDS, MAX_VALIDITY_SECONDS } from './pay.js';
 import {
   ANNON_EXACT,
+  ANNON_NEAR_USDC,
   BASE_NETWORK,
   BAZAAR,
   BUILDER_CODE,
@@ -128,7 +135,14 @@ export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
   if (!file) return fail('unknown_file', 'the file is not registered on the Annon contract');
   if (file.takenDown) fail('taken_down', `the file was taken down (${file.takenDown})`);
   if (file.salesStoppedAt !== null) fail('sales_stopped', 'the seller stopped selling this file');
-  return paymentRequired(o, file, (await getConfig(o.nearRpc, o.contractId)).usdc);
+  const config = await getConfig(o.nearRpc, o.contractId);
+  if (
+    file.terms.network !== config.network ||
+    file.terms.near.token !== config.nearUsdc ||
+    (file.terms.base && file.terms.base.usdc !== config.usdc)
+  )
+    fail('network_mismatch');
+  return paymentRequired(o, file, config.usdc);
 }
 
 /**
@@ -150,11 +164,11 @@ export function paymentRequired(o: OfferOptions, file: FileInfo, usdc: string): 
     asset: usdc,
     payTo: file.payTo,
     maxTimeoutSeconds: o.maxTimeoutSeconds ?? 300,
-    // Profile v1.1: settled before the file is served (x402 v2 section 6.1).
-    extra: { name: 'USD Coin', version: '2', paymentFlow: 'upfront' },
+    // Extension v3: settled before the file is served (x402 v2 section 6.1).
+    extra: { name: 'USD Coin', version: '2', paymentFlow: 'upfront', nonceVersion: 2 },
   };
   const info = {
-    version: 2,
+    version: 3,
     network: 'near:mainnet',
     contract: o.contractId,
     fileId: o.fileId,
@@ -190,7 +204,25 @@ export function paymentRequired(o: OfferOptions, file: FileInfo, usdc: string): 
       ...(d?.tags ? { tags: d.tags } : {}),
       ...(d?.iconUrl ? { iconUrl: d.iconUrl } : {}),
     },
-    accepts: file.salesStoppedAt === null ? [offer] : [],
+    accepts:
+      file.salesStoppedAt === null
+        ? [
+            {
+              scheme: ANNON_NEAR_USDC,
+              network: file.terms.network,
+              amount: file.terms.near.price,
+              asset: file.terms.near.token,
+              payTo: o.contractId,
+              maxTimeoutSeconds: 3600,
+              extra: {
+                contract: o.contractId,
+                file_id: o.fileId,
+                terms_hash: file.termsHash,
+              },
+            },
+            ...(file.terms.base ? [offer] : []),
+          ]
+        : [],
     extensions: {
       annon: { info, schema: ANNON_SCHEMA },
       [PAYMENT_IDENTIFIER]: paymentIdentifierDeclaration(),
@@ -206,7 +238,7 @@ export const ANNON_SCHEMA = {
   type: 'object',
   required: ['version', 'network', 'contract', 'fileId'],
   properties: {
-    version: { const: 2 },
+    version: { const: 3 },
     network: { const: 'near:mainnet' },
     contract: { type: 'string' },
     fileId: { type: 'string', pattern: '^0x[0-9a-f]{64}$' },
@@ -218,10 +250,12 @@ export const ANNON_SCHEMA = {
 
 /** A payment that may be settled, and what settlement needs. */
 export interface CheckedPayment {
+  purchase: Purchase;
+  purchaseId: string;
   payer: string;
   /** The buyer's one-time key: `unlock` needs it. */
   buyerKey: string;
-  /** The nonce the buyer signed: `annonNonce(contract, fileId, buyerKey)`. */
+  /** The nonce the buyer signed: `base_nonce(purchase_id)`. */
   nonce: string;
   validBefore: bigint;
   /** The payload's `payment-identifier` id, if it has one. */
@@ -264,8 +298,7 @@ function same(a: unknown, b: unknown): boolean {
  * What a server runs before it settles: the registration read again now (a file stopped or taken
  * down since the 402 is refused), then `checkPayment` against the offer it gives, with "now" taken
  * from the earlier of this server's clock and Base's (USDC compares `validBefore` with Base time).
- * Only with both does the validity bound keep the payment inside the contract's 300 s after a
- * stop: the file was on sale at this moment, and the authorization expires within 240 s of it.
+ * New settlements require sales to be open and a short outstanding authorization window.
  */
 export async function verifyPayment(
   header: string,
@@ -307,15 +340,27 @@ function paymentIdOf(p: Payload): string | undefined {
  * (`checkPayment`) and by a retry of one already settling (`settle`).
  */
 function checkSigned(p: Payload, contract: string, fileId: string, offer: Offer) {
-  const buyerKey = p.extensions?.annon?.info?.buyerKey;
-  if (typeof buyerKey !== 'string')
-    return fail('bad_requirements', 'the payment carries no buyer key');
+  const info = p.extensions?.annon?.info;
+  let purchase: Purchase;
+  let id: string;
   try {
-    if (bls.G1.Point.fromBytes(fromHex(buyerKey, 48, 'buyerKey')).is0()) throw new Error('zero');
+    purchase = parsePurchaseMessage(info?.purchase as string, { baseUsdc: offer.asset });
+    id = purchaseId(purchase, { baseUsdc: offer.asset });
   } catch {
-    fail('bad_requirements', 'the buyer key is not a one-time G1 key');
+    return fail('bad_requirements', 'invalid purchase commitment');
   }
-  const nonce = annonNonce(contract, fileId, fromHex(buyerKey, 48, 'buyerKey'));
+  if (
+    info?.version !== 3 ||
+    info.purchase_id !== id ||
+    purchase.route !== 'base-usdc' ||
+    purchase.contract !== contract ||
+    purchase.file_id !== fileId ||
+    purchase.asset !== offer.asset ||
+    purchase.price !== offer.amount
+  )
+    return fail('bad_requirements', 'purchase does not match offer');
+  const buyerKey = purchase.buyer_key;
+  const nonce = baseNonceV2(id);
 
   const a = p.payload?.authorization ?? {};
   const str = (k: string) => (typeof a[k] === 'string' ? (a[k] as string) : '');
@@ -331,6 +376,8 @@ function checkSigned(p: Payload, contract: string, fileId: string, offer: Offer)
   if (str('validAfter') !== '0') fail('bad_requirements', 'validAfter must be 0');
   const from = str('from').toLowerCase();
   const validBefore = BigInt(str('validBefore'));
+  if (validBefore > BigInt(purchase.expires_at))
+    fail('bad_requirements', 'authorization exceeds purchase expiry');
   const auth = {
     from,
     to: offer.payTo.toLowerCase(),
@@ -343,7 +390,7 @@ function checkSigned(p: Payload, contract: string, fileId: string, offer: Offer)
   if (typeof sig !== 'string' || signer(digest(offer.asset.toLowerCase(), auth), sig) !== from) {
     fail('bad_signature', "the signature is not the payer's, or not in the form USDC takes");
   }
-  return { payer: from, buyerKey, nonce, validBefore, offer };
+  return { payer: from, buyerKey, nonce, validBefore, offer, purchase, purchaseId: id };
 }
 
 /**
@@ -353,7 +400,14 @@ function checkSigned(p: Payload, contract: string, fileId: string, offer: Offer)
  */
 export function checkTerms(
   header: string,
-  t: { contractId: string; fileId: string; usdc: string; price: bigint; payTo: string },
+  t: {
+    contractId: string;
+    fileId: string;
+    usdc: string;
+    price: bigint;
+    payTo: string;
+    termsHash: string;
+  },
 ): CheckedPayment {
   const p = readPayload(header);
   const o = p.accepted;
@@ -367,7 +421,8 @@ export function checkTerms(
     typeof o.payTo !== 'string' ||
     o.payTo.toLowerCase() !== t.payTo ||
     extra.name !== 'USD Coin' ||
-    extra.version !== '2'
+    extra.version !== '2' ||
+    extra.nonceVersion !== 2
   ) {
     fail('bad_requirements', 'the payment is not for this file on its registered terms');
   }
@@ -375,9 +430,11 @@ export function checkTerms(
   if (info.contract !== t.contractId || info.fileId !== t.fileId) {
     fail('bad_requirements', 'the payment is for another Annon contract or file');
   }
+  const checked = checkSigned(p, t.contractId, t.fileId, o as Offer);
+  if (checked.purchase.terms_hash !== t.termsHash) fail('bad_requirements', 'wrong terms hash');
   const paymentId = paymentIdOf(p);
   return {
-    ...checkSigned(p, t.contractId, t.fileId, o as Offer),
+    ...checked,
     ...(paymentId ? { paymentId } : {}),
   };
 }
@@ -420,9 +477,16 @@ export function checkPayment(
     fail('bad_requirements', 'this server requires a payment id');
   }
   checkBuilderCode(pr, p);
+  if (offer.scheme !== ANNON_EXACT || offer.extra?.nonceVersion !== 2) fail('bad_requirements');
   const c = checkSigned(p, String(advertised.contract), String(advertised.fileId), offer);
-  // The contract counts a payment up to 300 s after a stop. A buyer's client could sign for longer;
-  // this server settles only authorizations short enough to stay inside that, whoever made them.
+  const near = pr.accepts.find((o) => o.scheme === ANNON_NEAR_USDC);
+  if (
+    c.purchase.terms_hash !== near?.extra?.terms_hash ||
+    BigInt(c.purchase.expires_at) < c.validBefore ||
+    BigInt(c.purchase.expires_at) <= BigInt(now)
+  )
+    fail('bad_requirements', 'wrong or expired purchase terms');
+  // Bound outstanding payment authorizations, regardless of which client signed them.
   if (c.validBefore > BigInt(now + MAX_VALIDITY_SECONDS + MAX_CLOCK_SKEW_SECONDS)) {
     fail('bad_requirements', 'the authorization is valid for too long');
   }

@@ -1,6 +1,6 @@
 # PAY2: the Annon file format
 
-Version 1, frozen on 5 November 2026. Any change is a new version number.
+Version 2, one model (10 November 2026). Version 1 is neither produced nor accepted; byte 4 = 1 fails with `unsupported_version`.
 
 PAY2 is the encrypted file a seller uploads and a buyer downloads. Hosting sees only these bytes.
 The file key `K` is released by the Annon contract on NEAR (`near-ckd/v1` stanza). The body hash is
@@ -80,10 +80,10 @@ Binary on purpose: every file has exactly one valid metadata encoding.
 | Offset | Size | Field | Rule |
 |---|---|---|---|
 | 0 | 4 | magic | `"PAY2"` |
-| 4 | 1 | version | `1` |
+| 4 | 1 | version | `2` |
 | 5 | 1 | `chunkLog2` | 16 to 24 |
 | 6 | 1 | stanza count | 1 to 8 |
-| 7 | 1 | reserved | `0` |
+| 7 | 1 | auth kind | 0 EVM, 1 Solana, 2 NEAR; must match registered seller |
 | 8 | 4 | `headerLen` | whole header, MAC and signature included; at most 65536 |
 | 12 | 32 | `fileId` | |
 | 44 | 2 | `metaLen` | 256 to 4096, multiple of 256 |
@@ -106,18 +106,22 @@ The stanzas and the MAC need the CKD answer, which exists only after `register`,
 
 ```
 Annon: publish a file
-Signing this lets buyers check the file before they pay.
 contract: <contractId>
 file: 0x<fileId, 64 lowercase hex>
 header: 0x<SHA256(header[0 .. headerLen - 65]), 64 lowercase hex>
 ```
 
-Lines end with `\n`, with none after the last. It is signed with EIP-191 (`personal_sign`):
-`keccak256("\x19Ethereum Signed Message:\n" ‖ decimal byte length ‖ text)`. The field is
-`r ‖ s ‖ v`: `s` at most half the secp256k1 order, `v` 27 or 28. It must recover to the seller
-address the contract registered for this file: the last 20 bytes of `keccak256` of the recovered
-uncompressed public key without its `04` prefix, compared as bytes. `contractId` is the contract the client trusts, so
-a signature for another contract doesn't verify.
+Lines end with `\n`, no trailing newline. The registered seller is an Identity from
+[near-settlement.md §2](near-settlement.md). The fixed 65-byte trailer is:
+
+- kind 0: EIP-191 `personal_sign` of this text, `r ‖ s ‖ v`, low s, v 27/28;
+- kind 1: Ed25519 over exactly UTF-8(text), 64 bytes followed by one zero byte;
+- kind 2: 65 zero bytes; the seller calls `publish_header(file_id, header_hash)` and the client
+  compares that final registered hash with SHA256(header without trailer).
+
+Unknown kinds, mismatched seller kinds and nonzero padding fail. The contract and file ID in the
+text are the values the client independently trusts. A NEAR seller's header must be published
+before sales. The body hash includes version 2.
 
 ## 5. Stanzas
 
@@ -152,7 +156,7 @@ everything it received. Every vector has one fault; when a file has several, a d
 any of their codes, and the outcome (refused) is what matters.
 
 1. **Header.** Read the fixed 54 bytes, then the rest of `headerLen`. Checks, in order:
-   magic, or fewer than 4 bytes, `bad_magic`; fewer than 54 bytes `bad_header`; version
+   magic, or fewer than 4 bytes, `bad_magic`; fewer than 54 bytes `bad_header`; version other than 2
    `unsupported_version`; `chunkLog2` `bad_chunk_size`;
    `headerLen > 65536` `header_too_large`; every other rule on the fixed 54 bytes, `headerLen` below
    `prefixLen + 97`, and a file shorter than `headerLen`, `bad_header`. Then parse `stanza count` stanzas from `prefixLen`:
@@ -196,7 +200,7 @@ isn't canonical base64. Any of these is `preview_invalid`. Then:
    except that stanza count and `headerLen` must be 0 (`bad_header`): a package has no stanzas, and
    fields nothing binds must not vary. The prefix must be exactly `prefixLen` bytes
    (`preview_invalid`). It runs step 2 (`file_id_mismatch`,
-   `cipher_hash_mismatch`). The prefix has no stanzas, so there is no seller signature to check:
+   `cipher_hash_mismatch`). The preview package remains `v: 1`, but its PAY2 prefix has version 2 and a kind matching the registered seller (required to verify a preview). The prefix has no stanzas, so there is no seller signature to check:
    the registration alone binds the preview.
 2. For every chunk, before reading any metadata: `index` is 0, or 1 when `previewLen > 0`, and
    appears once; the key is 32 bytes and its commitment equals `c_index`; the data has the length

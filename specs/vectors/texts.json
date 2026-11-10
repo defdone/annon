@@ -1,145 +1,331 @@
 {
-  "source": "written by contracts/annon/src/register.rs texts_match_the_shared_vectors",
+  "source": "Independent draft-3 commitments and register.rs seller text shapes (10 Nov)",
   "cases": [
     {
-      "id": "register-moderated",
-      "contractId": "v1.annon.defdone.near",
+      "id": "one-evm-base",
+      "contractId": "v2.annon.defdone.near",
       "kind": "register",
       "args": {
-        "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
-        "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
-        "price": "10000",
-        "pay_to": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
-        "cipher_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
-        "moderator": "moderator.sputnik-dao.near",
-        "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
-        "deadline": 1793000600
+        "terms": {
+          "network": "near:mainnet",
+          "contract": "v2.annon.defdone.near",
+          "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+          "seller": {
+            "kind": "evm",
+            "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+          },
+          "pay2_version": 2,
+          "cipher_hash": "0x0404040404040404040404040404040404040404040404040404040404040404",
+          "moderator": null,
+          "near": {
+            "token": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+            "price": "200000",
+            "recipients": [
+              {
+                "identity": {
+                  "kind": "evm",
+                  "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+                },
+                "bps": 10000
+              }
+            ],
+            "remainder": 0
+          },
+          "base": {
+            "usdc": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "price": "200000",
+            "pay_to": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+          }
+        },
+        "seller_key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "deadline": 1794350000
       },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 0.01 USDC\npay to: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: moderator.sputnik-dao.near\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2026-10-26 07:43:20 UTC"
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 0.2 USDC on NEAR\nsplit: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1 100.00%\nremainder: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nbase: 0.2 USDC on Base to 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\ncipher: 0x0404040404040404040404040404040404040404040404040404040404040404\nmoderator: (none)\nterms: 0x9c4d57934ff87628335004fe97d03ecb6e23d06162c5a4da26c85505456cc818\nseller key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC"
     },
     {
-      "id": "register-mixed-case-hex",
-      "contractId": "v1.annon.defdone.near",
+      "id": "eight-mixed-solana",
+      "contractId": "v2.annon.defdone.near",
       "kind": "register",
       "args": {
-        "file_id": "AbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEfAbCdEf0123",
-        "seller": "0x1A642F0E3C3AF545E7ACBD38B07251B3990914F1",
-        "price": "1",
-        "pay_to": "58DA990A8F4A3A6CA7CB6315D68A140105917352",
-        "cipher_hash": "0xEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEeEe",
-        "moderator": null,
-        "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
-        "deadline": 951782400
+        "terms": {
+          "network": "near:mainnet",
+          "contract": "v2.annon.defdone.near",
+          "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+          "seller": {
+            "kind": "solana",
+            "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+          },
+          "pay2_version": 2,
+          "cipher_hash": "0x0404040404040404040404040404040404040404040404040404040404040404",
+          "moderator": "moderator.near",
+          "near": {
+            "token": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+            "price": "200000",
+            "recipients": [
+              {
+                "identity": {
+                  "kind": "evm",
+                  "id": "0x0000000000000000000000000000000000000000"
+                },
+                "bps": 1250
+              },
+              {
+                "identity": {
+                  "kind": "evm",
+                  "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+                },
+                "bps": 1250
+              },
+              {
+                "identity": {
+                  "kind": "solana",
+                  "id": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "bps": 1250
+              },
+              {
+                "identity": {
+                  "kind": "solana",
+                  "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+                },
+                "bps": 1250
+              },
+              {
+                "identity": {
+                  "kind": "near",
+                  "id": "ab"
+                },
+                "bps": 1250
+              },
+              {
+                "identity": {
+                  "kind": "near",
+                  "id": "seller.near"
+                },
+                "bps": 1250
+              },
+              {
+                "identity": {
+                  "kind": "near",
+                  "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "bps": 1250
+              },
+              {
+                "identity": {
+                  "kind": "near",
+                  "id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                },
+                "bps": 1250
+              }
+            ],
+            "remainder": 7
+          },
+          "base": null
+        },
+        "seller_key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "deadline": 1794350000
       },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef0123\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 0.000001 USDC\npay to: 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2000-02-29 00:00:00 UTC"
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB\nprice: 0.2 USDC on NEAR\nsplit: EVM 0x0000000000000000000000000000000000000000 12.50%\nsplit: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1 12.50%\nsplit: Solana 11111111111111111111111111111111 12.50%\nsplit: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB 12.50%\nsplit: NEAR ab 12.50%\nsplit: NEAR seller.near 12.50%\nsplit: NEAR aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 12.50%\nsplit: NEAR ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff 12.50%\nremainder: NEAR ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\nbase: none\ncipher: 0x0404040404040404040404040404040404040404040404040404040404040404\nmoderator: moderator.near\nterms: 0x291e0e4288ea97141e03dcf590c805256c6c629c5814099662b4db8310d02d98\nseller key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC"
     },
     {
-      "id": "register-whole-usdc-epoch",
-      "contractId": "annon-dev.synthetic.near",
+      "id": "one-max-near",
+      "contractId": "v2.annon.defdone.near",
       "kind": "register",
       "args": {
-        "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
-        "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
-        "price": "1000000",
-        "pay_to": "0x58da990a8f4a3a6ca7cb6315d68a140105917352",
-        "cipher_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
-        "moderator": null,
-        "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
-        "deadline": 0
+        "terms": {
+          "network": "near:mainnet",
+          "contract": "v2.annon.defdone.near",
+          "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+          "seller": {
+            "kind": "near",
+            "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "pay2_version": 2,
+          "cipher_hash": "0x0404040404040404040404040404040404040404040404040404040404040404",
+          "moderator": null,
+          "near": {
+            "token": "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+            "price": "340282366920938463463374607431768211455",
+            "recipients": [
+              {
+                "identity": {
+                  "kind": "near",
+                  "id": "seller.near"
+                },
+                "bps": 10000
+              }
+            ],
+            "remainder": 0
+          },
+          "base": null
+        },
+        "seller_key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "deadline": 1794350000
       },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: annon-dev.synthetic.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 1 USDC\npay to: 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 1970-01-01 00:00:00 UTC"
+      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: NEAR aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nprice: 340282366920938463463374607431768.211455 USDC on NEAR\nsplit: NEAR seller.near 100.00%\nremainder: NEAR seller.near\nbase: none\ncipher: 0x0404040404040404040404040404040404040404040404040404040404040404\nmoderator: (none)\nterms: 0x8d8308ab811eaff10b927eacb61f50bc1763062e1bfc88fdbfe3eb3c363ecc68\nseller key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC"
     },
     {
-      "id": "register-fraction-2100",
-      "contractId": "v1.annon.defdone.near",
-      "kind": "register",
-      "args": {
-        "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
-        "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
-        "price": "123456789",
-        "pay_to": "0x58da990a8f4a3a6ca7cb6315d68a140105917352",
-        "cipher_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
-        "moderator": null,
-        "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
-        "deadline": 4107542400
-      },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 123.456789 USDC\npay to: 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2100-03-01 00:00:00 UTC"
-    },
-    {
-      "id": "register-1.5-end-of-2099",
-      "contractId": "v1.annon.defdone.near",
-      "kind": "register",
-      "args": {
-        "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
-        "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
-        "price": "1500000",
-        "pay_to": "0x58da990a8f4a3a6ca7cb6315d68a140105917352",
-        "cipher_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
-        "moderator": null,
-        "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
-        "deadline": 4102444799
-      },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 1.5 USDC\npay to: 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2099-12-31 23:59:59 UTC"
-    },
-    {
-      "id": "register-max-price",
-      "contractId": "v1.annon.defdone.near",
-      "kind": "register",
-      "args": {
-        "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
-        "seller": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
-        "price": "340282366920938463463374607431768211455",
-        "pay_to": "0x58da990a8f4a3a6ca7cb6315d68a140105917352",
-        "cipher_hash": "0x2222222222222222222222222222222222222222222222222222222222222222",
-        "moderator": null,
-        "seller_key": "0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333",
-        "deadline": 1793800706
-      },
-      "text": "Annon: list a file for sale\nSigning this lets whoever holds the seller key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nseller: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nprice: 340282366920938463463374607431768.211455 USDC\npay to: 0x58da990a8f4a3a6ca7cb6315d68a140105917352\ncipher: 0x2222222222222222222222222222222222222222222222222222222222222222\nmoderator: (none)\nseller key: 0x333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333\nvalid until: 2026-11-04 13:58:26 UTC"
-    },
-    {
-      "id": "reopen",
-      "contractId": "v1.annon.defdone.near",
+      "id": "near-evm-refund-solana-recovery",
+      "contractId": "v2.annon.defdone.near",
       "kind": "reopen",
       "args": {
-        "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
-        "wallet": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1",
-        "key": "0x444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444",
-        "deadline": 1793000600
+        "contract": "v2.annon.defdone.near",
+        "purchase_id": "0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "recovery": {
+          "kind": "solana",
+          "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+        },
+        "fresh_key": "0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "deadline": 1794350000
       },
-      "text": "Annon: open a file again\nSigning this lets whoever holds the one-time key below open the file.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nwallet: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\none-time key: 0x444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444444\nvalid until: 2026-10-26 07:43:20 UTC"
+      "text": "Annon: open a purchased file again\ncontract: v2.annon.defdone.near\npurchase: 0xdc84a7f8f157cf72e64113102b73bbf9328fc7ce5c974ee7c399211c1f8608de\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC"
     },
     {
-      "id": "reopen-dev-no-prefix",
-      "contractId": "annon-dev.synthetic.near",
+      "id": "near-solana-refund-evm-recovery",
+      "contractId": "v2.annon.defdone.near",
       "kind": "reopen",
       "args": {
-        "file_id": "abababababababababababababababababababababababababababababababab",
-        "wallet": "1A642F0E3C3AF545E7ACBD38B07251B3990914F1",
-        "key": "CdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCdCd",
-        "deadline": 951868799
+        "contract": "v2.annon.defdone.near",
+        "purchase_id": "0x9bd1d620f2603306c1b79786326fc57641a7e0b0577c9e3bac2d625a5946bf8f",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "recovery": {
+          "kind": "evm",
+          "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+        },
+        "fresh_key": "0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "deadline": 1794350000
       },
-      "text": "Annon: open a file again\nSigning this lets whoever holds the one-time key below open the file.\ncontract: annon-dev.synthetic.near\nfile: 0xabababababababababababababababababababababababababababababababab\nwallet: 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\none-time key: 0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\nvalid until: 2000-02-29 23:59:59 UTC"
+      "text": "Annon: open a purchased file again\ncontract: v2.annon.defdone.near\npurchase: 0x9bd1d620f2603306c1b79786326fc57641a7e0b0577c9e3bac2d625a5946bf8f\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC"
     },
     {
-      "id": "stop-sales",
-      "contractId": "v1.annon.defdone.near",
-      "kind": "stop_sales",
+      "id": "near-max-accounts",
+      "contractId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "kind": "reopen",
       "args": {
-        "file_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
-        "deadline": 1793000600
+        "contract": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "purchase_id": "0xf25c0007ec8bbd7f91d73210f53c35f5d2b707757638513a5718940fbf142eb6",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "recovery": {
+          "kind": "near",
+          "id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "fresh_key": "0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "deadline": 1794350000
       },
-      "text": "Annon: stop selling a file\nSigning this is final: the file can't be sold again. Past buyers keep access.\ncontract: v1.annon.defdone.near\nfile: 0x1111111111111111111111111111111111111111111111111111111111111111\nvalid until: 2026-10-26 07:43:20 UTC"
+      "text": "Annon: open a purchased file again\ncontract: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\npurchase: 0xf25c0007ec8bbd7f91d73210f53c35f5d2b707757638513a5718940fbf142eb6\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: NEAR ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC"
     },
     {
-      "id": "stop-sales-dev",
-      "contractId": "annon-dev.synthetic.near",
-      "kind": "stop_sales",
+      "id": "base-near-recovery",
+      "contractId": "v2.annon.defdone.near",
+      "kind": "reopen",
       "args": {
-        "file_id": "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
-        "deadline": 4102444799
+        "contract": "v2.annon.defdone.near",
+        "purchase_id": "0x5ff4904fd36e4c7bda270a518acd6d2e54688e7938afb0ee2c4ef3a295bb6682",
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "recovery": {
+          "kind": "near",
+          "id": "seller.near"
+        },
+        "fresh_key": "0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e",
+        "nonce": "0x0606060606060606060606060606060606060606060606060606060606060606",
+        "deadline": 1794350000
       },
-      "text": "Annon: stop selling a file\nSigning this is final: the file can't be sold again. Past buyers keep access.\ncontract: annon-dev.synthetic.near\nfile: 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\nvalid until: 2099-12-31 23:59:59 UTC"
+      "text": "Annon: open a purchased file again\ncontract: v2.annon.defdone.near\npurchase: 0x5ff4904fd36e4c7bda270a518acd6d2e54688e7938afb0ee2c4ef3a295bb6682\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nrecovery: NEAR seller.near\nnew key: 0xa572cbea904d67468808c8eb50a9450c9721db309128012543902d0ac358a62ae28f75bb8f1c7c42c39a8c5529bf0f4e\nnonce: 0x0606060606060606060606060606060606060606060606060606060606060606\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "stop-one-evm-base",
+      "contractId": "v2.annon.defdone.near",
+      "kind": "stop_sales",
+      "seller": {
+        "kind": "evm",
+        "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+      },
+      "args": {
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "key": null,
+        "deadline": 1794350000
+      },
+      "text": "Annon: stop selling a file\nSigning this is final: the file can't be sold again. Past buyers keep access.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "seller-one-evm-base",
+      "contractId": "v2.annon.defdone.near",
+      "kind": "reopen_seller",
+      "seller": {
+        "kind": "evm",
+        "id": "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+      },
+      "args": {
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "deadline": 1794350000
+      },
+      "text": "Annon: open a file again\nSigning this lets whoever holds the one-time key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: EVM 0x1a642f0e3c3af545e7acbd38b07251b3990914f1\none-time key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "stop-eight-mixed-solana",
+      "contractId": "v2.annon.defdone.near",
+      "kind": "stop_sales",
+      "seller": {
+        "kind": "solana",
+        "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+      },
+      "args": {
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "key": null,
+        "deadline": 1794350000
+      },
+      "text": "Annon: stop selling a file\nSigning this is final: the file can't be sold again. Past buyers keep access.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "seller-eight-mixed-solana",
+      "contractId": "v2.annon.defdone.near",
+      "kind": "reopen_seller",
+      "seller": {
+        "kind": "solana",
+        "id": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c"
+      },
+      "args": {
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "deadline": 1794350000
+      },
+      "text": "Annon: open a file again\nSigning this lets whoever holds the one-time key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: Solana GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB\none-time key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "stop-one-max-near",
+      "contractId": "v2.annon.defdone.near",
+      "kind": "stop_sales",
+      "seller": {
+        "kind": "near",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "args": {
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "key": null,
+        "deadline": 1794350000
+      },
+      "text": "Annon: stop selling a file\nSigning this is final: the file can't be sold again. Past buyers keep access.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: NEAR aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nvalid until: 2026-11-10 22:33:20 UTC"
+    },
+    {
+      "id": "seller-one-max-near",
+      "contractId": "v2.annon.defdone.near",
+      "kind": "reopen_seller",
+      "seller": {
+        "kind": "near",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "args": {
+        "file_id": "0x0303030303030303030303030303030303030303030303030303030303030303",
+        "key": "0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb",
+        "deadline": 1794350000
+      },
+      "text": "Annon: open a file again\nSigning this lets whoever holds the one-time key below open the file.\ncontract: v2.annon.defdone.near\nfile: 0x0303030303030303030303030303030303030303030303030303030303030303\nseller: NEAR aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\none-time key: 0x97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb\nvalid until: 2026-11-10 22:33:20 UTC"
     }
   ]
 }

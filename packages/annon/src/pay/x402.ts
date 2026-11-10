@@ -1,3 +1,4 @@
+import { buildPurchaseMessage, type Purchase, purchaseId } from '../settle-near/purchase.js';
 /**
  * The x402 v2 envelope of an Annon purchase (`specs/x402-annon.md`): reading the `PAYMENT-REQUIRED`
  * header, finding the file it sells, and building the `PAYMENT-SIGNATURE` header. Nothing read here
@@ -16,6 +17,7 @@ export const BASE_NETWORK = 'eip155:8453';
  * (`forFacilitator`): the scheme label is not part of what the buyer signs.
  */
 export const ANNON_EXACT = 'annon-exact';
+export const ANNON_NEAR_USDC = 'annon-near-usdc';
 /** The x402 idempotency extension (profile section 10). */
 export const PAYMENT_IDENTIFIER = 'payment-identifier';
 
@@ -50,7 +52,7 @@ export const isPaymentId = (id: unknown): id is string =>
   typeof id === 'string' && /^[a-zA-Z0-9_-]{16,128}$/.test(id);
 
 /** Contracts the SDK trusts without being told: the one Annon deployment on NEAR mainnet. */
-export const TRUSTED_CONTRACTS: readonly string[] = ['v1.annon.defdone.near'];
+export const TRUSTED_CONTRACTS: readonly string[] = [];
 
 export interface Offer {
   scheme: string;
@@ -118,9 +120,8 @@ export function discover(
 ): { contractId: string; fileId: string } {
   const info = pr.extensions?.annon?.info;
   if (!info) return fail('file_mismatch', 'the payment request names no Annon file');
-  // 2 is profile v1.1, 1 is v1: the buyer's side of both is the same.
-  if ((info.version !== 1 && info.version !== 2) || info.network !== 'near:mainnet') {
-    fail('file_mismatch', 'the Annon extension is not version 1 or 2 on NEAR mainnet');
+  if (info.version !== 3 || info.network !== 'near:mainnet') {
+    fail('file_mismatch', 'the Annon extension is not version 3 on NEAR mainnet');
   }
   if (typeof info.contract !== 'string' || !trusted.includes(info.contract)) {
     fail(
@@ -144,7 +145,7 @@ export function paymentSignature(
   offer: Offer,
   a: Authorization,
   signature: string,
-  annon: { contractId: string; fileId: string; buyerKey: string },
+  purchase: Purchase,
   paymentId?: string,
 ): string {
   const pid = pr.extensions?.[PAYMENT_IDENTIFIER] as { info?: object } | undefined;
@@ -158,14 +159,15 @@ export function paymentSignature(
     info: { ...(bc?.info ?? {}), s: [...new Set([ANNON_SERVICE_CODE, ...declaredS])] },
   };
   const advertised = pr.extensions?.annon;
+  buildPurchaseMessage(purchase, { baseUsdc: offer.asset });
   const info = {
-    ...(advertised?.info ?? {
-      version: 1,
-      network: 'near:mainnet',
-      contract: annon.contractId,
-      fileId: annon.fileId,
-    }),
-    buyerKey: annon.buyerKey,
+    ...(advertised?.info ?? {}),
+    version: 3,
+    network: 'near:mainnet',
+    contract: purchase.contract,
+    fileId: purchase.file_id,
+    purchase: buildPurchaseMessage(purchase, { baseUsdc: offer.asset }),
+    purchase_id: purchaseId(purchase, { baseUsdc: offer.asset }),
   };
   return b64encode(
     JSON.stringify({
