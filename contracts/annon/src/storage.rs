@@ -145,6 +145,21 @@ mod tests {
     }
 
     #[test]
+    fn reopen_with_no_deposit_pays_its_marker_from_the_prepaid_balance() {
+        let mut c = listed();
+        as_caller(RELAYER, NearToken::from_millinear(100));
+        c.storage_deposit(None);
+        let before = balance(&c, RELAYER);
+        as_caller(RELAYER, NearToken::from_yoctonear(0));
+        let seller = Seller::new(1);
+        let r = reopen_args(&format!("0x{}", "11".repeat(32)), &seller);
+        c.reopen(r.clone(), seller.sign(&c.reopen_message(r)));
+        let paid = before - balance(&c, RELAYER);
+        // One marker: a 32-byte key, a prefix, an empty value and the trie's per-record overhead.
+        assert!(paid > 0 && paid <= NearToken::from_millinear(1).as_yoctonear(), "{paid}");
+    }
+
+    #[test]
     fn a_prepaid_unlock_returns_unused_storage_to_the_balance() {
         let mut c = listed();
         as_caller(RELAYER, NearToken::from_millinear(100));

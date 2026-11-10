@@ -132,6 +132,11 @@ impl Annon {
     /// so replaying the signature only helps whoever holds that key's secret. The signature
     /// itself can't prove who made the key: the client must make it and build the text itself,
     /// never accept them from a page or a server.
+    ///
+    /// Runs once per file, wallet and one-time key: a replay is refused, and another release
+    /// needs a new key. The caller pays the marker's storage (under 0.001 NEAR) from the attached
+    /// deposit, the rest coming back, or from its prepaid balance.
+    #[payable]
     pub fn reopen(&mut self, args: ReopenArgs, sig: String) {
         let file_id = bytes::<32>(&args.file_id, "file_id");
         let wallet = bytes::<20>(&args.wallet, "wallet");
@@ -153,6 +158,16 @@ impl Annon {
             file.seller == wallet || self.buyers.contains_key(&buyer_entry(&file_id, &wallet)),
             "only the seller or a buyer can reopen"
         );
+        // Once per file, wallet and one-time key: another release needs a new key and signature.
+        let marker = reopen_marker(&file_id, &wallet, &key);
+        require!(
+            !self.reopened.contains_key(&marker),
+            "this one-time key was already used to reopen the file; reopen with a new one"
+        );
+        let before = env::storage_usage();
+        self.reopened.insert(marker, ());
+        self.reopened.flush();
+        self.pay_for_storage(env::storage_usage() - before);
         self.ckd(&file_id, &key, "reopen", &wallet)
     }
 
@@ -173,6 +188,15 @@ impl Annon {
             utc(args.deadline),
         )
     }
+}
+
+/// What marks a `reopen` as tried. The map is this contract's own, so the contract needs no place in it.
+fn reopen_marker(file_id: &[u8; 32], wallet: &[u8; 20], key: &[u8; 48]) -> [u8; 32] {
+    let mut m = b"annon/reopen".to_vec();
+    m.extend_from_slice(file_id);
+    m.extend_from_slice(wallet);
+    m.extend_from_slice(key);
+    env::keccak256_array(&m)
 }
 
 #[cfg(test)]
@@ -595,6 +619,46 @@ mod tests {
         let sig = seller.sign(&c.reopen_message(r.clone()));
         c.reopen(r, sig);
         assert_eq!(ckd_calls(), before + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "this one-time key was already used to reopen the file")]
+    fn the_same_reopen_runs_once() {
+        let mut c = contract();
+        let seller = Seller::new(1);
+        let a = registered(&mut c, &seller);
+        let r = reopen_args(&a.file_id, &seller);
+        let sig = seller.sign(&c.reopen_message(r.clone()));
+        c.reopen(r.clone(), sig.clone());
+        // The same signature again (a replay, or a relayer resending after a lost answer).
+        c.reopen(r, sig);
+    }
+
+    #[test]
+    fn another_one_time_key_reopens_again() {
+        let mut c = contract();
+        let seller = Seller::new(1);
+        let a = registered(&mut c, &seller);
+        let before = ckd_calls();
+        for key in ["44", "55"] {
+            let r = ReopenArgs {
+                key: format!("0x{}", key.repeat(48)),
+                ..reopen_args(&a.file_id, &seller)
+            };
+            let sig = seller.sign(&c.reopen_message(r.clone()));
+            c.reopen(r, sig);
+        }
+        assert_eq!(ckd_calls(), before + 2);
+    }
+
+    #[test]
+    fn the_marker_is_per_file_wallet_and_key() {
+        let k = [4u8; 48];
+        let m = reopen_marker(&[1; 32], &[2; 20], &k);
+        assert_ne!(m, reopen_marker(&[9; 32], &[2; 20], &k));
+        assert_ne!(m, reopen_marker(&[1; 32], &[9; 20], &k));
+        assert_ne!(m, reopen_marker(&[1; 32], &[2; 20], &[9; 48]));
+        assert_eq!(m, reopen_marker(&[1; 32], &[2; 20], &k));
     }
 
     #[test]

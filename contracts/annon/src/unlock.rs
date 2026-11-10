@@ -486,7 +486,7 @@ mod tests {
         let mut c = listed();
         mpc_answered(verified(X402_PAYLOAD_HASH));
         callback(&mut c);
-        context(NearToken::from_yoctonear(0));
+        context(NearToken::from_millinear(1)); // reopen pays for its marker
         let file = format!("0x{}", "11".repeat(32));
         let buyer = Seller::new(7);
         assert_eq!(buyer.address(), PAYER);

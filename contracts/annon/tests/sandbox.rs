@@ -415,22 +415,58 @@ async fn a_failed_key_release_keeps_the_purchase_and_reopen_gets_the_key() -> an
     assert!(w.is_buyer(&file).await?);
 
     w.mode("ok", "ok").await?;
-    let args = json!({ "file_id": file, "wallet": w.buyer.address(), "key": hex0x(&[0x44; 48]), "deadline": 4_000_000_000u64 });
-    let message: String = w
-        .annon
-        .view("reopen_message")
-        .args_json(json!({ "args": args }))
-        .await?
-        .json()?;
-    let out = w
-        .relayer
-        .call(w.annon.id(), "reopen")
-        .args_json(json!({ "args": args, "sig": w.buyer.sign(&message) }))
-        .gas(Gas::from_tgas(100))
-        .transact()
-        .await?;
+    let reopen = |k: u8, deposit: NearToken| {
+        let w = &w;
+        let file = file.clone();
+        async move {
+            let args = json!({ "file_id": file, "wallet": w.buyer.address(), "key": hex0x(&[k; 48]), "deadline": 4_000_000_000u64 });
+            let message: String = w
+                .annon
+                .view("reopen_message")
+                .args_json(json!({ "args": args }))
+                .await?
+                .json()?;
+            w.relayer
+                .call(w.annon.id(), "reopen")
+                .args_json(json!({ "args": args, "sig": w.buyer.sign(&message) }))
+                .deposit(deposit)
+                .gas(Gas::from_tgas(100))
+                .transact()
+                .await
+        }
+    };
+    let before = w.relayer.view_account().await?.balance;
+    let out = reopen(0x44, NearToken::from_near(1)).await?;
     assert_eq!(events(&out, "key_released")[0]["reason"], "reopen");
     println!("reopen: {} Tgas burnt", tgas(&out));
+    let spent = before.as_yoctonear() - w.relayer.view_account().await?.balance.as_yoctonear();
+    assert!(
+        spent < NearToken::from_millinear(20).as_yoctonear(),
+        "the deposit beyond the marker's storage must come back, spent {spent}"
+    );
+
+    // The same reopen sent again (a replay, or a relayer resending): refused, no second release.
+    let again = reopen(0x44, NearToken::from_millinear(1)).await?;
+    assert!(again.is_failure());
+    assert!(format!("{:?}", again.failures()).contains("already used to reopen"));
+    assert!(events(&again, "key_released").is_empty());
+
+    // Too little for the marker: nothing is kept, so the same key can try again.
+    let short = reopen(0x55, NearToken::from_yoctonear(1)).await?;
+    assert!(format!("{:?}", short.failures()).contains("attach at least"));
+    assert!(events(&short, "key_released").is_empty());
+
+    // MPC fails after the marker is written: the key stays used, a fresh one still works.
+    w.mode("ok", "fail").await?;
+    let failed = reopen(0x55, NearToken::from_millinear(1)).await?;
+    assert!(failed.is_success(), "{:?}", failed.failures());
+    assert!(events(&failed, "key_released").is_empty());
+    assert!(answer(&failed)["error"].as_str().unwrap().contains("reopen"));
+    w.mode("ok", "ok").await?;
+    let used = reopen(0x55, NearToken::from_millinear(1)).await?;
+    assert!(format!("{:?}", used.failures()).contains("already used to reopen"));
+    let fresh = reopen(0x66, NearToken::from_millinear(1)).await?;
+    assert_eq!(events(&fresh, "key_released")[0]["reason"], "reopen");
     Ok(())
 }
 

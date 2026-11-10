@@ -80,6 +80,10 @@ pub struct Annon {
     buyers: LookupMap<[u8; 52], ()>,
     /// `tx_hash ‖ log_index` of every payment that has released a key.
     used: LookupMap<[u8; 40], ()>,
+    /// One per `reopen` that asked MPC for the key, whether or not MPC answered: a second call with
+    /// the same file, wallet and one-time key is refused, so a replayed signature can't make anyone
+    /// pay for the same release twice. After a failure the wallet signs again for a new key.
+    reopened: LookupMap<[u8; 32], ()>,
     /// Prepaid storage (NEP-145 style) so a function-call key can `unlock` without a deposit.
     /// Only its owner can withdraw it; nobody else, the contract account included, can move it.
     balances: LookupMap<AccountId, u128>,
@@ -103,6 +107,7 @@ impl Annon {
             usdc: bytes::<20>(&usdc, "usdc"),
             buyers: LookupMap::new(b"b"),
             used: LookupMap::new(b"u"),
+            reopened: LookupMap::new(b"r"),
             balances: LookupMap::new(b"s"),
         }
     }
