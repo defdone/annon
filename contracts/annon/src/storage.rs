@@ -156,7 +156,10 @@ mod tests {
         c.reopen(r.clone(), seller.sign(&c.reopen_message(r)));
         let paid = before - balance(&c, RELAYER);
         // One marker: a 32-byte key, a prefix, an empty value and the trie's per-record overhead.
-        assert!(paid > 0 && paid <= NearToken::from_millinear(1).as_yoctonear(), "{paid}");
+        assert!(
+            paid > 0 && paid <= NearToken::from_millinear(1).as_yoctonear(),
+            "{paid}"
+        );
     }
 
     #[test]

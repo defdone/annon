@@ -461,7 +461,10 @@ async fn a_failed_key_release_keeps_the_purchase_and_reopen_gets_the_key() -> an
     let failed = reopen(0x55, NearToken::from_millinear(1)).await?;
     assert!(failed.is_success(), "{:?}", failed.failures());
     assert!(events(&failed, "key_released").is_empty());
-    assert!(answer(&failed)["error"].as_str().unwrap().contains("reopen"));
+    assert!(answer(&failed)["error"]
+        .as_str()
+        .unwrap()
+        .contains("reopen"));
     w.mode("ok", "ok").await?;
     let used = reopen(0x55, NearToken::from_millinear(1)).await?;
     assert!(format!("{:?}", used.failures()).contains("already used to reopen"));
