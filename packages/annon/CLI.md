@@ -1,0 +1,135 @@
+# annon CLI
+
+Build with `pnpm build`. The `@defdone/annon` package ships the `annon` bin;
+in this checkout run `node packages/annon/dist/node/main.js` in its place.
+Run `annon --help` for all flags. All commands return JSON; `--json` uses one compact
+JSON line and disables interactive prompts. Success is `{ "ok": true, "result": ... }`;
+errors are `{ "ok": false, "error": { "code": ..., "message": ... } }`.
+
+Create a public configuration file and name it with `--config /path/config.json` or
+`ANNON_CONFIG`. The default is `~/.config/annon/config.json`:
+
+```json
+{
+  "contractId": "your-reviewed-contract.near",
+  "network": "near:mainnet",
+  "nearRpc": "https://rpc.mainnet.fastnear.com",
+  "baseRpc": "https://mainnet.base.org",
+  "stateDir": "/absolute/private/annon-state",
+  "relayer": "https://your-reviewed-relayer.example"
+}
+```
+
+No deployment is implicitly trusted. The first interactive command asks whether you trust
+the configured contract to release file keys. `--trust-contract` records explicit trust
+without a prompt. Trust is keyed by network, NEAR RPC and contract; changing any requires
+new trust. An offer cannot select a different contract. MCP shares the trust store.
+
+Flags override environment variables, which override config. Config fields have matching
+`ANNON_CONTRACT_ID`, `ANNON_NETWORK`, `ANNON_NEAR_RPC`, `ANNON_BASE_RPC`,
+`ANNON_STATE_DIR`, and `ANNON_RELAYER` variables. Endpoints use HTTPS; HTTP is allowed
+only on localhost. Endpoint URLs cannot contain credentials or query parameters.
+The relayer is optional when a NEAR wallet submits transactions. Direct register/reopen
+calls use the caller's prepaid contract storage balance; fund it using the deployment's
+storage interface before selling or recovering.
+
+## Keys and saved purchases
+
+Select `--wallet evm|solana|near` or `ANNON_WALLET`. There is no key discovery or wallet
+creation. Key values are accepted only from environment variables or explicitly named files:
+
+| Wallet | Environment | Named file flag / environment |
+| --- | --- | --- |
+| EVM | `ANNON_EVM_PRIVATE_KEY`: `0x` and 64 hex digits | `--evm-key-file` / `ANNON_EVM_KEY_FILE`, containing that text |
+| Solana | `ANNON_SOLANA_KEYPAIR`: JSON array of 64 bytes | `--solana-key-file` / `ANNON_SOLANA_KEY_FILE`, standard Solana keypair JSON |
+| NEAR | `ANNON_NEAR_CREDENTIALS`: credential JSON | `--near-key-file` / `ANNON_NEAR_KEY_FILE`, near-cli-rs credential JSON with `account_id`, `public_key`, `private_key` (ed25519) |
+
+NEAR files may omit `account_id` when `--near-account` / `ANNON_NEAR_ACCOUNT` supplies it.
+On macOS, with no NEAR file or credential env value, explicitly select both
+`--near-account alice.near --near-public-key ed25519:PUBLIC_KEY` (or `ANNON_NEAR_ACCOUNT`,
+`ANNON_NEAR_PUBLIC_KEY`) to read the near-cli-rs native keychain entry:
+service `near-mainnet-alice.near`, account `alice.near:ed25519:PUBLIC_KEY`.
+Other platforms use the credential JSON file or environment. No keychain enumeration occurs.
+
+Sell, buy, open, recover and stop also require a user-held random 32-byte backup secret,
+encoded as 64 lowercase hex characters in `ANNON_BACKUP_SECRET`, or in the file named by
+`--backup-secret-file` / `ANNON_BACKUP_SECRET_FILE`. Create it with a cryptographic random
+generator and keep it outside the repository. It is never derived from a wallet signature.
+Read-only verify/status need neither a wallet nor this secret.
+
+State directories are created with mode 0700 and records/outputs with 0600. Keep existing
+state directories private. Purchases and recovery grants are encrypted by the SDK; portable
+encrypted backups are under `stateDir/backups`. Public headers and resource URLs are saved
+separately for later downloading. Preserve state after timeouts. Losing local state does not
+lose recovery rights: the same recovery wallet can create a fresh grant on a new device with
+a new backup secret. Keys, signed payment payloads and decrypted file contents are never
+returned in CLI/MCP results. Plaintext is written only to the explicitly named output.
+
+## Commands
+
+Identity syntax is `evm:0xADDRESS`, `solana:BASE58_OR_HEX`, or `near:account.near`.
+Prices are decimal USDC with at most six decimals. Splits use integer basis points,
+totaling 10000. The first split recipient gets the rounding remainder.
+
+```sh
+annon sell report.pdf --price 0.2 --split near:alice.near:10000 --wallet near --output report.pay2
+annon sell report.pdf --price 0.2 --split evm:0x1111111111111111111111111111111111111111:10000 --wallet evm --base
+annon buy https://host.example/report --route near --wallet near
+annon buy offer.json --route base --wallet evm --max-price 0.2
+annon buy https://host.example/report --route 1click --wallet solana --from-chain solana
+annon status 0xPURCHASE_ID --json
+annon open 0xPURCHASE_ID --output report.pdf
+annon open report.pay2 --purchase /private/purchase-backup.json --output report.pdf
+annon recover --recovery near:alice.near --wallet near --json
+annon open /private/recovery-backup.json --url https://host.example/report --output recovered.pdf
+annon verify report.pay2 --json
+annon verify https://host.example/report --json
+annon stop 0xFILE_ID --wallet near
+```
+
+IDs in these commands are placeholders for full `0x` plus 64 lowercase hex digits.
+`sell` creates a PAY2 file; arrange hosting separately. `buy` accepts the HTTPS resource URL
+or a named file containing decoded x402 `PAYMENT-REQUIRED` JSON. It checks the public header
+and registered terms before the SDK authorizes payment. The default route is direct NEAR for
+a NEAR wallet, 1Click when `--from-chain` is given, otherwise Base for an EVM wallet.
+Explicit Base fails if that route or a funded EOA is unavailable; it never silently chooses
+another payment route. Each invocation of buy creates a purchase: after an uncertain reply,
+retain the saved backup and check status rather than buying again.
+
+1Click uses `--from-chain` (its blockchain name, e.g. `base`, `eth`, `solana`) and, optionally,
+`--from-asset` (the exact `nep141:` asset ID). Without an asset it selects the unique USDC
+entry for that blockchain in 1Click's token list. For BTC, other tokens, or ambiguous USDC
+entries, specify `--from-asset`. `--refund-to` must name a refund address on the source
+chain; it defaults to the selected wallet's address only when the chain family matches.
+These also have `ANNON_FROM_CHAIN`, `ANNON_FROM_ASSET`, `ANNON_REFUND_TO` equivalents.
+The result includes `instructions.address`, `amount` in source token base units, `asset`,
+`chain`, optional `memo`, and `qrData`. Fund these externally with the wallet you already use.
+Never omit a required memo. `status` checks final NEAR acceptance; 1Click SUCCESS alone
+does not grant access.
+
+The signing wallet is also the recovery identity. `--recovery kind:id` on buy explicitly
+checks that identity against the selected wallet. Refunds from Annon itself go to that
+wallet's Intents identity; 1Click source-chain refunds use `--refund-to`.
+For moderated files, pass `--moderator account.near` on buy only after deciding to trust
+that moderator, who can block release. A seller sets it with the same flag on sell.
+
+`open` accepts a saved purchase ID, encrypted purchase/recovery backup, or a local PAY2 file
+with `--purchase`. It uses saved resource metadata or `--file`/`--url`, then SDK grant proofs
+and authenticated decryption. New-device recovery may require `--url` or a local PAY2 file.
+Existing output files are never overwritten. `verify` checks a local file's header and body;
+a URL checks only its public header. Verification does not prove future host availability.
+
+Opening a Base purchase resends its saved signed payload with the download when present;
+it does not create a fresh payment authorization after a lost reply.
+
+Key release timeout retries are bounded to three attempts with backoff, using the same
+unlock/reopen/claim request. Registration, transfers and payment authorization are never
+blindly retried. Raw upstream errors are intentionally suppressed to avoid leaking secrets.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Command completed; buy may still require a deposit or settlement |
+| 1 | Operation failed; inspect final status and retained encrypted state before retrying |
+| 2 | Invalid arguments, configuration, wallet source or missing local input |
+| 3 | First-use contract trust required or declined |
+| 4 | `status` reports pending; acceptance has not been observed (not proof of payment failure) |
