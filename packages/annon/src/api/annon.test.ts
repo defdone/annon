@@ -3,6 +3,8 @@ import { base58 } from '@scure/base';
 import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { terms as initial, must } from '../../test/fixtures.js';
+import { sealWithKey } from '../envelope/pay2.js';
+import { blobSource } from '../envelope/replay.js';
 import { fileAppId, hashPoint } from '../keys/near-ckd.js';
 import { getFile } from '../near/rpc.js';
 import {
@@ -1042,7 +1044,29 @@ describe('high-level one-model API', () => {
     await expect(
       resumed.resumeSell({ fileId, data: new Uint8Array([9]), seller: wallet, publish }),
     ).rejects.toThrow(/cipher/);
-    const sold = await resumed.resumeSell({ fileId, data: body, seller: wallet, publish });
+    const expected = await sealWithKey(bytes(must(pending.fileKey), 32), body, {
+      fileId: bytes(fileId, 32),
+      name: pending.name,
+      mime: pending.mime,
+      authKind: 0,
+      previewLen: pending.previewLen,
+    });
+    const expectedFile = await expected.finish({
+      contractId: h.terms.contract,
+      ckdSecret: bytes(must(pending.ckdSecret), 48),
+      seller: wallet.identity,
+      sign: async (text) => (await wallet.authorize(text)).sig,
+    });
+    const sold = await resumed.resumeSell({
+      fileId,
+      data: blobSource(new Blob([body])),
+      seller: wallet,
+      publish: async ({ file, header }) => {
+        await h.publish({ file: new Uint8Array(await new Response(file).arrayBuffer()), header });
+      },
+    });
+    expect(h.file).toEqual(expectedFile);
+    expect(hex(expected.cipherHash)).toBe(sold.terms.cipher_hash);
     expect(sold.terms.file_id).toBe(fileId);
     const completed = await importSell(must(h.backups.get(`sell:${fileId}`)), h.backupSecret);
     expect(completed).toMatchObject({
@@ -1371,5 +1395,87 @@ it.each(['valid', 'absent', 'invalid'] as const)(
     expect(h.send.mock.calls.filter(([method]) => method === 'claim_key')).toHaveLength(
       mode === 'valid' ? 1 : 2,
     );
+  },
+);
+
+it.each(['none', 'header', 'locked header', 'cancel', 'swallow failure'] as const)(
+  'keeps streamed sell and resume recoverable when publish consumes %s',
+  async (mode) => {
+    const h = harness();
+    let reads = 0;
+    let cancelled = 0;
+    const data = {
+      size: body.length,
+      read() {
+        const pass = ++reads;
+        return new ReadableStream<Uint8Array>(
+          {
+            start(c) {
+              c.enqueue(
+                mode === 'swallow failure' && pass % 2 === 0 ? body.map((b) => b ^ 1) : body,
+              );
+            },
+            pull(c) {
+              c.close();
+            },
+            cancel() {
+              cancelled++;
+            },
+          },
+          { highWaterMark: 0 },
+        );
+      },
+    };
+    const publish = async ({ file }: { file: ReadableStream<Uint8Array> }) => {
+      if (mode === 'none') return;
+      const reader = file.getReader();
+      if (mode === 'header' || mode === 'locked header') await reader.read();
+      if (mode === 'locked header') return;
+      if (mode === 'cancel') await reader.cancel();
+      if (mode === 'swallow failure') {
+        try {
+          while (!(await reader.read()).done) {}
+        } catch {
+          /* A host swallowed the source error. */
+        }
+      }
+      reader.releaseLock();
+    };
+    const fileId = initial.file_id;
+    const check = async () => {
+      const saved = await encryptedSellStore(h.raw, h.backupSecret).load(`annon/sell/${fileId}`);
+      expect(saved?.published).toBeFalsy();
+      for (const key of ['fileKey', 'sellerSecret', 'ckdSecret'] as const)
+        expect(typeof saved?.[key]).toBe('string');
+    };
+    await expect(
+      h.sdk.sell({
+        fileId,
+        data,
+        name: 'f',
+        mime: '',
+        seller: wallet,
+        near: {
+          price: '200000',
+          recipients: [{ identity: wallet.identity, bps: 10000 }],
+          remainder: wallet.identity,
+        },
+        publish,
+      }),
+    ).rejects.toThrow();
+    await check();
+    await expect(h.sdk.resumeSell({ fileId, data, seller: wallet, publish })).rejects.toThrow();
+    await check();
+    if (mode !== 'swallow failure') expect(cancelled).toBeGreaterThan(0);
+    await h.sdk.resumeSell({
+      fileId,
+      data: blobSource(new Blob([body])),
+      seller: wallet,
+      publish: async ({ file, header }) =>
+        h.publish({ file: new Uint8Array(await new Response(file).arrayBuffer()), header }),
+    });
+    expect(
+      await encryptedSellStore(h.raw, h.backupSecret).load(`annon/sell/${fileId}`),
+    ).toMatchObject({ published: true, fileKey: null, sellerSecret: null, ckdSecret: null });
   },
 );

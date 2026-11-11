@@ -5,6 +5,7 @@ import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { describe, expect, it } from 'vitest';
 import { type Listing, open, Pay2Error, sealWithKey } from './pay2.js';
+import { blobSource, openTo, prepareOpen, prepareSeal } from './replay.js';
 import { openStream, sealStream, sealStreamWithKey } from './stream.js';
 
 interface Input {
@@ -112,6 +113,26 @@ async function outcome(file: Uint8Array, listing: Listing, seed = 1) {
 }
 const headerLen = (file: Uint8Array) => new DataView(file.buffer, file.byteOffset).getUint32(8);
 
+it('cancels a replayable source when sealing options fail before the first read', async () => {
+  let cancelled = false;
+  await expect(
+    prepareSeal(
+      hex(first.K),
+      {
+        size: 1,
+        read: () =>
+          new ReadableStream<Uint8Array>({
+            cancel() {
+              cancelled = true;
+            },
+          }),
+      },
+      { ...options, mime: '\u0000' },
+    ),
+  ).rejects.toThrow('mime');
+  expect(cancelled).toBe(true);
+});
+
 describe('streaming PAY2 vectors', () => {
   for (const v of vectors.valid) {
     it(`matches and opens ${v.id} with different chunking on each pass`, async () => {
@@ -134,6 +155,11 @@ describe('streaming PAY2 vectors', () => {
       );
       expect(shown).toBe(v.publishText);
       expect(Buffer.from(file).toString('base64')).toBe(v.file);
+      const one = await sealWithKey(hex(i.K), data, { ...i, fileId: hex(i.fileId) });
+      await one.finish(finishOpts);
+      expect(await s.preview({ meta: true, data: i.previewLen > 0 })).toEqual(
+        await one.preview({ meta: true, data: i.previewLen > 0 }),
+      );
       const listing = listingOf(v.cipherHash, hex(i.fileId));
       expect((await open(file, openOpts(listing))).data).toEqual(data);
       let meta: unknown;
@@ -148,6 +174,17 @@ describe('streaming PAY2 vectors', () => {
         ),
       ).toEqual(data);
       expect(meta).toEqual({ name: i.name, mime: i.mime, size: data.length });
+      const chunks: Uint8Array[] = [];
+      expect(
+        await openTo(
+          blobSource(new Blob([file])),
+          new WritableStream({
+            write: (chunk) => void chunks.push(chunk),
+          }),
+          openOpts(listing),
+        ),
+      ).toEqual(meta);
+      expect(Buffer.concat(chunks)).toEqual(Buffer.from(data));
     });
   }
   for (const v of vectors.invalid) {
@@ -158,7 +195,43 @@ describe('streaming PAY2 vectors', () => {
       // These vectors have no valid data chunk before the fault. In particular a correctly
       // signed/hash-committed bad GCM tag or bad metadata must never leak plaintext first.
       expect(data.length).toBe(0);
+      await expect(
+        openTo(blobSource(new Blob([b64(v.file)])), new WritableStream(), openOpts(v.listing)),
+      ).rejects.toMatchObject({ code: v.expect });
     });
+  }
+});
+
+it('preserves buffered error precedence across body damage, length and key failures', async () => {
+  const s = await sealWithKey(hex(first.K), pattern(2 * 65536 + 3), options);
+  const file = await s.finish(finishOpts);
+  const bad = file.slice();
+  bad[headerLen(file) + 280] = (bad[headerLen(file) + 280] ?? 0) ^ 1;
+  const opts = { ...openOpts(listingOf(s.cipherHash)), ckdSecret: async () => new Uint8Array(48) };
+  for (const wire of [
+    bad,
+    bad.subarray(0, bad.length - 20),
+    Buffer.concat([bad, new Uint8Array(65536)]),
+  ]) {
+    let expected: unknown;
+    try {
+      await open(wire, opts);
+    } catch (error) {
+      expected = error;
+    }
+    let writes = 0;
+    await expect(
+      openTo(
+        blobSource(new Blob([wire])),
+        new WritableStream({
+          write() {
+            writes++;
+          },
+        }),
+        opts,
+      ),
+    ).rejects.toMatchObject({ code: (expected as Pay2Error).code });
+    expect(writes).toBe(0);
   }
 });
 
@@ -568,3 +641,53 @@ it('round-trips 100 MiB with sampled peak live heap + external growth below 32 M
     `PAY2 100 MiB sampled peak growth: heap + external ${(peak / 1024 ** 2).toFixed(2)} MiB; ArrayBuffers ${(peakBuffers / 1024 ** 2).toFixed(2)} MiB`,
   );
 }, 120_000);
+
+it('binds the open replay to the exact first-pass header before requesting a key or writing', async () => {
+  const data = pattern(65540);
+  const sealed = await sealWithKey(hex(first.K), data, options);
+  const original = await sealed.finish(finishOpts);
+  const alternateSecret = new Uint8Array(48).fill(9);
+  const alternate = await sealed.finish({ ...finishOpts, ckdSecret: alternateSecret });
+  expect(original.subarray(0, headerLen(original))).not.toEqual(
+    alternate.subarray(0, headerLen(alternate)),
+  );
+  let reads = 0;
+  let keys = 0;
+  let writes = 0;
+  const prepared = await prepareOpen(
+    { size: original.length, read: () => source(reads++ === 0 ? original : alternate) },
+    openOpts(listingOf(sealed.cipherHash)),
+  );
+  await expect(
+    prepared.writeTo(
+      new WritableStream({
+        write() {
+          writes++;
+        },
+      }),
+      async () => {
+        keys++;
+        return alternateSecret;
+      },
+    ),
+  ).rejects.toMatchObject({ code: 'source_changed' });
+  expect(keys).toBe(0);
+  expect(writes).toBe(0);
+});
+
+it.each(['contents', 'shorter', 'longer'])(
+  'gives a fixed code when seal replay becomes %s',
+  async (change) => {
+    const data = pattern(65540);
+    const sealed = await sealStreamWithKey(hex(first.K), source(data), data.length, options);
+    const replay =
+      change === 'shorter'
+        ? data.slice(0, -1)
+        : change === 'longer'
+          ? new Uint8Array([...data, 1])
+          : data.map((b) => b ^ 1);
+    await expect(collect(await sealed.finish(source(replay), finishOpts))).rejects.toMatchObject({
+      code: 'source_changed',
+    });
+  },
+);

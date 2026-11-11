@@ -1,5 +1,5 @@
 /** Node I/O around the SDK. Settlement, commitments, encryption and proofs stay in the SDK. */
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { Annon, type AnnonOptions } from '../api/annon.js';
 import { download, secureUrl } from '../download/download.js';
@@ -27,7 +27,7 @@ import { type BudgetRecord, reserveSpend } from './budget.js';
 import type { Input } from './cli.js';
 import { type Config, loadConfig, type TrustPrompt, trustContract } from './config.js';
 import { AdapterError, publicError, usage } from './errors.js';
-import { newOutput, writeBackup } from './io.js';
+import { fileSource, newOutput, withOutput, withSpool, writeBackup, writeStream } from './io.js';
 import { type Keychain, osKeychain } from './keychain.js';
 import { confinePaths } from './paths.js';
 import {
@@ -59,7 +59,7 @@ export interface Dependencies {
     options: AnnonOptions,
   ) => Pick<
     Annon,
-    'sell' | 'buy' | 'open' | 'recover' | 'stop' | 'store' | 'accept' | 'resumeSell'
+    'sell' | 'buy' | 'open' | 'openTo' | 'recover' | 'stop' | 'store' | 'accept' | 'resumeSell'
   >;
   wallet?: typeof loadWallet;
   file?: typeof getFile;
@@ -562,14 +562,14 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       const seller = await wallet();
       const output = o.output ?? `${o.target}.pay2`;
       await newOutput(output);
-      const publish = async (file: { file: Uint8Array }) => {
-        await writeFile(output, file.file, { mode: 0o600, flag: 'wx' });
+      const publish = async (file: { file: ReadableStream<Uint8Array> }) => {
+        await writeStream(output, file.file);
       };
       if (o.resume) {
         if (!isId(o.resume) || o.price || o.split || o.base || o.moderator) throw usage();
         const result = await sdk.resumeSell({
           fileId: o.resume,
-          data: new Uint8Array(await readFile(o.target)),
+          data: await fileSource(o.target),
           seller,
           publish,
         });
@@ -604,7 +604,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           2,
         );
       const result = await sdk.sell({
-        data: new Uint8Array(await readFile(o.target)),
+        data: await fileSource(o.target),
         name: basename(o.target),
         mime: 'application/octet-stream',
         seller,
@@ -904,10 +904,12 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         publicError({ code: 'settlement_processing' }).message,
       );
     const resource = await resources.load(fileId);
-    let file: Uint8Array;
+    let readFileSource: () => Awaited<ReturnType<typeof fileSource>> | ReadableStream<Uint8Array>;
     const local = o.file ?? (o.purchase ? o.target : undefined);
-    if (local) file = new Uint8Array(await readFile(local));
-    else {
+    if (local) {
+      const source = await fileSource(local);
+      readFileSource = () => source;
+    } else {
       const url = o.url ?? resource?.url;
       if (!url)
         return fail('file_required', 'Provide --file or --url to open this saved purchase.', 2);
@@ -930,33 +932,36 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         record?.purchase.route === 'base-usdc'
           ? [...record.attempts].reverse().find((attempt) => attempt.payload)?.payload
           : undefined;
-      const stream = download({
-        url,
-        contractId: c.contractId,
-        fileId,
-        header,
-        proof: {
-          secret: bytes(buyerSecret, 32),
-          purchase_id: purchaseId,
-          grant: recovery?.grant ?? 0,
-        },
-        fetch: fetcher,
-        ...(payment ? { payment: { header: payment } } : {}),
-      });
-      file = new Uint8Array(await new Response(stream).arrayBuffer());
+      readFileSource = () =>
+        download({
+          url,
+          contractId: c.contractId,
+          fileId,
+          header,
+          proof: {
+            secret: bytes(buyerSecret, 32),
+            purchase_id: purchaseId,
+            grant: recovery?.grant ?? 0,
+          },
+          fetch: fetcher,
+          ...(payment ? { payment: { header: payment } } : {}),
+        });
     }
     // claim_key is permissionless; a configured NEAR wallet can pay gas instead of a relayer.
     if (o.wallet || env.ANNON_WALLET) await wallet();
-    const opened = await sdk.open({
-      file,
-      ...(recovery?.grant != null ? { recovery } : record ? { record } : {}),
-    });
-    await writeFile(o.output, opened.data, { mode: 0o600, flag: 'wx' });
+    const opened = await withOutput(o.output, (sink) =>
+      sdk.openTo({
+        file: readFileSource(),
+        sink,
+        spool: (stream, use) => withSpool(o.output as string, stream, use),
+        ...(recovery?.grant != null ? { recovery } : record ? { record } : {}),
+      }),
+    );
     return {
       fileId,
       purchaseId: recovery?.purchase_id ?? record?.id,
       output: o.output,
-      bytes: opened.data.length,
+      bytes: opened.meta.size,
       ...(await paymentDetails(
         async () => record ?? (recovery ? sdk.store.load(purchaseKey(recovery.purchase_id)) : null),
       )),
