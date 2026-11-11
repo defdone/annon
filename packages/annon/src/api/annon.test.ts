@@ -9,6 +9,7 @@ import {
   type EncryptedRecord,
   encryptedSellerKeyStore,
   encryptedSellStore,
+  exportSell,
   importPurchase,
   importRecovery,
   importSell,
@@ -17,10 +18,13 @@ import {
   type SellerKeyRecord,
 } from '../pay/backup.js';
 import type { typedData } from '../pay/eip3009.js';
+import { purchaseKey } from '../pay/purchase.js';
 import { paymentRequired } from '../pay/seller.js';
+import { createSplit, type Split } from '../pay/split.js';
 import { memoryStore } from '../pay/store.js';
 import { bytes, hex } from '../settle-near/codec.js';
 import type { Identity } from '../settle-near/identity.js';
+import { parsePurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import { termsHash } from '../settle-near/terms.js';
 import { Annon } from './annon.js';
 
@@ -237,6 +241,105 @@ function harness(seller: Identity = wallet.identity) {
   };
 }
 describe('high-level one-model API', () => {
+  it.each(['push', 'pull'] as const)(
+    'retains %s split provenance in results and encrypted sell backups',
+    async (kind) => {
+      const h = harness();
+      const sendTransaction = vi.fn(async (_call: import('../pay/split.js').SplitCall) => {});
+      const publish = vi.fn(async () => {
+        throw new Error('publication unavailable');
+      });
+      const fileId = initial.file_id;
+      await expect(
+        h.sdk.sell({
+          fileId,
+          data: body,
+          name: 'f',
+          mime: '',
+          seller: wallet,
+          near: {
+            price: '200000',
+            recipients: [{ identity: wallet.identity, bps: 10000 }],
+            remainder: wallet.identity,
+          },
+          base: { price: '200000', kind, sendTransaction },
+          publish,
+        }),
+      ).rejects.toThrow('publication unavailable');
+      const job = await importSell(must(h.backups.get(`sell:${fileId}`)), h.backupSecret);
+      const provenance = must(job.baseSplit);
+      expect(provenance).toEqual({
+        address: must(job.terms.base).pay_to,
+        kind,
+        salt: expect.stringMatching(/^0x[0-9a-f]{64}$/),
+      });
+      const split: Split = {
+        recipients: job.terms.near.recipients.map((r) => r.identity.id),
+        allocations: job.terms.near.recipients.map((r) => BigInt(r.bps)),
+        totalAllocation: 10000n,
+        distributionIncentive: 0,
+      };
+      expect(createSplit(kind, split, provenance.salt)).toEqual(sendTransaction.mock.calls[0]?.[0]);
+      const hash = termsHash(job.terms);
+      const sold = await h.sdk.resumeSell({
+        fileId,
+        data: body,
+        seller: wallet,
+        publish: h.publish,
+      });
+      expect(sold.baseSplit).toEqual(provenance);
+      expect(termsHash(sold.terms)).toBe(hash);
+      const saved = await importSell(must(h.backups.get(`sell:${fileId}`)), h.backupSecret);
+      expect(saved.published).toBe(true);
+      expect(saved.baseSplit).toEqual(provenance);
+      expect(sendTransaction).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('imports and resumes an old Base sell record without split provenance', async () => {
+    const h = harness();
+    const fileId = initial.file_id;
+    await expect(
+      h.sdk.sell({
+        fileId,
+        data: body,
+        name: 'f',
+        mime: '',
+        seller: wallet,
+        near: {
+          price: '200000',
+          recipients: [{ identity: wallet.identity, bps: 10000 }],
+          remainder: wallet.identity,
+        },
+        base: { price: '200000', sendTransaction: async () => {} },
+        publish: async () => {
+          throw new Error('publication unavailable');
+        },
+      }),
+    ).rejects.toThrow('publication unavailable');
+    const job = await importSell(must(h.backups.get(`sell:${fileId}`)), h.backupSecret);
+    const { baseSplit: _baseSplit, ...old } = job;
+    const legacy = await importSell(await exportSell(old, h.backupSecret), h.backupSecret);
+    expect(Object.hasOwn(legacy, 'baseSplit')).toBe(false);
+    expect(legacy.terms.base).not.toBeNull();
+    const store = encryptedSellStore(h.raw, h.backupSecret);
+    expect(
+      await store.compareAndSet(`annon/sell/${fileId}`, job, {
+        ...legacy,
+        revision: legacy.revision + 1,
+      }),
+    ).toBe(true);
+    const sold = await new Annon(h.config).resumeSell({
+      fileId,
+      data: body,
+      seller: wallet,
+      publish: h.publish,
+    });
+    expect(sold.terms).toEqual(old.terms);
+    expect(Object.hasOwn(sold, 'baseSplit')).toBe(false);
+    const saved = await importSell(must(h.backups.get(`sell:${fileId}`)), h.backupSecret);
+    expect(saved.published).toBe(true);
+    expect(Object.hasOwn(saved, 'baseSplit')).toBe(false);
+  });
   it('sells with normalized sorted split terms, registers then publishes and opens a purchased grant', async () => {
     const h = harness();
     const sold = await h.sdk.sell({
@@ -299,6 +402,83 @@ describe('high-level one-model API', () => {
     h.grants.set(`${bought.record.id}:0`, p.buyer_key);
     expect((await h.sdk.open({ record: bought.record, file: h.file })).data).toEqual(body);
   });
+  it.each(['accepted', 'declined', 'expired', 'short', 'exact-margin', 'proof-short'])(
+    'saves the live 1Click quote before confirmation and recovery proof (%s)',
+    async (mode) => {
+      const h = harness();
+      await h.sdk.sell({
+        data: body,
+        name: 'f',
+        mime: '',
+        seller: wallet,
+        near: {
+          price: '200000',
+          recipients: [{ identity: wallet.identity, bps: 10000 }],
+          remainder: wallet.identity,
+        },
+        publish: h.publish,
+      });
+      let current = now;
+      const sdk = new Annon({ ...h.config, now: () => current });
+      const order: string[] = [];
+      const recovery = {
+        ...wallet,
+        authorize: vi.fn(async (text: string) => {
+          order.push('proof');
+          if (mode === 'proof-short') current = now + 2401;
+          return wallet.authorize(text);
+        }),
+      };
+      const quote = vi.fn(async (message: string) => {
+        order.push('quote');
+        const purchase = parsePurchaseMessage(message);
+        const id = purchaseId(purchase);
+        expect(await h.sdk.store.load(purchaseKey(id))).not.toBeNull();
+        return {
+          request: { customRecipientMsg: message },
+          response: {},
+          deposit: {
+            address: 'test-deposit',
+            amount: '202064',
+            asset: 'nep141:source',
+            chain: 'solana',
+            qrData: 'test',
+            depositBefore: new Date((now + 3000) * 1000).toISOString(),
+          },
+        };
+      });
+      const onQuote = vi.fn(async (q: import('../oneclick/oneclick.js').OneClickQuote) => {
+        order.push('confirm');
+        const p = parsePurchaseMessage(q.request.customRecipientMsg);
+        const saved = await importPurchase(must(h.backups.get(purchaseId(p))), h.backupSecret);
+        expect(saved.quote).toEqual(q);
+        if (mode === 'declined') throw new Error('declined');
+        if (mode === 'expired') current = now + 3001;
+        if (mode === 'short') current = now + 2401;
+        if (mode === 'exact-margin') current = now + 2400;
+      });
+      const operation = sdk.buy({
+        fileId: h.terms.file_id,
+        header: h.header,
+        recovery,
+        refund: wallet.identity,
+        maxPrice: 200000n,
+        origin: { asset: 'nep141:source', chain: 'solana', refundTo: 'test-refund' },
+        oneClick: { quote } as never,
+        onQuote,
+      });
+      if (mode === 'accepted' || mode === 'exact-margin')
+        await expect(operation).resolves.toMatchObject({ instructions: { amount: '202064' } });
+      else if (mode === 'declined') await expect(operation).rejects.toThrow('declined');
+      else await expect(operation).rejects.toMatchObject({ code: 'quote_expired' });
+      expect(order).toEqual(
+        ['accepted', 'exact-margin', 'proof-short'].includes(mode)
+          ? ['quote', 'confirm', 'proof']
+          : ['quote', 'confirm'],
+      );
+      expect(h.send.mock.calls.map(([method]) => method)).toEqual(['register']);
+    },
+  );
   it('sends direct NEAR USDC only after the encrypted record and backup exist', async () => {
     const h = harness();
     await h.sdk.sell({

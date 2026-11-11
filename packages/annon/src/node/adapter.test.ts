@@ -8,6 +8,7 @@ import { Annon } from '../api/annon.js';
 import { serveFile } from '../download/host.js';
 import { parseHeader, sealWithKey, sha256 } from '../envelope/pay2.js';
 import { keyFromSecret } from '../keys/near-ckd.js';
+import * as nearRpc from '../near/rpc.js';
 import { type EncryptedRecord, encryptedPurchaseStore } from '../pay/backup.js';
 import type { PurchaseRecord } from '../pay/purchase.js';
 import { purchaseKey } from '../pay/purchase.js';
@@ -19,6 +20,8 @@ import { bytes, hex } from '../settle-near/codec.js';
 import { baseNonceV2, buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import { termsHash } from '../settle-near/terms.js';
 import { createAdapter, retryAfterMs } from './adapter.js';
+import { runCli } from './cli.js';
+import { publicError } from './errors.js';
 
 // Base finality/log discovery has its own real-RPC-fixture tests. Here it supplies a paid
 // result so the real SDK accept(), adapter and grant-enforcing host meet at their boundary.
@@ -27,9 +30,82 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
-it.each(['open', 'status'] as const)(
-  'resumes paid Base %s before a host can serve the final grant',
-  async (command) => {
+it.each([
+  {
+    command: 'open',
+    transport: 'wallet',
+    refusals: 0,
+    code: 'payment_not_safe',
+    json: false,
+    agent: false,
+  },
+  {
+    command: 'status',
+    transport: 'wallet',
+    refusals: 0,
+    code: 'payment_not_safe',
+    json: false,
+    agent: false,
+  },
+  {
+    command: 'open',
+    transport: 'relayer',
+    refusals: 2,
+    code: 'payment_not_safe',
+    json: false,
+    agent: false,
+  },
+  {
+    command: 'open',
+    transport: 'relayer',
+    refusals: 2,
+    code: 'payment_not_safe',
+    json: true,
+    agent: false,
+  },
+  {
+    command: 'open',
+    transport: 'relayer',
+    refusals: 2,
+    code: 'payment_not_safe',
+    json: false,
+    agent: true,
+  },
+  {
+    command: 'status',
+    transport: 'relayer',
+    refusals: 2,
+    code: 'payment_not_safe',
+    json: false,
+    agent: false,
+  },
+  {
+    command: 'status',
+    transport: 'relayer',
+    refusals: 2,
+    code: 'payment_not_safe',
+    json: true,
+    agent: false,
+  },
+  {
+    command: 'open',
+    transport: 'relayer',
+    refusals: 100,
+    code: 'payment_not_safe',
+    json: false,
+    agent: false,
+  },
+  {
+    command: 'open',
+    transport: 'relayer',
+    refusals: 2,
+    code: 'in_flight',
+    json: true,
+    agent: false,
+  },
+] as const)(
+  'resumes paid Base $command via $transport with $refusals $code replies (JSON $json, agent $agent)',
+  async ({ command, transport, refusals, code, json, agent }) => {
     const dir = await mkdtemp(join(tmpdir(), 'annon-base-host-'));
     const signer = privateKeyToAccount(`0x${'42'.repeat(32)}`);
     const identity = { kind: 'evm' as const, id: signer.address.toLowerCase() };
@@ -113,7 +189,18 @@ it.each(['open', 'status'] as const)(
           }),
       },
     };
+    let relayCalls = 0;
     const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      if (String(url).startsWith('https://relay.example')) {
+        relayCalls++;
+        if (relayCalls <= refusals)
+          return code === 'in_flight'
+            ? Response.json({ pending: true }, { status: 202 })
+            : Response.json({ error: code, message: 'PRIVATE_UPSTREAM' }, { status: 425 });
+        accepted = true;
+        order.push('unlock');
+        return Response.json({ txHash: 'stub-transaction', signer: 'stub.near' });
+      }
       if (String(url).endsWith('/header')) return new Response(header);
       if (String(url).startsWith('https://files.example')) {
         order.push('download');
@@ -166,10 +253,26 @@ it.each(['open', 'status'] as const)(
       accepted = true;
       return null;
     });
+    vi.spyOn(nearRpc, 'txOutcome').mockResolvedValue({
+      state: 'done',
+      method: 'unlock',
+      value: null,
+      events: [],
+    });
+    const wait = vi.fn(async (_ms: number) => {});
+    const notify = vi.fn();
     const adapter = createAdapter(
-      { ANNON_BACKUP_SECRET: hex(backupSecret).slice(2), ANNON_WALLET: 'near' },
+      {
+        ANNON_BACKUP_SECRET: hex(backupSecret).slice(2),
+        ANNON_CONFIG: join(dir, 'none'),
+        ANNON_STATE_DIR: dir,
+        ...(transport === 'wallet' ? { ANNON_WALLET: 'near' } : {}),
+      },
       {
         fetch: fetcher,
+        agent,
+        wait,
+        notify,
         wallet: async () => ({
           identity: { kind: 'near', id: 'gas.near' },
           call,
@@ -188,21 +291,55 @@ it.each(['open', 'status'] as const)(
     );
     try {
       expect((await serveFile({ headers: new Headers() }, host)).status).toBe(402);
-      const result = await adapter({
+      const input = {
         command,
+        json,
+        relayer: 'https://relay.example',
         target: id,
         contractId: terms.contract,
         nearRpc: host.nearRpc,
         baseRpc: host.baseRpc,
-        stateDir: dir,
+        ...(agent ? {} : { stateDir: dir }),
         config: join(dir, 'none'),
         trustContract: true,
         url: host.url,
         output: join(dir, 'out'),
-      });
+      };
+      const immediate =
+        code === 'payment_not_safe' && refusals > 0 && (command !== 'open' || json || agent);
+      if (immediate || refusals === 100) {
+        const printed: string[] = [];
+        const exit = await runCli(
+          [command, id, ...(json ? ['--json'] : [])],
+          () => adapter(input),
+          (text) => printed.push(text),
+        );
+        expect(exit).toBe(command === 'status' ? 4 : 1);
+        expect(JSON.parse(must(printed[0]))).toMatchObject({
+          ok: false,
+          error: {
+            code: 'payment_not_safe',
+            message: publicError({ code: 'payment_not_safe' }).message,
+          },
+        });
+        expect(printed.join('')).not.toContain('PRIVATE_UPSTREAM');
+        expect(relayCalls).toBe(immediate ? 1 : 6);
+        expect(wait.mock.calls).toEqual(
+          immediate ? [] : [[10000], [20000], [30000], [40000], [60000]],
+        );
+        expect(notify).toHaveBeenCalledTimes(immediate ? 0 : 5);
+        expect(order).not.toContain('download');
+        return;
+      }
+      const result = await adapter(input);
+      expect(wait.mock.calls).toEqual(
+        refusals === 0 ? [] : code === 'in_flight' ? [[5000], [5000]] : [[10000], [20000]],
+      );
+      expect(notify).toHaveBeenCalledTimes(json ? 0 : refusals);
       expect(accepted).toBe(true);
       expect(order[0]).toBe('unlock');
-      expect(call).toHaveBeenCalledTimes(1);
+      expect(call).toHaveBeenCalledTimes(transport === 'wallet' ? 1 : 0);
+      if (transport === 'relayer') expect(relayCalls).toBe(refusals + 1);
       if (command === 'open') {
         expect(result.bytes).toBe(data.length);
         expect(order).toContain('download');

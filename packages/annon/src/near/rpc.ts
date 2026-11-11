@@ -26,6 +26,13 @@ export class NearError extends Error {
   }
 }
 
+/** A typed rate limit that keeps the transport code used by SDK callers. */
+export class NearRpcRateLimited extends NearError {
+  constructor(message = 'NEAR RPC rate limited (429)') {
+    super('transport', message);
+  }
+}
+
 const fail = (code: NearErrorCode, message?: string): never => {
   throw new NearError(code, message);
 };
@@ -66,11 +73,11 @@ export async function rpcReply(url: string, method: string, params: unknown): Pr
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
       signal: abort.signal,
     });
-    const httpFailure = (): never =>
-      fail(
-        'transport',
-        `NEAR RPC HTTP ${response.status}${response.status === 429 ? ': rate limited (429)' : ''}`,
-      );
+    const httpFailure = (): never => {
+      if (response.status === 429)
+        throw new NearRpcRateLimited('NEAR RPC HTTP 429: rate limited (429)');
+      return fail('transport', `NEAR RPC HTTP ${response.status}`);
+    };
     try {
       body = await response.json();
     } catch (error) {
@@ -79,7 +86,7 @@ export async function rpcReply(url: string, method: string, params: unknown): Pr
     }
     // NEAR also returns structured JSON-RPC errors on HTTP 400/408/500. Preserve them for
     // callers that distinguish pending work from rejection; use HTTP only without an RPC body.
-    // A 429 is rate limiting whatever its body says (FastNEAR answered without an id).
+    // A 429 is rate limiting whatever its body says, including replies without an id.
     if (response.status === 429) return httpFailure();
     if (
       !response.ok &&
@@ -98,7 +105,7 @@ export async function rpcReply(url: string, method: string, params: unknown): Pr
   }
   // Rate-limit answers carry no request id; name them instead of calling them someone else's reply.
   if ((body as { error?: { code?: unknown } })?.error?.code === -429)
-    return fail('transport', 'NEAR RPC rate limited (429)');
+    throw new NearRpcRateLimited();
   if (body?.id !== id) return malformed('a reply to another request');
   return body;
 }

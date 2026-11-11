@@ -63,6 +63,13 @@ export class PayError extends Error {
   }
 }
 
+/** A typed rate limit that keeps the transport code used by SDK callers. */
+export class BaseRpcRateLimited extends PayError {
+  constructor() {
+    super('transport', 'Base RPC rate limited (429)');
+  }
+}
+
 export const fail = (code: PayErrorCode, message?: string): never => {
   throw new PayError(code, message);
 };
@@ -74,7 +81,7 @@ type RpcError = { code?: unknown; message?: unknown; data?: unknown };
 
 async function rpc(url: string, method: string, params: unknown[]) {
   const id = `annon-base-${++nextId}`;
-  let body: { id?: unknown; result?: unknown; error?: RpcError };
+  let body: { jsonrpc?: unknown; id?: unknown; result?: unknown; error?: RpcError };
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -82,8 +89,29 @@ async function rpc(url: string, method: string, params: unknown[]) {
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
       signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
     });
-    body = await res.json();
+    const httpFailure = (): never => {
+      if (res.status === 429) throw new BaseRpcRateLimited();
+      return fail('transport', `Base RPC HTTP ${res.status}`);
+    };
+    try {
+      body = await res.json();
+    } catch (error) {
+      if (!res.ok) return httpFailure();
+      throw error;
+    }
+    if (res.status === 429) return httpFailure();
+    // Preserve structured RPC replies on non-2xx responses, as on NEAR.
+    if (
+      !res.ok &&
+      (!body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        (body.jsonrpc !== '2.0' && body.id !== id) ||
+        (!('result' in body) && !('error' in body)))
+    )
+      return httpFailure();
   } catch (e) {
+    if (e instanceof PayError) throw e;
     return fail('transport', `Base RPC unreachable: ${(e as Error).message}`);
   }
   if (body?.id !== id) return malformed('a reply to another request');

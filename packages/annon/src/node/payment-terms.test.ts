@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest';
+import type { OneClickQuote } from '../oneclick/oneclick.js';
 import { BASE_USDC, NEAR_USDC } from '../settle-near/terms.js';
-import { humanPaymentTerms, validatePaymentToken } from './payment-terms.js';
+import { humanPaymentTerms, quotedSource, validatePaymentToken } from './payment-terms.js';
 
 it('shows a 0.01 USDC NEAR purchase with exact rounded shares and the remainder recipient', () => {
   const text = humanPaymentTerms({
@@ -93,5 +94,25 @@ it.each(['near:testnet', 'near:sandbox'])(
       expect(humanPaymentTerms(t, config)).toContain(`(${t.token})`);
       expect(() => validatePaymentToken({ ...t, token: NEAR_USDC }, config)).toThrow();
     }
+  },
+);
+
+it.each<[string, number, string]>([
+  ['202064', 6, '0.202064'],
+  ['1234567890123456789', 8, '12345678901.23456789'],
+  ['1000', 0, '1000'],
+  ['1000000', 6, '1'],
+])(
+  'formats the quoted input %s at %s decimals without floating point',
+  (amount, decimals, expected) => {
+    const source = quotedSource(
+      {
+        deposit: { amount, depositBefore: '2026-11-11T12:00:00Z' },
+        response: { quote: { amountInFormatted: '999' } },
+      } as unknown as OneClickQuote,
+      { chain: 'sol', asset: 'nep141:source', symbol: 'USDC', decimals },
+    );
+    expect(source.amount).toBe(amount);
+    expect(source.amountFormatted).toBe(expected);
   },
 );

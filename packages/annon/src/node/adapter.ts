@@ -6,7 +6,7 @@ import { download, secureUrl } from '../download/download.js';
 import { sameResource } from '../download/proof.js';
 import { inspect, inspectHeader, MAX_HEADER, parseHeader } from '../envelope/pay2.js';
 import { getConfig, getFile, getPurchase, txOutcome } from '../near/rpc.js';
-import { OneClick, OneClickRefused, type Origin } from '../oneclick/oneclick.js';
+import { OneClick, type Origin } from '../oneclick/oneclick.js';
 import {
   type EncryptedRecord,
   encryptedRecoveryStore,
@@ -28,7 +28,13 @@ import { type Config, loadConfig, type TrustPrompt, trustContract } from './conf
 import { AdapterError, publicError, usage } from './errors.js';
 import { newOutput, writeBackup } from './io.js';
 import { type Keychain, osKeychain } from './keychain.js';
-import { humanPaymentTerms, validatePaymentToken } from './payment-terms.js';
+import {
+  humanPaymentTerms,
+  quotedSource,
+  type SourceAsset,
+  type SourcePayment,
+  validatePaymentToken,
+} from './payment-terms.js';
 import { assertSignerInput, configuredWallet } from './signer-wallet.js';
 import { type SigningResult, signingRequest, verifySigningResult } from './signing.js';
 import {
@@ -164,19 +170,34 @@ async function resourceHeader(url: string, c: Config, fetcher: typeof fetch) {
   }
   return headerAt(url, fetcher, r);
 }
+const tokenIdentifier = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  value.length >= 1 &&
+  value.length <= 128 &&
+  !/[^A-Za-z0-9._:-]/.test(value);
+const chainAliases = new Map([
+  ['solana', 'sol'],
+  ['ethereum', 'eth'],
+  ['arbitrum', 'arb'],
+  ['polygon', 'pol'],
+  ['optimism', 'op'],
+  ['avalanche', 'avax'],
+  ['berachain', 'bera'],
+]);
 async function originFor(
   o: Input,
   env: Environment,
   wallet: LocalWallet,
   fetcher: typeof fetch,
   c: Config,
-): Promise<Origin> {
+): Promise<Origin & { sourceAsset: SourceAsset }> {
   if (o.origin) {
     if (!c.origins || !Object.hasOwn(c.origins, o.origin))
       return fail('origin_not_allowed', 'Choose a human-configured origin name.', 2);
     o = { ...o, ...c.origins[o.origin] };
   }
-  const chain = o.fromChain ?? env.ANNON_FROM_CHAIN;
+  const inputChain = o.fromChain ?? env.ANNON_FROM_CHAIN;
+  const chain = inputChain ? (chainAliases.get(inputChain) ?? inputChain) : undefined;
   if (!chain)
     return fail(
       'origin_required',
@@ -184,10 +205,17 @@ async function originFor(
       2,
     );
   let asset = o.fromAsset ?? env.ANNON_FROM_ASSET;
+  let token: { symbol: string; decimals?: number; contractAddress?: string } | undefined;
   if (!asset) {
     const r = await response('https://1click.chaindefuser.com/v0/tokens', fetcher);
     if (!r.ok) throw new Error('tokens unavailable');
-    const tokens = (await r.json()) as { blockchain: string; symbol: string; assetId: string }[];
+    const tokens = (await r.json()) as {
+      blockchain: string;
+      symbol: string;
+      assetId: string;
+      decimals?: number;
+      contractAddress?: string;
+    }[];
     const matches = tokens.filter((t) => t.blockchain === chain && t.symbol === 'USDC');
     if (matches.length !== 1)
       return fail(
@@ -195,25 +223,31 @@ async function originFor(
         'Specify --from-asset with the exact 1Click nep141 asset ID for this chain.',
         2,
       );
+    token = matches[0];
     asset = matches[0]?.assetId;
   }
+  if (!tokenIdentifier(asset))
+    return fail('origin_asset_required', 'Specify --from-asset with a valid 1Click asset ID.', 2);
   const kind: Origin['chain'] =
-    chain === 'solana'
+    chain === 'sol'
       ? 'solana'
       : chain === 'near'
         ? 'near'
         : [
               'eth',
-              'ethereum',
               'base',
-              'arbitrum',
-              'polygon',
+              'arb',
+              'pol',
+              'op',
+              'avax',
               'bsc',
-              'optimism',
-              'avalanche',
               'gnosis',
-              'berachain',
-              'aurora',
+              'bera',
+              'scroll',
+              'monad',
+              'xlayer',
+              'abs',
+              'plasma',
             ].includes(chain)
           ? 'evm'
           : 'other';
@@ -227,7 +261,25 @@ async function originFor(
   }
   if (!asset || !refundTo)
     return fail('origin_required', 'Provide --from-asset and --refund-to for the source chain.', 2);
-  return { asset, chain: kind, refundTo };
+  const decimals = token?.decimals;
+  const contractAddress = token?.contractAddress;
+  return {
+    asset,
+    chain: kind,
+    refundTo,
+    sourceAsset: {
+      chain,
+      asset,
+      ...(token ? { symbol: token.symbol } : {}),
+      ...(typeof decimals === 'number' &&
+      Number.isInteger(decimals) &&
+      decimals >= 0 &&
+      decimals <= 255
+        ? { decimals }
+        : {}),
+      ...(tokenIdentifier(contractAddress) ? { contractAddress } : {}),
+    },
+  };
 }
 
 /**
@@ -344,16 +396,21 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
             body: JSON.stringify(method === 'claim_key' ? { method, args } : { method, ...args }),
             signal: AbortSignal.timeout(60000),
           });
-          if (r.status === 409) {
-            const body = (await r.json()) as { error?: string };
-            if (body.error === 'duplicate') throw new Error('relayer in flight; retry');
-          }
           if (r.status === 429) {
             const delay = retryAfterMs(r.headers.get('Retry-After'));
             if (delay === null) throw new Error('relayer refused: rate limited');
             throw Object.assign(new Error('relayer rate limited; retry'), { retryAfterMs: delay });
           }
-          if (![200, 202].includes(r.status)) throw new Error('relayer refused');
+          if (![200, 202].includes(r.status)) {
+            const body = (await r.json().catch(() => null)) as { error?: unknown } | null;
+            if (r.status === 409 && body?.error === 'duplicate')
+              throw new Error('relayer in flight; retry');
+            if (body?.error === 'payment_not_safe') {
+              const safe = publicError({ code: body.error });
+              throw new AdapterError(safe.code, safe.message, safe.exitCode);
+            }
+            throw new Error('relayer refused');
+          }
           const body = (await r.json()) as { txHash?: string; signer?: string; pending?: boolean };
           if (r.status === 202 && body.pending === true)
             throw new Error('relayer in flight; retry');
@@ -383,10 +440,24 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       // Timeouts repeat only idempotent releases. A 429 explicitly refused admission.
       let timeouts = 0;
       let pending = 0;
+      let safetyWaits = 0;
       for (;;) {
         try {
           return await call();
         } catch (error) {
+          if (
+            method === 'unlock' &&
+            error instanceof AdapterError &&
+            error.code === 'payment_not_safe'
+          ) {
+            if (o.command === 'status') throw new AdapterError(error.code, error.message, 4);
+            if (o.command !== 'open' || d.agent || o.json) throw error;
+            const delay = [10000, 20000, 30000, 40000, 60000][safetyWaits++];
+            if (delay === undefined) throw error;
+            d.notify?.(`Base settlement pending; retrying unlock in ${delay / 1000} seconds.`);
+            await wait(delay);
+            continue;
+          }
           const inFlight = /in flight/i.test(error instanceof Error ? error.message : '');
           const limited = /relayer rate limited/i.test(error instanceof Error ? error.message : '');
           const timeout = /timeout|timed out/i.test(error instanceof Error ? error.message : '');
@@ -396,7 +467,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
             (inFlight || limited ? pending++ >= 36 : timeouts++ >= 2)
           )
             throw error;
-          d.notify?.('Key release pending; retrying the saved request.');
+          if (!o.json) d.notify?.('Key release pending; retrying the saved request.');
           await wait(
             limited
               ? (error as Error & { retryAfterMs: number }).retryAfterMs
@@ -443,7 +514,12 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           seller,
           publish,
         });
-        return { fileId: result.terms.file_id, file: output, terms: result.terms };
+        return {
+          fileId: result.terms.file_id,
+          file: output,
+          terms: result.terms,
+          ...(result.baseSplit ? { baseSplit: result.baseSplit } : {}),
+        };
       }
       if (!o.price || !o.split) throw usage();
       if (o.base && !c.baseRpc)
@@ -487,7 +563,12 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         ...(o.moderator ? { moderator: o.moderator } : {}),
         publish,
       });
-      return { fileId: result.terms.file_id, file: output, terms: result.terms };
+      return {
+        fileId: result.terms.file_id,
+        file: output,
+        terms: result.terms,
+        ...(result.baseSplit ? { baseSplit: result.baseSplit } : {}),
+      };
     }
     if (o.command === 'buy') {
       if (!o.target) throw usage();
@@ -568,7 +649,26 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           2,
         );
       validatePaymentToken(paymentTerms, paymentConfig);
-      d.paymentTerms?.(paymentTerms);
+      if (origin && !d.agent && !d.browserApprovals && !o.json && !d.prompt)
+        return fail(
+          'confirmation_required',
+          'Review and confirm the exact payment terms before paying.',
+          3,
+        );
+      const confirmPayment = async (source?: SourcePayment) => {
+        const review = { ...paymentTerms, ...(source ? { source } : {}) };
+        d.paymentTerms?.(review);
+        if (!d.agent && !d.browserApprovals) {
+          d.notify?.(o.json ? JSON.stringify(review) : humanPaymentTerms(review, paymentConfig));
+          if (!(await (o.json ? undefined : d.prompt)?.('Type yes to pay: ')))
+            return fail(
+              'confirmation_required',
+              'Review and confirm the exact payment terms before paying.',
+              3,
+            );
+        }
+      };
+      if (!origin || (o.json && !d.browserApprovals)) await confirmPayment();
       let refundBudget: (() => Promise<void>) | undefined;
       if (d.agent) {
         if (c.dailyBudget === undefined)
@@ -583,19 +683,10 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
             daily: c.dailyBudget === '0' ? 0n : BigInt(amount(c.dailyBudget)),
           },
         );
-      } else if (!d.browserApprovals) {
-        d.notify?.(
-          o.json ? JSON.stringify(paymentTerms) : humanPaymentTerms(paymentTerms, paymentConfig),
-        );
-        if (!(await (o.json ? undefined : d.prompt)?.('Type yes to pay: ')))
-          return fail(
-            'confirmation_required',
-            'Review and confirm the exact payment terms before paying.',
-            3,
-          );
       }
-      const bought = await sdk
-        .buy({
+      try {
+        let source: SourcePayment | undefined;
+        const bought = await sdk.buy({
           fileId: found.fileId,
           header: found.header,
           recovery: buyer,
@@ -605,34 +696,47 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           moderators: o.moderator ? [o.moderator] : (c.moderators ?? []),
           paymentRequired: found.pr,
           url: found.url,
-          ...(origin ? { origin, oneClick: new OneClick({ fetch: fetcher }) } : {}),
+          ...(origin
+            ? {
+                origin,
+                oneClick: new OneClick({ fetch: fetcher }),
+                onQuote: async (quote) => {
+                  source = quotedSource(quote, origin.sourceAsset);
+                  await confirmPayment(source);
+                },
+              }
+            : {}),
           submitBase: async (payment) => {
             const r = await response(found.url, fetcher, { 'PAYMENT-SIGNATURE': payment });
             await r.body?.cancel();
             if (![200, 206, 402, 503].includes(r.status))
-              throw new Error('payment submission failed');
+              throw new AdapterError(
+                'host_payment_failed',
+                `Payment submission failed: host HTTP ${r.status}. Keep the saved purchase and check status before retrying.`,
+              );
           },
-        })
-        .catch(async (error: unknown) => {
-          // Ledger corruption or storage failure must not replace the actionable quote refusal.
-          if (error instanceof OneClickRefused) await refundBudget?.().catch(() => {});
-          throw error;
         });
-      // Raw purchase records and signed payment payloads never cross the adapter boundary.
-      return {
-        purchaseId: bought.record.id,
-        fileId: found.fileId,
-        route: bought.route,
-        state: bought.uncertain
-          ? 'uncertain'
-          : bought.instructions
-            ? 'deposit_required'
-            : 'submitted',
-        ...(bought.uncertain ? { txHash: bought.uncertain.txHash } : {}),
-        backup: backupPath(c, bought.record.id),
-        ...(bought.instructions ? { instructions: bought.instructions } : {}),
-        next: 'Fund the deposit if instructed, then check status and open this purchase.',
-      };
+        // Raw purchase records and signed payment payloads never cross the adapter boundary.
+        return {
+          purchaseId: bought.record.id,
+          fileId: found.fileId,
+          route: bought.route,
+          state: bought.uncertain
+            ? 'uncertain'
+            : bought.instructions
+              ? 'deposit_required'
+              : 'submitted',
+          ...(bought.uncertain ? { txHash: bought.uncertain.txHash } : {}),
+          backup: backupPath(c, bought.record.id),
+          ...(bought.instructions ? { instructions: bought.instructions } : {}),
+          ...(source ? { source } : {}),
+          next: 'Fund the deposit if instructed, then check status and open this purchase.',
+        };
+      } catch (error) {
+        // A 1Click failure before this return has not handed out a deposit address.
+        if (origin) await refundBudget?.().catch(() => {});
+        throw error;
+      }
     }
     if (o.command === 'recover') {
       if (!o.recovery || (o.purchase && !isId(o.purchase))) throw usage();
@@ -693,7 +797,10 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     if (!fileId) throw usage();
     if (o.wallet || env.ANNON_WALLET) await wallet();
     if (!(await sdk.accept(record, recovery?.purchase_id ?? record?.id)))
-      throw new Error('purchase is not accepted; check status and resume');
+      throw new AdapterError(
+        'settlement_processing',
+        publicError({ code: 'settlement_processing' }).message,
+      );
     const resource = await resources.load(fileId);
     let file: Uint8Array;
     const local = o.file ?? (o.purchase ? o.target : undefined);

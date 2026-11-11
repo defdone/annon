@@ -19,7 +19,13 @@ import {
   view,
 } from '../near/rpc.js';
 import { registerText, reopenSellerText, reopenText, stopSalesText } from '../near/texts.js';
-import { type Deposit, OneClick, type Origin } from '../oneclick/oneclick.js';
+import {
+  type Deposit,
+  OneClick,
+  type OneClickQuote,
+  OneClickQuoteExpired,
+  type Origin,
+} from '../oneclick/oneclick.js';
 import {
   type EncryptedRecord,
   encryptedPurchaseStore,
@@ -105,6 +111,8 @@ export interface BuyOptions {
   url?: string;
   oneClick?: Pick<OneClick, 'quote'>;
   origin?: Origin;
+  /** Review the live 1Click quote after its encrypted backup is saved, before recovery proof and deposit instructions. */
+  onQuote?: (quote: OneClickQuote) => void | Promise<void>;
   /** Submit the saved Base payload to the host/facilitator. Return only after its request completes. */
   submitBase?: (header: string) => Promise<void>;
 }
@@ -293,19 +301,23 @@ export class Annon {
       base: null,
     };
     termsHash(terms, assets); // Validate all local terms before even creating a Base split.
+    let baseSplit: SellRecord['baseSplit'];
     if (o.base) {
       if (recipients.some((r) => r.identity.kind !== 'evm'))
         throw new TypeError('Base split requires only EVM recipients');
+      const kind = o.base.kind ?? 'push';
+      const salt = `0x${randomHex(32)}`;
       const split = createSplit(
-        o.base.kind ?? 'push',
+        kind,
         {
           recipients: recipients.map((r) => r.identity.id),
           allocations: recipients.map((r) => BigInt(r.bps)),
           totalAllocation: 10000n,
           distributionIncentive: 0,
         },
-        `0x${randomHex(32)}`,
+        salt,
       );
+      baseSplit = { address: split.address, kind, salt };
       terms.base = { usdc: config.usdc, price: o.base.price, pay_to: split.address };
       termsHash(terms, assets);
       await o.base.sendTransaction(split);
@@ -316,6 +328,7 @@ export class Annon {
       id: `sell:${fileId}`,
       revision: 0,
       terms,
+      ...(baseSplit ? { baseSplit } : {}),
       fileKey: hex(fileKey),
       sellerSecret: hex(key.secret),
       deadline: this.now() + 540,
@@ -493,7 +506,13 @@ export class Annon {
     )
       throw new PayError('store_conflict');
     ckd.fill(0);
-    return { terms: job.terms, file, header, preview: s.preview };
+    return {
+      terms: job.terms,
+      ...(job.baseSplit ? { baseSplit: job.baseSplit } : {}),
+      file,
+      header,
+      preview: s.preview,
+    };
   }
   async buy(o: BuyOptions): Promise<Bought> {
     if (typeof o.maxPrice !== 'bigint' || o.maxPrice <= 0n || o.maxPrice >= 2n ** 128n)
@@ -542,12 +561,16 @@ export class Annon {
     const message = buildPurchaseMessage(p, assets);
     parsePurchaseMessage(message, assets);
     const proofText = `Annon: verify purchase recovery\ncontract: ${this.o.contractId}\npurchase: ${id}\nrecovery: ${identityText(recovery)}`;
-    if (recovery.kind === 'near') {
-      const w = asNear(o.recovery);
-      if (!w.proveControl)
-        throw new Error('NEAR recovery requires an account ownership proof before payment');
-      await w.proveControl(proofText, { contractId: this.o.contractId, nearRpc: this.o.nearRpc });
-    } else await this.auth(o.recovery, proofText);
+    const proveRecovery = async () => {
+      if (recovery.kind === 'near') {
+        const w = asNear(o.recovery);
+        if (!w.proveControl)
+          throw new Error('NEAR recovery requires an account ownership proof before payment');
+        await w.proveControl(proofText, { contractId: this.o.contractId, nearRpc: this.o.nearRpc });
+      } else await this.auth(o.recovery, proofText);
+    };
+    const deferProof = route === 'near-usdc' && o.payer?.identity.kind !== 'near' && o.onQuote;
+    if (!deferProof) await proveRecovery();
     if (route === 'base-usdc') {
       if (!o.paymentRequired || !o.url || !o.payer || !('signTypedData' in o.payer))
         throw new TypeError(
@@ -627,6 +650,17 @@ export class Annon {
     if (!(await this.store.compareAndSet(purchaseKey(id), record, next)))
       throw new PayError('store_conflict');
     record = next;
+    if (o.onQuote) {
+      await o.onQuote(quote);
+      const checkDeadline = () => {
+        const cutoff = Date.parse(quote.deposit.depositBefore);
+        if (!Number.isFinite(cutoff) || cutoff - this.now() * 1000 < 600000)
+          throw new OneClickQuoteExpired();
+      };
+      checkDeadline();
+      await proveRecovery();
+      checkDeadline();
+    }
     return { route, record, instructions: quote.deposit };
   }
   /** Resume a paid Base purchase before any host download, which requires a final grant. */

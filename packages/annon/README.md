@@ -2,6 +2,14 @@
 
 The SDK and `annon` CLI encrypt files, register terms, and release file keys after verified payment. Build with `pnpm build`; in this checkout use `node packages/annon/dist/node/main.js` for `annon`. Source execution (with your TypeScript runner) reads the generated `dist/browser/login-bundle.js`; run `pnpm --filter @defdone/annon build` first. Without the bundle login gives that build instruction. See [CLI.md](CLI.md) for deployment configuration, encrypted purchase backups, and existing commands. Humans buying files should use the browser purchase flow. The CLI serves developers and agents.
 
+## RPC configuration
+
+A file host, the CLI for Base purchases, and the relayer need a Base RPC endpoint with an API key. The public `https://mainnet.base.org` rate-limits the burst of reads made during settlement and unlocking. Set `baseRpc` in SDK/host options or CLI config, `ANNON_BASE_RPC` for the CLI, and `BASE_RPC` for the relayer. Keep API keys out of public files.
+
+A keeper polling every few seconds also needs a NEAR RPC endpoint with an API key. Set `nearRpc` in SDK/CLI config, `ANNON_NEAR_RPC` for the CLI, or `NEAR_RPC` for the relayer.
+
+Base `sell` results include `baseSplit: { address, kind, salt }` beside `terms`; encrypted sell records retain it through resume and publication. To call `readSplit` later, use `address` and `{ salt }`, and reconstruct the split from `terms.near.recipients` in their saved order: recipient identity IDs, allocations equal to `bps`, `totalAllocation: 10000n`, and `distributionIncentive: 0`. This metadata is outside the on-chain terms and their hash. Older sell records do not have it.
+
 ## Browser wallet login
 
 ```sh

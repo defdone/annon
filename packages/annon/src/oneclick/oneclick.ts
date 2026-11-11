@@ -72,6 +72,13 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener('abort', stop, { once: true });
   });
 }
+export class OneClickQuoteExpired extends Error {
+  readonly code = 'quote_expired';
+  constructor() {
+    super('The 1Click quote expired. Run buy again.');
+  }
+}
+
 /** Only recognized public service messages may cross the CLI/MCP boundary. */
 export class OneClickRefused extends Error {
   readonly code = 'oneclick_refused';
