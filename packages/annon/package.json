@@ -5,6 +5,9 @@
   "description": "Files only the buyer can open: encrypted on the client, the key released by NEAR once the payment is verified.",
   "license": "Apache-2.0",
   "type": "module",
+  "bin": {
+    "annon": "./dist/node/main.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -16,10 +19,11 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "CLI.md"
   ],
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "tsc --noEmit && tsc -p tsconfig.build.json",
     "dist": "rm -rf dist && tsc -p tsconfig.build.json",
     "test": "vitest run"
   },
