@@ -2,7 +2,14 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { terms as initial, must, purchase } from '../../test/fixtures.js';
 import { registerText } from '../near/texts.js';
-import { canonicalRequest, checkRelay, contractArgs, relay, resetRelayState } from './relay.js';
+import {
+  canonicalRequest,
+  checkRelay,
+  contractArgs,
+  relay,
+  relayStatus,
+  resetRelayState,
+} from './relay.js';
 
 const wallet = privateKeyToAccount(`0x${'44'.repeat(32)}`);
 const terms = { ...initial, seller: { kind: 'evm', id: wallet.address.toLowerCase() } as const };
@@ -184,6 +191,8 @@ it('returns a retryable pending state for a duplicate still waiting for its tx h
   const first = relay(r, { ...opts, sender });
   await entered;
   try {
+    expect(relayStatus(r, opts)).toBe('pending');
+    expect(relayStatus(r, { ...opts, nearRpc: 'https://other.rpc' })).toBeNull();
     await expect(relay(r, { ...opts, sender })).rejects.toMatchObject({ code: 'in_flight' });
   } finally {
     release({ transaction: { encode: () => new Uint8Array([1, 2, 3]) } });
@@ -218,6 +227,7 @@ it('returns the signed hash while the original POST is still awaiting send confi
   await entered;
   try {
     const retry = await relay(r, { ...opts, sender });
+    expect(relayStatus(r, opts)).toEqual(retry);
     expect(retry).toMatchObject({ txHash: expect.any(String), uncertain: true });
     expect(created).toHaveBeenCalledTimes(1);
   } finally {

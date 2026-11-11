@@ -219,6 +219,20 @@ async function originFor(
   return { asset, chain: kind, refundTo };
 }
 
+/**
+ * Wait for a relayer 429: seconds or an HTTP date, 5 s when absent or unreadable. Null when the
+ * relayer asks for more than a minute (an hourly IP budget): that wait is the caller's decision.
+ */
+export function retryAfterMs(header: string | null, now = Date.now()): number | null {
+  const delay = !header
+    ? NaN
+    : /^\d+$/.test(header)
+      ? Number(header) * 1000
+      : Date.parse(header) - now;
+  if (!Number.isFinite(delay)) return 5000;
+  return delay > 60_000 ? null : Math.max(0, delay);
+}
+
 export function createAdapter(env: Environment = process.env, d: Dependencies = {}) {
   const fetcher = d.fetch ?? globalThis.fetch;
   const wait = d.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -323,6 +337,11 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
             const body = (await r.json()) as { error?: string };
             if (body.error === 'duplicate') throw new Error('relayer in flight; retry');
           }
+          if (r.status === 429) {
+            const delay = retryAfterMs(r.headers.get('Retry-After'));
+            if (delay === null) throw new Error('relayer refused: rate limited');
+            throw Object.assign(new Error('relayer rate limited; retry'), { retryAfterMs: delay });
+          }
           if (![200, 202].includes(r.status)) throw new Error('relayer refused');
           const body = (await r.json()) as { txHash?: string; signer?: string; pending?: boolean };
           if (r.status === 202 && body.pending === true)
@@ -350,7 +369,7 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
           );
         throw new Error(`transaction ${result.state}`);
       };
-      // Only repeat idempotent release requests. Registration and payment are never blindly retried.
+      // Timeouts repeat only idempotent releases. A 429 explicitly refused admission.
       let timeouts = 0;
       let pending = 0;
       for (;;) {
@@ -358,15 +377,22 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
           return await call();
         } catch (error) {
           const inFlight = /in flight/i.test(error instanceof Error ? error.message : '');
+          const limited = /relayer rate limited/i.test(error instanceof Error ? error.message : '');
           const timeout = /timeout|timed out/i.test(error instanceof Error ? error.message : '');
           if (
-            !['unlock', 'reopen', 'claim_key'].includes(method) ||
-            (!inFlight && !timeout) ||
-            (inFlight ? pending++ >= 36 : timeouts++ >= 2)
+            (!limited && !['unlock', 'reopen', 'claim_key'].includes(method)) ||
+            (!inFlight && !limited && !timeout) ||
+            (inFlight || limited ? pending++ >= 36 : timeouts++ >= 2)
           )
             throw error;
           d.notify?.('Key release pending; retrying the saved request.');
-          await wait(inFlight ? 5000 : 1000 * 2 ** (timeouts - 1));
+          await wait(
+            limited
+              ? (error as Error & { retryAfterMs: number }).retryAfterMs
+              : inFlight
+                ? 5000
+                : 1000 * 2 ** (timeouts - 1),
+          );
         }
       }
     };
@@ -464,14 +490,11 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
       const maxPrice = BigInt(amount(cap));
       if (c.maxPrice && maxPrice > BigInt(amount(c.maxPrice)))
         return fail('price_above_max', 'The requested cap exceeds the configured maximum.', 2);
-      if (
-        d.agent &&
-        !/^https?:/.test(o.target) &&
-        (!o.url || !c.allowedResources?.some((url) => sameResource(url, o.url ?? '')))
-      )
+      const resource = /^https?:/.test(o.target) ? o.target : o.url;
+      if (d.agent && (!resource || !c.allowedResources?.some((url) => sameResource(url, resource))))
         return fail(
           'resource_not_allowed',
-          'Offer-file purchases require a human-allowed resource URL.',
+          'Agent purchases require a human-allowed resource URL.',
           2,
         );
       if (d.agent && (o.refundTo || o.fromChain || o.fromAsset))

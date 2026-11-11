@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Annon } from '../../packages/annon/src/api/annon.ts';
 import { createAdapter } from '../../packages/annon/src/node/adapter.ts';
 import {
@@ -32,6 +32,7 @@ const config = (over: Partial<Config> = {}): Config => ({
 const ok = async () => ({ txHash: 'H' });
 const body = JSON.stringify({ method: 'unlock', args: { file_id: `0x${'11'.repeat(32)}` } });
 beforeEach(() => hits.clear());
+afterEach(() => vi.unstubAllGlobals());
 
 describe('relayer HTTP', () => {
   it('says what it sponsors, and relays a request', async () => {
@@ -138,6 +139,31 @@ describe('relayer HTTP', () => {
       body: { error: 'internal', message: 'unexpected error' },
     });
   });
+
+  it.each(['pending', 'outcome'] as const)(
+    'does not charge admitted %s polling against the IP or daily budget',
+    async (mode) => {
+      const c = config({ perIpHour: 1, perDay: 1 });
+      const result = { txHash: 'H', uncertain: true as const };
+      const send = vi.fn(async () => result);
+      const lookup = vi.fn(() => (mode === 'pending' ? ('pending' as const) : result));
+      expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, send)).status).toBe(202);
+      for (let i = 0; i < 3; i++) {
+        const poll = await handle(c, 'POST', '/v1/relay', 'buyer', body, send, lookup);
+        expect(poll.status).toBe(202);
+        expect(poll.body).toMatchObject(
+          mode === 'pending' ? { pending: true } : { txHash: 'H', uncertain: true },
+        );
+      }
+      expect(hits.get('ip:buyer')?.n).toBe(1);
+      expect(hits.get('day')?.n).toBe(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(lookup).toHaveBeenCalledTimes(3);
+      expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, send, () => null)).status).toBe(
+        429,
+      );
+    },
+  );
 
   it('limits each address per hour and the whole day, counting only what was sent', async () => {
     const c = config({ perIpHour: 2, perDay: 1 });
@@ -324,7 +350,13 @@ describe.runIf(process.env.ANNON_TEST_CONTAINER === '1')(
 );
 
 describe('adapter to relayer boundary without a signing transport', () => {
-  it.each(['outcome', 'lost-post-pending', 'legacy-duplicate'] as const)(
+  it.each([
+    'outcome',
+    'lost-post-pending',
+    'legacy-duplicate',
+    'rate-limited-seconds',
+    'rate-limited-date',
+  ] as const)(
     'passes claim_key through the relayer and handles %s without reposting a known hash',
     async (mode) => {
       const dir = await mkdtemp(join(tmpdir(), 'annon-relay-boundary-'));
@@ -344,6 +376,19 @@ describe('adapter to relayer boundary without a signing transport', () => {
         if (String(url).endsWith('/v1/relay')) {
           httpRequests++;
           if (mode !== 'outcome' && httpRequests === 1) throw new Error('POST timed out');
+          if (mode.startsWith('rate-limited') && httpRequests === 2)
+            return Response.json(
+              { error: 'rate_limited' },
+              {
+                status: 429,
+                headers: {
+                  'Retry-After':
+                    mode === 'rate-limited-seconds'
+                      ? '7'
+                      : new Date(Date.now() + 7000).toUTCString(),
+                },
+              },
+            );
           if (mode === 'legacy-duplicate' && httpRequests === 2)
             return Response.json({ error: 'duplicate' }, { status: 409 });
           if (mode === 'lost-post-pending' && httpRequests === 2)
@@ -411,7 +456,7 @@ describe('adapter to relayer boundary without a signing transport', () => {
         });
       });
       vi.stubGlobal('fetch', fetcher);
-      const wait = vi.fn(async () => {});
+      const wait = vi.fn(async (_ms: number) => {});
       const adapter = createAdapter(
         { ANNON_BACKUP_SECRET: 'ab'.repeat(32) },
         {
@@ -442,6 +487,9 @@ describe('adapter to relayer boundary without a signing transport', () => {
         expect(wire).toEqual(args);
         expect(httpRequests).toBe(mode === 'outcome' ? 1 : 3);
         expect(lookups).toBe(2);
+        if (mode === 'rate-limited-seconds') expect(wait).toHaveBeenCalledWith(7000);
+        if (mode === 'rate-limited-date')
+          expect(wait.mock.calls.some(([ms]) => ms > 5900 && ms <= 7000)).toBe(true);
         expect(wait).toHaveBeenCalledWith(1000);
       } finally {
         vi.unstubAllGlobals();

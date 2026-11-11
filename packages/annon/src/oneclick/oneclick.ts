@@ -148,11 +148,10 @@ export class OneClick {
     if (!Number.isFinite(deadline) || deadline < depositCutoff * 1000)
       throw new Error('1Click deposit address deadline expires before the deposit cutoff');
     if (
-      q.timeEstimate !== undefined &&
-      (typeof q.timeEstimate !== 'number' ||
-        !Number.isFinite(q.timeEstimate) ||
-        q.timeEstimate < 0 ||
-        q.timeEstimate > 600)
+      typeof q.timeEstimate !== 'number' ||
+      !Number.isFinite(q.timeEstimate) ||
+      q.timeEstimate < 0 ||
+      q.timeEstimate > 600
     )
       throw new Error('1Click delivery estimate exceeds purchase delivery window');
     if (typeof q.amountIn !== 'string' || uint(q.amountIn, 128) === 0n)

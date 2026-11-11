@@ -9,6 +9,7 @@ import { Annon, type AnnonOptions, SellError } from '../../annon/src/api/annon.j
 import { parseHeader, sealWithKey, sha256 } from '../../annon/src/envelope/pay2.js';
 import { keyFromSecret } from '../../annon/src/keys/near-ckd.js';
 import type { FileInfo } from '../../annon/src/near/rpc.js';
+import * as adapterModule from '../../annon/src/node/adapter.js';
 import { createAdapter } from '../../annon/src/node/adapter.js';
 import type { Input } from '../../annon/src/node/cli.js';
 import { runCli } from '../../annon/src/node/cli.js';
@@ -99,6 +100,7 @@ async function harness() {
         quoteRequest: JSON.parse(String(init?.body)),
         quote: {
           deadline: JSON.parse(String(init?.body)).deadline,
+          timeEstimate: 35,
           amountIn: '210000',
           amountOut: '200000',
           depositAddress: 'deposit-address',
@@ -276,6 +278,50 @@ async function connect(execute: (o: Input) => Promise<Record<string, unknown>>) 
     },
   };
 }
+it('creates the production MCP adapter in agent mode', async () => {
+  const factory = vi.spyOn(adapterModule, 'createAdapter').mockReturnValue(async () => ({}));
+  const server = createServer();
+  try {
+    expect(factory).toHaveBeenCalledExactlyOnceWith(process.env, { agent: true });
+  } finally {
+    await server.close();
+  }
+});
+
+it.each(['refundTo', 'fromChain', 'fromAsset'] as const)(
+  'the adapter directly refuses agent-controlled %s',
+  async (field) => {
+    const h = await harness();
+    await expect(
+      h.adapter({
+        ...h.defaults,
+        command: 'buy',
+        target: h.offerFile,
+        [field]: 'attacker',
+      }),
+    ).rejects.toMatchObject({ code: 'origin_not_allowed' });
+    expect(h.calls).toEqual([]);
+    expect(h.fetcher).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['offer file', 'HTTPS URL'])(
+  'the adapter directly refuses an unapproved %s resource',
+  async (source) => {
+    const h = await harness();
+    await expect(
+      h.adapter({
+        ...h.defaults,
+        command: 'buy',
+        target: source === 'offer file' ? h.offerFile : 'https://attacker.example/file',
+        url: 'https://attacker.example/file',
+      }),
+    ).rejects.toMatchObject({ code: 'resource_not_allowed' });
+    expect(h.calls).toEqual([]);
+    expect(h.fetcher).not.toHaveBeenCalled();
+  },
+);
+
 describe('stdio MCP tools through SDK adapters (no network)', () => {
   it('publishes strict schemas and routes sell, buy, open, recover, verify and status without secrets', async () => {
     const h = await harness();

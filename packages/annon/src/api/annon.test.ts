@@ -14,6 +14,7 @@ import {
   importSell,
   importSellerKey,
   newBackupSecret,
+  type SellerKeyRecord,
 } from '../pay/backup.js';
 import type { typedData } from '../pay/eip3009.js';
 import { paymentRequired } from '../pay/seller.js';
@@ -744,6 +745,70 @@ describe('high-level one-model API', () => {
       resumed.resumeSell({ fileId, data: new Uint8Array([9]), seller: wallet, publish }),
     ).rejects.toThrow(/published/);
   });
+  it('reopenSeller clears its one-time secret in current state and backup before returning', async () => {
+    const h = harness();
+    const store = encryptedSellerKeyStore(h.raw, h.backupSecret);
+    const keyName = `annon/seller-key/${h.terms.file_id}`;
+    h.send.mockImplementationOnce(async (method, args) => {
+      expect(method).toBe('reopen_seller');
+      const pending = must(await store.load(keyName));
+      expect(pending.buyerSecret).toBeTruthy();
+      expect(await importSellerKey(must(h.backups.get(pending.id)), h.backupSecret)).toEqual(
+        pending,
+      );
+      const { key } = (args as { args: { key: string } }).args;
+      const sig = hashPoint(pk, fileAppId(h.terms.contract, bytes(h.terms.file_id, 32))).multiply(
+        msk,
+      );
+      return {
+        big_y: `bls12381g1:${base58.encode(bls.G1.Point.BASE.multiply(77n).toBytes(true))}`,
+        big_c: `bls12381g1:${base58.encode(sig.add(bls.G1.Point.fromBytes(bytes(key, 48)).multiply(77n)).toBytes(true))}`,
+      };
+    });
+    expect(await h.sdk.reopenSeller({ fileId: h.terms.file_id, seller: wallet })).toHaveLength(48);
+    const cleaned = must(await store.load(keyName));
+    expect(cleaned).toMatchObject({ buyerSecret: null, revision: 1 });
+    expect(await importSellerKey(must(h.backups.get(cleaned.id)), h.backupSecret)).toEqual(cleaned);
+  });
+
+  it('finishSell clears a retained seller-key secret independently of reopenSeller', async () => {
+    const h = harness();
+    const fileId = h.terms.file_id;
+    const store = encryptedSellerKeyStore(h.raw, h.backupSecret);
+    const keyName = `annon/seller-key/${fileId}`;
+    const retained: SellerKeyRecord = {
+      kind: 'seller-key',
+      id: `seller-key:${fileId}`,
+      file_id: fileId,
+      seller: wallet.identity,
+      revision: 0,
+      buyerSecret: hex(new Uint8Array(32).fill(7)),
+      deadline: now + 540,
+    };
+    expect(await store.compareAndSet(keyName, null, retained)).toBe(true);
+    const reopen = vi.spyOn(h.sdk, 'reopenSeller');
+    await h.sdk.sell({
+      data: body,
+      name: 'x',
+      mime: '',
+      seller: wallet,
+      fileId,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: async (file) => {
+        expect((await store.load(keyName))?.buyerSecret).toBe(retained.buyerSecret);
+        await h.publish(file);
+      },
+    });
+    expect(reopen).not.toHaveBeenCalled();
+    const cleaned = must(await store.load(keyName));
+    expect(cleaned).toMatchObject({ buyerSecret: null, revision: 1 });
+    expect(await importSellerKey(must(h.backups.get(cleaned.id)), h.backupSecret)).toEqual(cleaned);
+  });
+
   it('reads CKD keys from the configured MPC domain, with explicit overrides pinned to it', async () => {
     const h = harness();
     const globalFetch = globalThis.fetch;
@@ -783,9 +848,31 @@ describe('high-level one-model API', () => {
     expect(observed).toContainEqual({ account: 'v1.signer', args: { domain_id: 2 } });
   });
 
-  it('reopens a seller on a fresh device without an existing sell job', async () => {
+  it('reopens a seller on a fresh device after published sell cleanup', async () => {
     const h = harness();
-    const sdk = new Annon({ ...h.config, rawStore: memoryStore<EncryptedRecord>() });
+    await h.sdk.sell({
+      data: body,
+      name: 'x',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    });
+    expect(
+      await importSell(must(h.backups.get(`sell:${h.terms.file_id}`)), h.backupSecret),
+    ).toMatchObject({
+      published: true,
+      fileKey: null,
+      sellerSecret: null,
+      ckdSecret: null,
+    });
+    const freshStore = memoryStore<EncryptedRecord>();
+    const sdk = new Annon({ ...h.config, rawStore: freshStore });
+    expect(await freshStore.load(`annon/sell/${h.terms.file_id}`)).toBeNull();
     const original = must(h.send.getMockImplementation());
     h.send.mockImplementation(async (method, args) => {
       if (method !== 'reopen_seller') return original(method, args);

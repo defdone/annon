@@ -182,3 +182,15 @@ it('refuses a quote with insufficient delivery time before giving deposit instru
   ).rejects.toThrow(/delivery/);
   expect(fetcher).not.toHaveBeenCalled();
 });
+
+it('refuses a quote missing the required timeEstimate before giving deposit instructions', async () => {
+  const c = new OneClick({
+    now: () => now,
+    fetch: async (_url, init) => {
+      const response = recorded(JSON.parse(String(init?.body)));
+      delete response.quote.timeEstimate;
+      return Response.json(response);
+    },
+  });
+  await expect(c.quote(message, origin)).rejects.toThrow(/delivery estimate/);
+});
