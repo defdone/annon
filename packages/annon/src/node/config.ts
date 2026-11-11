@@ -2,12 +2,12 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { secureUrl } from '../download/download.js';
-import { sameResource } from '../download/proof.js';
 import { fileStore } from '../pay/store-node.js';
 import { account, network } from '../settle-near/codec.js';
 import { agentPolicy, configPath, type SignerConfig, validateSigner } from './agent.js';
 import type { Input } from './cli.js';
 import { AdapterError } from './errors.js';
+import { resourceAllowed } from './resources.js';
 import type { Environment } from './wallets.js';
 
 export interface Config {
@@ -27,6 +27,8 @@ export interface Config {
   moderators?: string[];
   origins?: Record<string, { fromChain: string; fromAsset: string; refundTo?: string }>;
   allowedResources?: string[];
+  storageBudget?: string;
+  maxProtocolFee?: { fixed: string; bps: number };
 }
 export async function loadConfig(
   o: Input,
@@ -84,6 +86,20 @@ export async function loadConfig(
         throw new Error('invalid working directory');
       c.workDir = workDir;
     }
+    if (file.maxProtocolFee !== undefined) {
+      const fee = file.maxProtocolFee;
+      if (
+        !fee ||
+        typeof fee.fixed !== 'string' ||
+        !/^(0|[1-9][0-9]*)$/.test(fee.fixed) ||
+        !Number.isSafeInteger(fee.bps) ||
+        fee.bps < 0 ||
+        fee.bps >= 10000
+      )
+        throw new Error('invalid protocol fee ceiling');
+      c.maxProtocolFee = fee;
+    }
+    if (file.storageBudget !== undefined) c.storageBudget = file.storageBudget;
     if (file.signer) c.signer = validateSigner(file.signer);
     if (file.dailyBudget !== undefined) {
       if (
@@ -124,9 +140,21 @@ export async function loadConfig(
       }
     }
     const allowedResources = agent
-      ? (file.allowedResources ?? []).filter(
-          (url) => !envResources || envResources.some((other) => sameResource(url, other)),
-        )
+      ? file.allowedResources === undefined
+        ? envResources
+        : envResources === undefined
+          ? file.allowedResources
+          : Array.from(
+              new Set(
+                file.allowedResources.flatMap((rule) =>
+                  envResources
+                    .filter((other) => resourceAllowed([rule], other))
+                    .concat(
+                      envResources.some((other) => resourceAllowed([other], rule)) ? [rule] : [],
+                    ),
+                ),
+              ),
+            )
       : (envResources ?? file.allowedResources);
     if (allowedResources !== undefined) c.allowedResources = allowedResources;
     const envMax = env.ANNON_MAX_PRICE;

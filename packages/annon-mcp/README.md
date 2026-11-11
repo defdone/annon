@@ -13,8 +13,10 @@ env/config or prior human CLI trust. They are rejected as tool arguments. Config
 USDC `maxPrice` in the pinned config before using `annon_buy`; a tool cannot override this cap.
 MCP always applies agent policy. `ANNON_STATE_DIR` is ignored; configure `stateDir` in the
 operator config. Config `maxPrice` is required and `ANNON_MAX_PRICE` can only lower it.
-`ANNON_ALLOWED_RESOURCES`, when present, intersects config `allowedResources`; it cannot add
-URLs. This applies to every agent-mode trigger. The launcher flag `ANNON_AGENT=true` pins the
+`allowedResources` is optional: absence permits any HTTPS URL or HTTP localhost URL
+within mandatory `maxPrice` and `dailyBudget`. When present, exact URLs and same-origin
+path prefixes ending in `/*` restrict purchases; an empty list denies all.
+`ANNON_ALLOWED_RESOURCES`, when present, further restricts this policy. This applies to every agent-mode trigger. The launcher flag `ANNON_AGENT=true` pins the
 config to `~/.config/annon/config.json`; the other triggers use the operator-selected config.
 Set `ANNON_MODERATORS` (comma-separated) or config `moderators` for buyer moderator trust.
 
@@ -27,13 +29,14 @@ Tools use camelCase versions of CLI flags, with `target` as the positional opera
 | `annon_open` | `target`, `output` | Plaintext output path, byte count, payment summary when saved |
 | `annon_verify` | `target` | Registered file ID, verification scope |
 | `annon_recover` | `recovery` | Purchase IDs, final grant numbers, encrypted backup paths |
+| `annon_budget` | `target` | Available file storage and admission requirement in yoctoNEAR |
 | `annon_status` | `target` | Final NEAR purchase state, payment summary when saved; pending does not mean payment failed |
 
 `annon_buy` accepts `route: "near" | "base" | "1click"`, `origin`, `recovery`, and `url`.
 `origin` names an entry in human config `origins` or JSON `ANNON_ORIGINS`; its `fromChain`,
 `fromAsset` and optional `refundTo` cannot be supplied by a tool. Refunds use human configuration
 or the matching wallet address. Tools cannot choose arbitrary source assets or redirect refunds.
-Agent purchases refuse local offer files. `target` must be a human-allowlisted resource URL.
+Agent purchases refuse local offer files. `target` must be a secure resource URL within any configured allowlist.
 The adapter fetches its offer from that URL and checks that the advertised resource matches it.
 The offer header must share the resource origin. An optional `url` cannot authorize an offer file.
 URLs accept HTTPS, and plain HTTP only for `localhost`, `127.0.0.1` or `[::1]`,
@@ -81,3 +84,13 @@ summary when the saved purchase and backup secret are available; older records c
 source details. Payment summaries contain no deposit address or signed authorization.
 Payment reporting is best-effort: unreadable records or secrets omit `payment` without blocking accepted status or recovery open.
 Top-level `route` is the contract route (`near-usdc`/`base-usdc`); `payment.route` is how the buyer paid (`near`/`base`/`1click`).
+
+`annon_sell` accepts no storage-budget argument. A self-funded NEAR listing uses decimal
+NEAR `storageBudget` from human configuration; sponsored listings receive the relayer's
+bounded allocation. Result `terms` includes the final treasury split. NEAR and 1Click buys
+return fixed code `file_storage_low` before paying when storage funding is insufficient.
+`annon_budget` is read-only. Funding is human-only and has no MCP tool; agent-mode
+`fund` returns `human_only`. The human CLI can allocate nonwithdrawable file funding.
+Config `maxProtocolFee` defaults to `{ "fixed": "30000", "bps": 100 }` in USDC base units
+plus basis points. MCP sells refuse higher advertised fees with `protocol_fee_above_max`.
+Agent resource URLs refuse encoded path separators `%2f` and `%5c` in every case.

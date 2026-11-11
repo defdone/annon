@@ -21,6 +21,8 @@ export type PayErrorCode =
   | 'unknown_moderator'
   | 'price_mismatch'
   | 'price_above_max'
+  | 'file_storage_low'
+  | 'protocol_fee_above_max'
   | 'recipient_mismatch'
   | 'file_mismatch'
   | 'network_mismatch'

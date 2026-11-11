@@ -68,6 +68,7 @@ function harness(seller: Identity = wallet.identity) {
   >();
   const grants = new Map<string, string>();
   const blockedFiles = new Set<string>();
+  let storageBalance = 10n ** 24n;
   let baseCode = '0x';
   let baseBalance = 1000000n;
   const calls: {
@@ -131,60 +132,65 @@ function harness(seller: Identity = wallet.identity) {
       }
       const a = JSON.parse(Buffer.from(q.params.args_base64, 'base64').toString());
       const result =
-        q.params.method_name === 'public_key'
-          ? mpcKey
-          : q.params.method_name === 'get_file'
-            ? blockedFiles.has(a.file_id)
-              ? {
-                  terms: { ...terms, file_id: a.file_id },
-                  terms_hash: termsHash({ ...terms, file_id: a.file_id }),
-                  header_hash: null,
-                  sales_stopped_at: null,
-                  taken_down: 'court_order',
-                }
-              : {
-                  terms,
-                  terms_hash: termsHash(terms, { nearUsdc: terms.near.token }),
-                  header_hash: header
-                    ? hex(
-                        await (await import('../envelope/pay2.js')).sha256(
-                          header.subarray(0, header.length - 65),
-                        ),
-                      )
-                    : null,
-                  sales_stopped_at: null,
-                  taken_down: null,
-                }
-            : q.params.method_name === 'get_purchase'
-              ? purchases.has(a.purchase_id)
+        q.params.method_name === 'file_storage_balance'
+          ? {
+              available: storageBalance.toString(),
+              admission_requirement: '40960000000000000000000',
+            }
+          : q.params.method_name === 'public_key'
+            ? mpcKey
+            : q.params.method_name === 'get_file'
+              ? blockedFiles.has(a.file_id)
                 ? {
-                    route: 'near-usdc',
-                    delivery: 0,
-                    accepted_at: now,
-                    ...purchases.get(a.purchase_id),
+                    terms: { ...terms, file_id: a.file_id },
+                    terms_hash: termsHash({ ...terms, file_id: a.file_id }),
+                    header_hash: null,
+                    sales_stopped_at: null,
+                    taken_down: 'court_order',
                   }
-                : null
-              : q.params.method_name === 'get_grant'
-                ? grants.has(`${a.purchase_id}:${a.grant}`)
+                : {
+                    terms,
+                    terms_hash: termsHash(terms, { nearUsdc: terms.near.token }),
+                    header_hash: header
+                      ? hex(
+                          await (await import('../envelope/pay2.js')).sha256(
+                            header.subarray(0, header.length - 65),
+                          ),
+                        )
+                      : null,
+                    sales_stopped_at: null,
+                    taken_down: null,
+                  }
+              : q.params.method_name === 'get_purchase'
+                ? purchases.has(a.purchase_id)
                   ? {
-                      purchase_id: a.purchase_id,
-                      grant: a.grant,
-                      buyer_key: grants.get(`${a.purchase_id}:${a.grant}`),
+                      route: 'near-usdc',
+                      delivery: 0,
+                      accepted_at: now,
+                      ...purchases.get(a.purchase_id),
                     }
                   : null
-                : q.params.method_name === 'get_config'
-                  ? {
-                      network: 'near:mainnet',
-                      near_usdc: terms.near.token,
-                      intents: 'intents.near',
-                      mpc: 'v1.signer',
-                      ckd_domain: 2,
-                      foreign_tx_domain: 3,
-                      usdc: initial.base?.usdc,
-                    }
-                  : q.params.method_name === 'purchases_of'
-                    ? [...purchases.keys()].slice(a.from, a.from + a.limit)
-                    : null;
+                : q.params.method_name === 'get_grant'
+                  ? grants.has(`${a.purchase_id}:${a.grant}`)
+                    ? {
+                        purchase_id: a.purchase_id,
+                        grant: a.grant,
+                        buyer_key: grants.get(`${a.purchase_id}:${a.grant}`),
+                      }
+                    : null
+                  : q.params.method_name === 'get_config'
+                    ? {
+                        network: 'near:mainnet',
+                        near_usdc: terms.near.token,
+                        intents: 'intents.near',
+                        mpc: 'v1.signer',
+                        ckd_domain: 2,
+                        foreign_tx_domain: 3,
+                        usdc: initial.base?.usdc,
+                      }
+                    : q.params.method_name === 'purchases_of'
+                      ? [...purchases.keys()].slice(a.from, a.from + a.limit)
+                      : null;
       return {
         json: async () => ({
           id: q.id,
@@ -210,6 +216,9 @@ function harness(seller: Identity = wallet.identity) {
   const sdk = new Annon(config);
   return {
     sdk,
+    set storageBalance(value: bigint) {
+      storageBalance = value;
+    },
     set baseCode(value: string) {
       baseCode = value;
     },
@@ -1397,6 +1406,195 @@ it.each(['valid', 'absent', 'invalid'] as const)(
     );
   },
 );
+
+for (const route of ['near', '1click'] as const)
+  it(`refuses ${route} payment before recovery or payment when the file budget is low`, async () => {
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'test',
+      mime: 'text/plain',
+      seller: wallet,
+      near: {
+        price: initial.near.price,
+        recipients: initial.near.recipients,
+        remainder: must(initial.near.recipients[0]).identity,
+      },
+      publish: h.publish,
+    });
+    h.storageBalance = 0n;
+    const proveControl = vi.fn();
+    const transferPurchase = vi.fn();
+    const quote = vi.fn();
+    const payer = {
+      identity: { kind: 'near' as const, id: 'buyer.test' },
+      authorize: vi.fn(),
+      proveControl,
+      call: vi.fn(),
+      transferPurchase,
+    };
+    await expect(
+      h.sdk.buy({
+        fileId: h.terms.file_id,
+        header: h.header,
+        recovery: { identity: { kind: 'near', id: 'buyer.test' }, authorize: vi.fn() },
+        refund: wallet.identity,
+        maxPrice: 1000000n,
+        ...(route === 'near'
+          ? { payer }
+          : {
+              origin: { asset: 'nep141:origin', chain: 'near' as const, refundTo: 'buyer.test' },
+              oneClick: { quote },
+            }),
+      }),
+    ).rejects.toMatchObject({ code: 'file_storage_low' });
+    expect(proveControl).not.toHaveBeenCalled();
+    expect(transferPurchase).not.toHaveBeenCalled();
+    expect(quote).not.toHaveBeenCalled();
+  });
+
+it('adds the advertised treasury fee before seller review and registration', async () => {
+  const h = harness();
+  const treasury = { kind: 'evm', id: `0x${'77'.repeat(20)}` } as const;
+  const fee = { fixed: '30000', bps: 100, treasuryNear: treasury, treasuryEvm: treasury };
+  const sdk = new Annon({ ...h.config, sponsorship: async () => ({ fee }) });
+  const onSplit = vi.fn(async (split) => {
+    expect(h.calls).toHaveLength(0);
+    expect(
+      split.recipients.find(
+        (r: { identity: Identity; bps: number }) => r.identity.id === treasury.id,
+      )?.bps,
+    ).toBe(1600);
+  });
+  const result = await sdk.sell({
+    data: body,
+    name: 'test',
+    mime: 'text/plain',
+    seller: wallet,
+    near: {
+      price: initial.near.price,
+      recipients: initial.near.recipients,
+      remainder: must(initial.near.recipients[0]).identity,
+    },
+    onSplit,
+    publish: h.publish,
+  });
+  expect(onSplit).toHaveBeenCalledTimes(1);
+  expect(result.terms.near.recipients).toEqual(onSplit.mock.calls[0]?.[0].recipients);
+  expect(result.terms.near.recipients.reduce((n, r) => n + r.bps, 0)).toBe(10000);
+});
+
+it('never automatically replenishes a spent file after an uncertain sell funding call', async () => {
+  const identity = { kind: 'near', id: 'seller.test' } as const;
+  const h = harness(identity);
+  h.storageBalance = 0n;
+  const call = vi.fn(async () => {
+    throw new Error('funding response lost');
+  });
+  const seller = { identity, authorize: async () => undefined, call, transferPurchase: vi.fn() };
+  await expect(
+    h.sdk.sell({
+      fileId: initial.file_id,
+      data: body,
+      name: 'test',
+      mime: 'text/plain',
+      seller,
+      near: {
+        price: initial.near.price,
+        recipients: initial.near.recipients,
+        remainder: must(initial.near.recipients[0]).identity,
+      },
+      storageBudget: 5n * 10n ** 22n,
+      publish: h.publish,
+    }),
+  ).rejects.toThrow('funding response lost');
+  expect(call).toHaveBeenCalledTimes(1);
+  h.storageBalance = 0n;
+  await expect(
+    h.sdk.resumeSell({ fileId: initial.file_id, data: body, seller, publish: h.publish }),
+  ).rejects.toBeDefined();
+  expect(call).toHaveBeenCalledTimes(1);
+  h.storageBalance = 5n * 10n ** 22n; // explicit operator resolution, without an automatic second allocation
+  await expect(
+    h.sdk.resumeSell({ fileId: initial.file_id, data: body, seller, publish: h.publish }),
+  ).resolves.toMatchObject({ terms: { file_id: initial.file_id } });
+  expect(call).toHaveBeenCalledTimes(1);
+});
+
+it('refuses above-ceiling sponsored SDK sales before any signature or transaction', async () => {
+  const h = harness();
+  const treasury = { kind: 'evm' as const, id: `0x${'77'.repeat(20)}` };
+  const sdk = new Annon({
+    ...h.config,
+    sponsorship: async () => ({
+      fee: { fixed: '30001', bps: 100, treasuryNear: treasury, treasuryEvm: treasury },
+    }),
+  });
+  await expect(
+    sdk.sell({
+      data: body,
+      name: 'test',
+      mime: 'text/plain',
+      seller: wallet,
+      near: {
+        price: '100000',
+        recipients: initial.near.recipients,
+        remainder: must(initial.near.recipients[0]).identity,
+      },
+      publish: h.publish,
+    }),
+  ).rejects.toMatchObject({ code: 'protocol_fee_above_max' });
+  expect(h.calls).toHaveLength(0);
+});
+
+it('supplies Base split provenance with a sponsored registration', async () => {
+  const h = harness();
+  const sold = await h.sdk.sell({
+    data: body,
+    name: 'test',
+    mime: 'text/plain',
+    seller: wallet,
+    near: {
+      price: initial.near.price,
+      recipients: initial.near.recipients,
+      remainder: must(initial.near.recipients[0]).identity,
+    },
+    base: { price: initial.near.price, sendTransaction: vi.fn() },
+    publish: h.publish,
+  });
+  expect(h.calls.find((c) => c.method === 'register')?.args).toMatchObject({
+    baseSplit: { kind: sold.baseSplit?.kind, salt: sold.baseSplit?.salt },
+  });
+});
+
+it('allows resuming after a definite funding failure without an uncertainty hold', async () => {
+  const identity = { kind: 'near', id: 'seller.test' } as const;
+  const h = harness(identity);
+  const { FileFundingRefused } = await import('../wallet/wallet.js');
+  const call = vi.fn().mockRejectedValueOnce(new FileFundingRefused()).mockResolvedValue(null);
+  const seller = { identity, authorize: async () => undefined, call, transferPurchase: vi.fn() };
+  await expect(
+    h.sdk.sell({
+      fileId: initial.file_id,
+      data: body,
+      name: 'test',
+      mime: 'text/plain',
+      seller,
+      near: {
+        price: initial.near.price,
+        recipients: initial.near.recipients,
+        remainder: must(initial.near.recipients[0]).identity,
+      },
+      storageBudget: 5n * 10n ** 22n,
+      publish: h.publish,
+    }),
+  ).rejects.toMatchObject({ code: 'funding_refused' });
+  h.storageBalance = 0n;
+  await expect(
+    h.sdk.resumeSell({ fileId: initial.file_id, data: body, seller, publish: h.publish }),
+  ).resolves.toBeDefined();
+  expect(call).toHaveBeenCalledTimes(2);
+});
 
 it.each(['none', 'header', 'locked header', 'cancel', 'swallow failure'] as const)(
   'keeps streamed sell and resume recoverable when publish consumes %s',

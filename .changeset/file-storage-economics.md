@@ -1,0 +1,12 @@
+---
+"@defdone/annon": minor
+"@defdone/annon-mcp": minor
+---
+
+Isolate accepted purchase storage in nonwithdrawable per-file budgets, shrink permanent purchase records while preserving signed formats and purchase views, and add SDK/CLI funding and SDK/CLI/MCP budget bindings. NEAR and 1Click preflight refuses insufficient budgets with `file_storage_low`; Base unlock and existing recovery stay independent of file funding.
+
+Operator notes: deploy a fresh contract; there is no migration. Fund advertised files with at least the 4,096-byte admission allowance. Relayers now sponsor unlisted sellers within global/IP file limits and allocate FILE_BUDGET from prepaid storage. SELLERS is optional and selects LISTED_FILE_BUDGET; DEV_ALLOW_ANY_SELLER has no effect. MIN_PRICE defaults to 100000. Configure route treasuries for the default 30000 fixed plus 100 bps fee, or explicitly disable both components. Authorize fund_file_storage on the relayer key and prepay sufficient storage. Topups are explicit and capped; eligibility fails closed after restart.
+
+KEEPER_MIN_PAYOUT defaults to 10000 USDC base units for purchase payouts; refund-only deliveries and accepted deliveries with excess refunds bypass that minimum. Agent allowedResources is optional while maxPrice and dailyBudget remain mandatory. Explicit entries accept exact URLs or same-origin prefixes ending in /*. MCP sell storage amounts come only from human storageBudget configuration. Funding is human-only and has no MCP tool. Sponsored Base registration verifies the immutable split locally and uses one EVM treasury share for both routes. Client maxProtocolFee defaults to 30000 USDC base units plus 100 bps, with protocol_fee_above_max for unattended sells. Register atomically allocates optional file_budget from prepaid balance in one action, compatible with function-call keys. Base sponsorship requires TREASURY_EVM; set BASE_SPONSORSHIP=0 to disable it. Base unlock verifies known clone code, registered split hash, zero owner and unpaused state on chain without a salt, with positive results cached. Restarts trigger revalidation without losing Base unlock eligibility. Allocation limits and top-up eligibility still reset. See relayer README and settlement spec for defaults, accounting and storage measurements.
+
+Preflight sponsored Base purchases against the current sponsorship switch, treasury share and split state before signing. Briefly cache refused unlock split checks and emit registration before budget funding.

@@ -180,6 +180,7 @@ pub(crate) fn terms(seller: IdentityJson) -> TermsJson {
 
 pub(crate) fn args_for(seller: IdentityJson) -> RegisterArgs {
     RegisterArgs {
+        file_budget: None,
         terms: terms(seller),
         seller_key: G1.into(),
         deadline: NOW_S + 600,

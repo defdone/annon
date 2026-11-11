@@ -103,7 +103,9 @@ valid until: <UTC, YYYY-MM-DD HH:MM:SS UTC>
 ```
 
 `register(args, auth)`; `near` sellers call it themselves; EVM and Solana sellers sign and may
-use the relayer. It stores the terms and requests CKD for the seller key. The seller key, like every
+use the relayer. Optional `args.file_budget` is a positive yoctoNEAR string allocated
+from the caller's prepaid balance atomically with registration. It is outside signed Terms
+and seller authorization. The call uses one FunctionCall action. It stores the terms and requests CKD for the seller key. The seller key, like every
 one-time key (`reopen_seller`, `reopen`, the buyer key), must be a compressed G1 point in the
 prime-order subgroup and not the point at infinity: MPC would publish the file key in the clear for
 the point at infinity.
@@ -234,9 +236,15 @@ complete, because its answer is published on chain by MPC and cannot be withdraw
 The buyer key must decode as a compressed BLS12-381 G1 point in the prime-order subgroup, not the
 identity. The receiver schedules no promise and never returns a promise.
 
-4. **Storage.** Each delivery reserves 4 096 bytes of the receiver reserve before writing. If the
-   reserve is short, the delivery is not accepted: a refund leaf is appended to the refund
-   accumulator (§8) and nothing variable-length is written.
+4. **Storage.** An otherwise valid acceptance requires 4 096 bytes' worth of the file's
+   `purchase_storage_balance`, outside signed Terms. Acceptance debits actual flushed storage
+   for the whole write, including permanent purchase/recovery and temporary delivery/index
+   records. The receiver reserve is not an admission gate for funded files. If the file budget
+   is short, emit `file_storage_low` and refund with reason `11` (`FILE_STORAGE_LOW`) without
+   consuming the purchase ID. Rejected payments never spend file budgets. They create a
+   refund-only delivery using receiver reserve working capital, or append a refund leaf (§8)
+   with no variable-size write when that reserve is short. Claims, recovery and caller-funded
+   Base unlock have no file-budget requirement.
 
 ## 7. Payouts and refunds
 
@@ -282,7 +290,8 @@ removal, are in `contracts/annon/tests/mainnet_contracts.gas.txt`. These are all
 estimates. Keepers still pay gas and the contract must have native NEAR for outbound 1-yocto calls.
 
 Payout state never affects the buyer's entitlement. Once a delivery is funded and
-every slot is paid, its record is removed and the storage it held returns to the delivery reserve
+every slot is paid, its record is removed and freed delivery/index storage returns to the accepted purchase
+file budget, or to the receiver reserve for refund-only deliveries
 (`delivery_settled` event); `get_delivery` then returns null, the purchase keeps its `delivery` id.
 `delivery_count()` is the number of delivery ids ever assigned; ids without a record are refund
 leaves not yet materialized or settled deliveries. `receiver_reserve()` shows the reserve.
@@ -299,12 +308,13 @@ forward offset scan can skip records; restarting at zero gives full coverage onc
 but is not a guarantee under continuous churn. The count is not a cursor or a snapshot token.
 
 Delivery and index insertion are flushed and charged together exactly once: ordinary acceptance
-debits the receiver reserve, materialization charges its caller (attached or prepaid storage).
-Retirement flushes and credits the actual freed delivery/index bytes to the receiver reserve once,
-including for caller-sponsored refunds. Purchases, recovery entries and materialization markers
+debits its file budget, ordinary rejection debits the receiver reserve, and materialization
+charges its caller (attached or prepaid storage). Retirement credits actual freed delivery/index
+bytes to that file exactly once, or to the receiver reserve for refund-only deliveries,
+including caller-sponsored refunds. Purchases, recovery entries and materialization markers
 persist. Each index entry uses 130 bytes, reclaimed on retirement including swap-removal.
 Unit measurements: maximum-size acceptance including nine slots and 64-byte identities
-uses 1,593 bytes, below the unchanged 4,096-byte admission allowance; a materialized refund with a
+uses 1,484 bytes, below the unchanged 4,096-byte admission allowance; a materialized refund with a
 10-byte NEAR beneficiary, index and permanent marker uses 332 bytes (0.00332 NEAR at 10^19
 yoctoNEAR/byte).
 
@@ -394,7 +404,7 @@ permissionless, caller-funded `materialize_refund` remain available.
 ## 10. Events and views
 
 Events (`standard: "annon"`, `version: "2.0.0"`): `file_registered`, `header_published`,
-`delivery_received`, `purchase_accepted`, `refund_due`, `refund_leaf`, `delivery_refused` (log only),
+`file_storage_funded`, `file_storage_low`, `delivery_received`, `purchase_accepted`, `refund_due`, `refund_leaf`, `delivery_refused` (log only),
 `funded`, `slot_paid`, `delivery_settled`, `funding_failed`, `payment_failed`,
 `key_requested`, `key_released`, `grant_created`, `sales_stopped`. Never log
 secrets.
@@ -416,9 +426,19 @@ account; logs from failed receipts or other executors are not evidence of state 
 Views: `get_file(file_id)`, `get_purchase(purchase_id)`, `get_grant`,
 `get_delivery(delivery_id)`, `list_deliveries(from, limit)`, `purchases_of(...)`,
 `delivery_count()`, `list_open_deliveries(from, limit)`, `open_delivery_count()`,
-`refund_root()`, `receiver_reserve()`, `get_config`, `storage_balance_of`.
+`refund_root()`, `receiver_reserve()`, `file_storage_balance(file_id)`, `get_config`, `storage_balance_of`.
 
-- `get_file` → `{terms, terms_hash, header_hash|null, sales_stopped_at|null, taken_down|null}`.
+- `get_file` → `{terms, terms_hash, purchase_storage_balance, header_hash|null, sales_stopped_at|null, taken_down|null}`.
+- `file_storage_balance({file_id})` → `{available, admission_requirement}`, decimal yoctoNEAR strings.
+- Payable `fund_file_storage({file_id, amount?})` allocates attached NEAR, with optional exactly
+  matching `amount`; zero attached requires an explicit positive `amount` from the caller's
+  prepaid balance. Allocations are nonwithdrawable; anyone can sponsor an active file.
+  Stopped or taken-down files refuse funding. Optional `register.args.file_budget` is a
+  positive yoctoNEAR string debited from the caller's prepaid balance atomically with
+  registration; it does not change signed Terms or seller authorization.
+  A leaked function-call key authorized for registration or funding can move all of its
+  account's prepaid balance into arbitrary files. A gas allowance does not bound this
+  allocation; limit prepaid balances and revoke compromised keys.
 - `get_purchase` → `{purchase_id, file_id, terms_hash, buyer_key, recovery: Identity,
   route: "near-usdc"|"base-usdc", delivery: number|null, accepted_at: number, grants: number}`.
 - `get_grant({purchase_id, grant})` → `{purchase_id, grant, buyer_key}` or null.
@@ -449,3 +469,46 @@ The 402 for a file lists `annon-near-usdc` (settlement on NEAR at this contract,
 `amount` = NEAR price, extra: `contract`, `file_id`, `terms_hash`) and, when `base` is present,
 `annon-exact` on Base with `extra.nonceVersion: 2`. 1Click is a way to pay `annon-near-usdc`, not a
 separate offer. Details in `x402-annon.md` §11 (to be updated).
+
+## 11. File budgets and record economics
+
+File state adds a fixed-width 16-byte `purchase_storage_balance` outside immutable Terms.
+Registration initializes it to zero or atomically credits optional `args.file_budget`
+from the caller's prepaid balance, in the same single-action call; funding, publishing, stopping and moderation never modify
+registered Terms. `get_purchase.terms_hash` derives from those Terms; no duplicate hash is kept
+in PurchaseRec. The recovery head stores `(count, first_purchase_id)` under the identity hash;
+positions 1 onward remain individual entries. Pagination and every existing signed encoding,
+cryptographic vector, event commitment and purchase view are unchanged. Base payment markers
+remain permanent. No migration is supplied: deploy fresh state.
+
+`file_storage_funded` includes `file_id`, `funder`, `amount`, `balance`.
+`file_storage_low` includes `file_id`, `available`, `admission_requirement`, on admission refusal
+or when acceptance crosses below admission. `purchase_accepted` adds `charged_bytes`,
+`charged_cost`, `remaining_budget`. `delivery_settled` adds `storage_credit` and
+`storage_destination` (file ID or `receiver_reserve`). Costs and balances are yoctoNEAR strings.
+
+Measured permanent bytes per purchase through actual collection writes, including entry overhead:
+
+| Recovery identity | NEAR/1Click before first / later | NEAR/1Click after any | Base before first / later | Base after any |
+|---|---|---|---|---|
+| EVM | 413 / 336 | 304 | 494 / 417 | 385 |
+| Solana | 425 / 348 | 316 | 506 / 429 | 397 |
+| NEAR, 10 characters | 407 / 330 | 298 | 488 / 411 | 379 |
+| NEAR, 64 characters | 461 / 384 | 352 | 542 / 465 | 433 |
+
+The first purchase per recovery identity saves 109 bytes; later purchases save 32 bytes.
+At 10^19 yoctoNEAR per byte, multiply bytes by 0.00001 for NEAR storage stake.
+Temporary acceptance storage is initially charged to the file and recycled at retirement.
+Admission still requires 0.04096 NEAR; this allowance is not the measured purchase fee.
+
+Relayer sponsorship policy is off-chain and published at `/v1/capabilities`. Its default fee
+is 30,000 USDC base units plus 100 bps of price; required treasury bps round up as
+`ceil((fixed * 10000 + price * bps) / price)`. SDK sponsored sell inserts treasury shares,
+scales the others proportionally and assigns rounding to an original non-treasury
+recipient. The exact fee share rounds up by less than one basis point. Base terms require
+a single EVM treasury share at the larger of the two route requirements. Sponsored Base
+registration supplies split kind/salt; the relayer recomputes the ownerless split address
+locally and checks `pay_to`. Base unlock sponsorship requires the same verified terms
+hash in memory, lost on restart. Direct self-funded registration has no compulsory fee. NEAR and 1Click clients
+check `file_storage_balance` before paying and refuse with `file_storage_low` when short;
+the contract rechecks on receipt because preflight reserves no budget.

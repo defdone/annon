@@ -233,7 +233,7 @@ fn materialize_refund_needs_a_deposit() {
 
 // receive.rs:131 (* -> +, * -> /)
 #[test]
-fn a_reserve_just_below_4096_bytes_makes_a_leaf() {
+fn a_rejected_payment_with_reserve_below_4096_bytes_makes_a_leaf() {
     let mut c = contract();
     registered(&mut c, &Seller::new(1));
     as_caller(
@@ -241,7 +241,13 @@ fn a_reserve_just_below_4096_bytes_makes_a_leaf() {
         NearToken::from_yoctonear(env::storage_byte_cost().as_yoctonear() * 4096 - 1),
     );
     c.fund_receiver_reserve();
-    deliver(&mut c, 10_000, &message(&near_purchase()));
+    deliver(&mut c, 9_999, &message(&near_purchase()));
+    assert!(near_sdk::test_utils::get_logs()
+        .iter()
+        .any(|s| s.contains("refund_leaf")));
+    assert!(!near_sdk::test_utils::get_logs()
+        .iter()
+        .any(|s| s.contains("file_storage_low")));
     assert!(
         c.get_delivery(0).is_none(),
         "recorded without a full reserve"
@@ -250,11 +256,11 @@ fn a_reserve_just_below_4096_bytes_makes_a_leaf() {
 
 // receive.rs:227 (* -> +, * -> /)
 #[test]
-fn a_delivery_debits_whole_bytes_from_the_reserve() {
+fn a_purchase_debits_whole_bytes_from_the_file() {
     let mut c = selling();
-    let before = c.reserve;
+    let before = c.file_storage_balance(FILE.into()).available.0;
     deliver(&mut c, 10_000, &message(&near_purchase()));
-    let used = before - c.reserve;
+    let used = before - c.file_storage_balance(FILE.into()).available.0;
     let byte = env::storage_byte_cost().as_yoctonear();
     assert!(used.is_multiple_of(byte) && used / byte >= 100, "{used}");
 }
@@ -651,7 +657,7 @@ fn a_purchase_is_still_accepted_at_its_expiry_second() {
 }
 
 #[test]
-fn a_reserve_of_exactly_4096_bytes_records_the_delivery() {
+fn a_rejected_payment_with_reserve_of_4096_bytes_records_the_delivery() {
     let mut c = contract();
     registered(&mut c, &Seller::new(1));
     as_caller(
@@ -659,6 +665,12 @@ fn a_reserve_of_exactly_4096_bytes_records_the_delivery() {
         NearToken::from_yoctonear(env::storage_byte_cost().as_yoctonear() * 4096),
     );
     c.fund_receiver_reserve();
-    deliver(&mut c, 10_000, &message(&near_purchase()));
-    assert!(c.get_delivery(0).is_some(), "a full reserve made a leaf");
+    deliver(&mut c, 9_999, &message(&near_purchase()));
+    assert_eq!(
+        c.get_delivery(0).unwrap().reason,
+        crate::receive::reason::UNDERPAID
+    );
+    assert!(!near_sdk::test_utils::get_logs()
+        .iter()
+        .any(|s| s.contains("file_storage_low")));
 }

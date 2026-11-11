@@ -7,6 +7,8 @@ use crate::terms::Terms;
 #[near(serializers = [borsh])]
 pub struct File {
     pub terms: Terms,
+    /// Nonwithdrawable purchase storage sponsorship, outside signed terms.
+    pub purchase_storage_balance: u128,
     /// For a NEAR seller: SHA256 of the PAY2 header without its trailer, published once
     /// (all zero until then; fixed width, so publishing grows nothing).
     pub header_hash: [u8; 32],
@@ -18,7 +20,6 @@ pub struct File {
 #[near(serializers = [borsh])]
 pub struct PurchaseRec {
     pub file_id: [u8; 32],
-    pub terms_hash: [u8; 32],
     /// Grant 0: the buyer key from the purchase.
     pub buyer_key: [u8; 48],
     pub recovery: Identity,

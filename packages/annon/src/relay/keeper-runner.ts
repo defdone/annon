@@ -1,7 +1,7 @@
 /** Durable keeper policy. All writes are reserved before signing; ambiguous work is monitored. */
 import { base58, base64 } from '@scure/base';
 import { decodeSignedTransaction } from 'near-api-js';
-import { type AnnonEvent, readOutcome, rpcReply, view } from '../near/rpc.js';
+import { type AnnonEvent, getFile, getPurchase, readOutcome, rpcReply, view } from '../near/rpc.js';
 import {
   BudgetError,
   type BudgetRecord,
@@ -65,6 +65,8 @@ export interface KeepOptions {
   dailyBudget: bigint;
   /** Maximum yoctoNEAR per gas unit. Refuse if current finalized gas price exceeds this. */
   gasPrice: bigint;
+  /** USDC base units; refunds bypass this minimum. */
+  minPayout?: bigint;
   maxPages?: number;
   maxTransactions?: number;
   maxUnresolved?: number;
@@ -125,6 +127,13 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
   const now = o.now ?? Date.now;
   const scope = `${o.network}|${o.contractId}`;
   const out: KeepResult = { sent: [], errors: [], incidents: [] };
+  const belowMinimum = async (d: DeliveryInfo): Promise<boolean> => {
+    if (d.purchase === null || BigInt(d.amount) >= (o.minPayout ?? 10000n)) return false;
+    const purchase = await getPurchase(o.nearRpc, o.contractId, d.purchase);
+    if (!purchase) return true;
+    const file = await getFile(o.nearRpc, o.contractId, purchase.file_id);
+    return !file || BigInt(d.amount) <= BigInt(file.terms.near.price);
+  };
   const maxPages = o.maxPages ?? 20,
     maxTx = o.maxTransactions ?? 20;
   if (
@@ -135,6 +144,7 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
     !Number.isSafeInteger(maxTx) ||
     maxTx < 1 ||
     o.gasPrice <= 0n ||
+    (o.minPayout !== undefined && o.minPayout < 0n) ||
     (o.balanceLowWater !== undefined && o.balanceLowWater < 0n) ||
     (o.storagePerRefund !== undefined && o.storagePerRefund < 0n) ||
     !Number.isSafeInteger(o.maxUnresolved ?? 50) ||
@@ -680,6 +690,7 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
     try {
       const deliveries = await listOpenDeliveries(o.nearRpc, o.contractId, from, 50, cursor.block);
       for (const snapshot of deliveries) {
+        if (await belowMinimum(snapshot)) continue;
         try {
           const id = `${scope}|delivery:${snapshot.id}|submission`;
           const job = await o.store.load(id);
@@ -719,6 +730,7 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
             continue;
           }
           const d = await getDelivery(o.nearRpc, o.contractId, snapshot.id);
+          if (d && (await belowMinimum(d))) continue;
           if (!d) {
             await update(id, { stage: 'retired', tries: 0, nextAt: 0, inFlightAlerted: false });
             continue;

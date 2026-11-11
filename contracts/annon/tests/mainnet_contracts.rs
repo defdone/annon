@@ -1,5 +1,6 @@
 //! Live mainnet bytecode imported read-only into a fresh local sandbox; no mainnet signer.
-//! Run after build.sh: cargo test -p annon --test mainnet_contracts -- --nocapture
+//! With network access, run after build.sh to refresh the gas file:
+//! ANNON_MAINNET_TEST=1 cargo test -p annon --test mainnet_contracts -- --nocapture
 //! Initializers: circlefin/stablecoin-near src/fiat_token.rs and fiat_token_action.rs;
 //! near/intents contracts/defuse/src/contract/{mod.rs,config.rs}, core/src/fees.rs.
 use near_workspaces::result::ExecutionFinalResult;
@@ -199,6 +200,10 @@ async fn mt(intents: &Contract, account: &str) -> anyhow::Result<u128> {
 }
 #[tokio::test]
 async fn real_mainnet_token_and_intents_maximum_delivery() -> anyhow::Result<()> {
+    if std::env::var("ANNON_MAINNET_TEST").as_deref() != Ok("1") {
+        eprintln!("Skipped live dependency measurement; set ANNON_MAINNET_TEST=1 with network access to refresh the gas file.");
+        return Ok(());
+    }
     // Only reads go to this worker; every call() below uses a sandbox Account/Contract.
     let mainnet = near_workspaces::mainnet()
         .rpc_addr("https://rpc.mainnet.fastnear.com")
@@ -336,6 +341,16 @@ async fn real_mainnet_token_and_intents_maximum_delivery() -> anyhow::Result<()>
         json!({"file_id":file_id,"header_hash":hex0x(&[0x44;32])}),
         50,
         0,
+    )
+    .await?
+    .into_result()?;
+    call(
+        &a,
+        &annon,
+        "fund_file_storage",
+        json!({"file_id": file_id}),
+        50,
+        NearToken::from_near(1).as_yoctonear(),
     )
     .await?
     .into_result()?;
@@ -485,6 +500,17 @@ async fn real_mainnet_token_and_intents_maximum_delivery() -> anyhow::Result<()>
         json!({"args":{"terms":max_terms,"seller_key":G1,"deadline":4_000_000_000u64}}),
         100,
         NearToken::from_millinear(20).as_yoctonear(),
+    )
+    .await?
+    .into_result()?;
+    // Purchases need the file's own storage budget (the receiver reserve only covers refunds).
+    call(
+        &a,
+        &annon,
+        "fund_file_storage",
+        json!({"file_id": max_file}),
+        50,
+        NearToken::from_near(1).as_yoctonear(),
     )
     .await?
     .into_result()?;

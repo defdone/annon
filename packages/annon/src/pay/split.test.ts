@@ -19,6 +19,7 @@ import {
   payoutCall,
   payoutCalls,
   readSplit,
+  readSplitState,
   SPLIT_FACTORIES,
   type Split,
   type SplitOrigin,
@@ -490,5 +491,64 @@ describe('readSplit', () => {
     expect(await code(readSplit('https://base', SPLIT, partner, SALT))).toMatch(
       /not an 0xSplits v2 split/,
     );
+  });
+});
+
+describe('readSplitState without creation provenance', () => {
+  it.each(SPLIT_FACTORIES)(
+    'recognizes a $kind clone at an arbitrary address without a salt',
+    async (f) => {
+      chain.at = SAFE;
+      chain.code = RUNTIME[f.kind];
+      expect(await readSplitState('https://base', SAFE, partner)).toMatchObject({
+        kind: f.kind,
+        distributorPercent: 0,
+        shares: [
+          { recipient: SELLER, percent: 95 },
+          { recipient: SAFE, percent: 5 },
+        ],
+      });
+      const calls = vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+      expect(calls.filter((c) => c.method === 'eth_getCode')[0]?.params).toEqual([SAFE, '0x10']);
+      expect(
+        calls.filter((c) => c.method === 'eth_call').every((c) => c.params[1] === '0x10'),
+      ).toBe(true);
+      expect(calls.filter((c) => c.method === 'eth_call')).toHaveLength(3);
+    },
+  );
+
+  it('rejects a wrong chain and invalid addresses without accepting split-shaped responses', async () => {
+    chain.chainId = '0x1';
+    await expect(readSplitState('https://base', SPLIT, partner)).rejects.toMatchObject({
+      code: 'network_mismatch',
+    });
+    await expect(readSplitState('https://base', '0x12', partner)).rejects.toThrow(TypeError);
+  });
+
+  it('rejects an EOA and code that merely answers the split views', async () => {
+    for (const code of ['0x', '0x6000', `${RUNTIME.push}00`]) {
+      chain.code = code;
+      await expect(readSplitState('https://base', SPLIT, partner)).rejects.toMatchObject({
+        code: 'bad_requirements',
+      });
+    }
+  });
+
+  it('preserves retryable transport errors from failed or malformed RPC answers', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('fixture offline'));
+    await expect(readSplitState('https://base', SPLIT, partner)).rejects.toMatchObject({
+      code: 'transport',
+    });
+    const fetcher = vi.mocked(fetch).getMockImplementation();
+    if (!fetcher) throw new Error('missing fixture fetcher');
+    vi.mocked(fetch).mockImplementation(async (...args) => {
+      const b = JSON.parse(String(args[1]?.body));
+      if (b.method === 'eth_call')
+        return { ok: true, json: async () => ({ id: b.id, result: '0x12' }) } as Response;
+      return fetcher(...args);
+    });
+    await expect(readSplitState('https://base', SPLIT, partner)).rejects.toMatchObject({
+      code: 'transport',
+    });
   });
 });

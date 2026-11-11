@@ -14,6 +14,9 @@ const price = z
   .regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/)
   .describe('USDC decimal amount, up to six decimal places.');
 export const schemas = {
+  budget: z.strictObject({
+    target: target.describe('File ID whose purchase storage budget is read'),
+  }),
   sell: z
     .strictObject({
       ...common,
@@ -66,6 +69,7 @@ export const schemas = {
   status: z.strictObject({ ...common, target: target.describe('Purchase ID') }),
 };
 const descriptions = {
+  budget: 'Read the file purchase storage balance and admission requirement.',
   sell: 'Encrypt and register a local file with the SDK. Writes a PAY2 file; seller arranges hosting. May send registration and Base split transactions.',
   buy: 'Prepare and submit a purchase using the SDK. Returns deposit instructions for 1Click; fund them externally, then check annon_status. A submitted payment is not final acceptance.',
   open: 'Open a saved final purchase or recovery grant with the SDK. Downloads with a grant proof when necessary and writes plaintext to the named output file.',
@@ -121,7 +125,7 @@ export function createServer(
   }),
 ) {
   const server = new McpServer({ name: 'annon', version: '0.0.0' });
-  for (const command of ['sell', 'buy', 'open', 'verify', 'recover', 'status'] as const) {
+  for (const command of ['sell', 'buy', 'open', 'verify', 'recover', 'status', 'budget'] as const) {
     server.registerTool(
       `annon_${command}`,
       {
@@ -129,9 +133,9 @@ export function createServer(
         inputSchema: schemas[command],
         outputSchema,
         annotations: {
-          readOnlyHint: command === 'verify',
+          readOnlyHint: command === 'verify' || command === 'budget',
           destructiveHint: false,
-          idempotentHint: command === 'verify',
+          idempotentHint: command === 'verify' || command === 'budget',
           openWorldHint: true,
         },
       },

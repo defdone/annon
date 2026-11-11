@@ -42,7 +42,9 @@ URLs accept HTTPS, and plain HTTP only for `localhost`, `127.0.0.1` or `[::1]`,
 for example `http://localhost:8790/file`. This also applies to verify.
 
 Human CLI use may accept decoded x402 PAYMENT-REQUIRED JSON as `offer.json`; agent purchases
-refuse offer files and require a config-allowlisted URL. Every buy requires a human-approved `--max-price 0.2`, `ANNON_MAX_PRICE`, or config
+refuse offer files. With no `allowedResources`, any HTTPS or HTTP localhost URL is allowed
+within mandatory human-configured `maxPrice` and `dailyBudget`. An explicit list restricts
+buys to exact URLs or same-origin path prefixes ending in `/*`; an empty list denies all. Every buy requires a human-approved `--max-price 0.2`, `ANNON_MAX_PRICE`, or config
 `maxPrice` in decimal USDC. Never derive the cap from the offer or choose it on the user's behalf. An offer file also requires `--url` with the independently selected resource URL. A moderated offer requires an explicitly accepted `--moderator account.near`.
 The selected signing wallet is the recovery identity; `--recovery kind:id` checks it.
 1Click selects the unique source-chain USDC by default. For other tokens or ambiguous
@@ -111,3 +113,23 @@ since it can edit configuration or invoke another client.
 For `payment_not_safe`, retain the purchase and return its wait guidance immediately in agent,
 JSON and status flows. Human open retries honor `Retry-After` as a minimum within the bounded
 wait policy. The client checks the relayer's sponsorship floor before a Base payment.
+
+For self-funded NEAR sales, a human may choose `--storage-budget <NEAR>` or configure
+`storageBudget`. Agents and MCP must take that value only from human configuration.
+Sponsored sell uses the relayer allocation and required treasury split; report the resulting
+`terms` to the seller. Rounding goes to an original non-treasury recipient. Do not
+silently remove treasury recipients to fit the eight-recipient limit.
+
+Read `annon budget 0xFILE_ID --json` before advertising NEAR or 1Click sales. A human can
+allocate nonwithdrawable NEAR with `annon fund 0xFILE_ID 0.05 --wallet near --json`.
+MCP offers read-only `annon_budget`. Funding is human-only, refused in agent mode,
+and is not exposed as an MCP tool. Do not work around `human_only`.
+`maxProtocolFee` defaults to 0.03 USDC plus 100 bps; agent/MCP sells refuse higher
+advertised fees with `protocol_fee_above_max`. Only human configuration can change it.
+Encoded URL path separators `%2f` and `%5c` are refused in agent mode.
+A buy returning `file_storage_low` has not paid. Ask the sponsor to fund the file or report
+the refusal; do not bypass preflight. Base unlock and existing recovery do not depend on
+the file budget.
+
+Sell funding is allocated once. After a lost funding response, inspect the transaction and
+use explicit funding if needed before resume; do not automatically replenish a spent budget.

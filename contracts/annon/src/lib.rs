@@ -12,6 +12,8 @@
 use near_sdk::store::{IterableSet, LookupMap};
 use near_sdk::{env, near, require, AccountId, PanicOnDefault};
 
+#[cfg(test)]
+mod economics_tests;
 mod events;
 mod evm;
 #[cfg(test)]
@@ -48,7 +50,14 @@ pub use unlock::UnlockArgs;
 pub const NEAR_USDC: &str = "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1";
 
 #[near(serializers = [json])]
+pub struct FileStorageView {
+    pub available: near_sdk::json_types::U128,
+    pub admission_requirement: near_sdk::json_types::U128,
+}
+
+#[near(serializers = [json])]
 pub struct FileView {
+    pub purchase_storage_balance: near_sdk::json_types::U128,
     pub terms: TermsJson,
     pub terms_hash: String,
     /// For a NEAR seller: the published header hash, once published.
@@ -96,8 +105,8 @@ pub struct Annon {
     grants: LookupMap<[u8; 36], [u8; 48]>,
     /// `SHA256(purchase_id ‖ key)` → grant, so an identical reopen gives the same grant.
     grant_of_key: LookupMap<[u8; 32], u32>,
-    /// `SHA256(Borsh(recovery))` → number of purchases; `that ‖ index` → purchase id.
-    recovery_count: LookupMap<[u8; 32], u32>,
+    /// `SHA256(Borsh(recovery))` → (count, first id); `that ‖ index` → later ids.
+    recovery_count: LookupMap<[u8; 32], (u32, [u8; 32])>,
     recovery: LookupMap<[u8; 36], [u8; 32]>,
     deliveries: LookupMap<u64, Delivery>,
     /// Every stored delivery, including in-flight work. Removed only on settlement.
@@ -107,7 +116,7 @@ pub struct Annon {
     refunds: Accumulator,
     /// Leaves of `refunds` already turned into refunds.
     materialized: LookupMap<u64, ()>,
-    /// NEAR (yocto) set aside to pay the storage of deliveries; funded by anyone.
+    /// NEAR (yocto) refund working capital; accepted purchases use file budgets.
     reserve: u128,
     /// `tx_hash ‖ log_index` of every Base payment that has released a key.
     used: LookupMap<[u8; 40], ()>,
@@ -180,6 +189,7 @@ impl Annon {
         self.files
             .get(&bytes::<32>(&file_id, "file_id"))
             .map(|f| FileView {
+                purchase_storage_balance: near_sdk::json_types::U128(f.purchase_storage_balance),
                 terms: TermsJson::encode(&f.terms),
                 terms_hash: hex0x(&f.terms.hash()),
                 header_hash: (f.header_hash != [0; 32]).then(|| hex0x(&f.header_hash)),

@@ -64,6 +64,10 @@ async function harness(
     foreignTxDomain: 0,
     intents: 'intents.near',
   };
+  vi.spyOn(rpcModule, 'fileStorageBalance').mockResolvedValue({
+    available: 10n ** 24n,
+    admissionRequirement: 40960000000000000000000n,
+  });
   vi.spyOn(rpcModule, 'getConfig').mockImplementation(async () => contractConfig);
   const account = privateKeyToAccount(`0x${'42'.repeat(32)}`);
   const baseSplit = {
@@ -100,6 +104,7 @@ async function harness(
     seller: wallet.identity,
   };
   const f: FileInfo = {
+    purchaseStorageBalance: 10n ** 24n,
     terms: finalTerms,
     termsHash: termsHash(finalTerms),
     seller: wallet.identity,
@@ -844,6 +849,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     try {
       const tools = (await client.listTools()).tools;
       expect(tools.map((t) => t.name).sort()).toEqual([
+        'annon_budget',
         'annon_buy',
         'annon_open',
         'annon_recover',
@@ -2309,3 +2315,55 @@ it.each(['backup', 'pay2-id', 'pay2-backup'] as const)(
     expect(await readFile(join(h.dir, 'opened.txt'))).toEqual(Buffer.from(h.data));
   },
 );
+
+it.each([undefined, ['https://files.example/*']])(
+  'buys within price and daily limits with resource rules %j',
+  async (allowedResources) => {
+    const h = await harness();
+    delete (h.env as Record<string, string | undefined>).ANNON_ALLOWED_RESOURCES;
+    await patchConfig(h.defaults.config, { allowedResources, dailyBudget: '0.3' });
+    const input = {
+      ...h.defaults,
+      command: 'buy' as const,
+      target: h.defaults.url,
+      route: '1click' as const,
+      origin: 'base-usdc',
+    };
+    await expect(h.adapter(input)).resolves.toMatchObject({ purchaseId: expect.any(String) });
+    await expect(h.adapter(input)).rejects.toMatchObject({ code: 'budget_exceeded' });
+    await expect(h.adapter({ ...input, target: h.offerFile })).rejects.toMatchObject({
+      code: 'resource_not_allowed',
+    });
+    if (allowedResources)
+      await expect(
+        h.adapter({ ...input, target: 'https://files.example.evil/file' }),
+      ).rejects.toMatchObject({ code: 'resource_not_allowed' });
+  },
+);
+
+it('checks storage budget before the interactive buy prompt', async () => {
+  const prompt = vi.fn(async () => true);
+  const buyer = {
+    identity: { kind: 'near' as const, id: terms.contract },
+    authorize: vi.fn(),
+    transferPurchase: vi.fn(),
+    call: vi.fn(),
+  };
+  const h = await harness(false, prompt, false, buyer);
+  vi.mocked(rpcModule.fileStorageBalance).mockResolvedValue({
+    available: 0n,
+    admissionRequirement: 40960000000000000000000n,
+  });
+  await expect(
+    h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.defaults.url,
+      route: 'near',
+      maxPrice: '0.2',
+    }),
+  ).rejects.toMatchObject({ code: 'file_storage_low' });
+  expect(prompt).not.toHaveBeenCalled();
+  expect(buyer.authorize).not.toHaveBeenCalled();
+  expect(h.calls).toHaveLength(0);
+});

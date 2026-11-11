@@ -8,6 +8,8 @@ import { buyerKey, type ReopenV2, reopenTextV2 } from '../settle-near/purchase.j
 import { registerTextV2, type SettlementAssets, type Terms } from '../settle-near/terms.js';
 
 export interface RegisterArgs {
+  /** Optional caller-paid prepaid allocation; not part of seller authorization. Relay clients omit it. */
+  file_budget?: string;
   terms: Terms;
   seller_key: string;
   deadline: number;

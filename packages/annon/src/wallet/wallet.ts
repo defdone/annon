@@ -10,6 +10,7 @@ import {
   proveNearControl,
   type RecoveryProofContext,
 } from '../near/nep413.js';
+import { readOutcome } from '../near/rpc.js';
 import type { TypedData } from '../pay/eip3009.js';
 import { hex, account as nearAccount } from '../settle-near/codec.js';
 import {
@@ -255,4 +256,63 @@ export async function storageDeposit(
     deposit: amount,
     gas: 30000000000000n,
   });
+}
+
+/** A final funding refusal, safe to correct and retry. */
+export class FileFundingRefused extends Error {
+  readonly code = 'funding_refused';
+  constructor() {
+    super('File funding was refused.');
+  }
+}
+
+/** Explicit, nonwithdrawable purchase storage allocation. Zero attachment uses own prepaid balance. */
+export async function fundFileStorage(
+  wallet: Pick<NearWallet, 'call'>,
+  contract: string,
+  fileId: string,
+  amount: bigint,
+  prepaid = false,
+): Promise<unknown> {
+  if (amount <= 0n || amount >= 2n ** 128n || !/^0x[0-9a-f]{64}$/.test(fileId))
+    throw new RangeError('invalid file funding');
+  const request = {
+    receiverId: nearAccount(contract),
+    method: 'fund_file_storage',
+    args: { file_id: fileId, amount: amount.toString() },
+    deposit: prepaid ? 0n : amount,
+    gas: 30000000000000n,
+  };
+  const refused = (result: unknown) => {
+    if (!result || typeof result !== 'object' || !('transaction' in result)) return false;
+    try {
+      const transaction = (result as { transaction: { hash: string; signer_id: string } })
+        .transaction;
+      return (
+        readOutcome(result, contract, {
+          txHash: transaction.hash,
+          signer: transaction.signer_id,
+          method: request.method,
+          args: request.args,
+        }).state === 'refused'
+      );
+    } catch {
+      return false;
+    }
+  };
+  let result: unknown;
+  try {
+    result = await wallet.call(request);
+  } catch (error) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'transactionResult' in error &&
+      refused(error.transactionResult)
+    )
+      throw new FileFundingRefused();
+    throw error;
+  }
+  if (refused(result)) throw new FileFundingRefused();
+  return result;
 }

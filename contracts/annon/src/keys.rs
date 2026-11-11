@@ -168,9 +168,12 @@ impl Annon {
         let identity =
             Identity::from_json(&recovery).unwrap_or_else(|| env::panic_str("invalid identity"));
         let k = recovery_key(&identity);
-        let n = self.recovery_count.get(&k).copied().unwrap_or(0);
+        let (n, first) = self.recovery_count.get(&k).copied().unwrap_or((0, [0; 32]));
         (from..n.min(from.saturating_add(limit.min(100))))
             .map(|i| {
+                if i == 0 {
+                    return hex0x(&first);
+                }
                 let mut e = [0u8; 36];
                 e[..32].copy_from_slice(&k);
                 e[32..].copy_from_slice(&i.to_le_bytes());
@@ -185,7 +188,7 @@ impl Annon {
         self.purchases.get(&id).map(|r| PurchaseView {
             purchase_id: purchase_id.clone(),
             file_id: hex0x(&r.file_id),
-            terms_hash: hex0x(&r.terms_hash),
+            terms_hash: hex0x(&self.file(&r.file_id).terms.hash()),
             buyer_key: hex0x(&r.buyer_key),
             recovery: IdentityJson::from(&r.recovery),
             route: if r.route == 0 {
