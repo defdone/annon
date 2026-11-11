@@ -105,6 +105,13 @@ export async function handle(
     return { status: 404, body: { error: 'not_found' } };
   if (c.disabled)
     return { status: 503, body: { error: 'disabled', message: 'relaying is paused' } };
+  // Coarse per-IP cap before any parsing, so polling can't be used to load the relayer.
+  // Ten times the admission budget leaves room for a client polling every 5 s.
+  if (!allow(`req:${ip}`, c.perIpHour * 10, 3_600_000, Date.now()))
+    return {
+      status: 429,
+      body: { error: 'rate_limited', message: 'too many requests from this address' },
+    };
   let req: unknown;
   let validJson = true;
   try {

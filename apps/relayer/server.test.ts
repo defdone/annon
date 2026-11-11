@@ -165,6 +165,16 @@ describe('relayer HTTP', () => {
     },
   );
 
+  it('caps polling per address before parsing anything', async () => {
+    const c = config({ perIpHour: 1 });
+    const lookup = vi.fn(() => 'pending' as const);
+    for (let i = 0; i < 10; i++)
+      expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, ok, lookup)).status).toBe(202);
+    expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, ok, lookup)).status).toBe(429);
+    expect(lookup).toHaveBeenCalledTimes(10);
+    expect((await handle(c, 'POST', '/v1/relay', 'other', body, ok, lookup)).status).toBe(202);
+  });
+
   it('limits each address per hour and the whole day, counting only what was sent', async () => {
     const c = config({ perIpHour: 2, perDay: 1 });
     const refused = async () => {
