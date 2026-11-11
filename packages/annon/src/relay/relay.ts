@@ -57,11 +57,12 @@ export type RelayErrorCode =
   | 'bad_header'
   | 'transport';
 export class RelayError extends Error {
-  constructor(
-    readonly code: RelayErrorCode,
-    message: string = code,
-  ) {
+  // A plain field, not a parameter property: the relayer runs this file with Node's type
+  // stripping, which has no parameter properties.
+  readonly code: RelayErrorCode;
+  constructor(code: RelayErrorCode, message: string = code) {
     super(message);
+    this.code = code;
     this.name = 'RelayError';
   }
 }

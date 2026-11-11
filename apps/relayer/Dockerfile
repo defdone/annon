@@ -5,6 +5,7 @@ WORKDIR /repo
 RUN corepack enable && corepack prepare pnpm@12.14.0 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/annon/package.json packages/annon/
+COPY packages/annon-mcp/package.json packages/annon-mcp/
 COPY apps/relayer/package.json apps/relayer/
 RUN pnpm install --frozen-lockfile --prod --filter @defdone/annon --filter @defdone/annon-relayer
 COPY packages/annon/src packages/annon/src

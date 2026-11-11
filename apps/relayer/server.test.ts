@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { connect } from 'node:net';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -207,5 +208,19 @@ describe('relayer HTTP server', () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe('the container start', () => {
+  it('loads server.ts with Node type stripping, as the Docker image runs it', () => {
+    // vitest transpiles; Node only strips types, so syntax it lacks (e.g. parameter properties)
+    // passes the other tests and stops the relayer at start.
+    const out = spawnSync(
+      process.execPath,
+      ['--no-warnings', '--import', './ts-hook.mjs', '-e', "await import('./server.ts')"],
+      { cwd: import.meta.dirname, encoding: 'utf8' },
+    );
+    expect(out.stderr).toBe('');
+    expect(out.status).toBe(0);
   });
 });
