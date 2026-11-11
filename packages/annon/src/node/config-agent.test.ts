@@ -23,11 +23,18 @@ it('ignores config and state environment redirection in forced agent mode', asyn
   try {
     const c = await loadConfig(
       { command: 'buy' },
-      { ANNON_AGENT: 'true', ANNON_CONFIG: '/evil/config.json', ANNON_STATE_DIR: '/evil/ledger' },
+      { ANNON_AGENT: 'true', ANNON_STATE_DIR: '/evil/ledger' },
     );
     expect(c).toMatchObject({ agent: true, dailyBudget: '1', stateDir: '/pinned/ledger' });
     expect(read.mock.calls.every(([path]) => path === pinned)).toBe(true);
   } finally {
     read.mockReset();
   }
+});
+
+it('refuses a different ANNON_CONFIG in forced agent mode instead of ignoring it', async () => {
+  const { loadConfig } = await import('./config.js');
+  await expect(
+    loadConfig({ command: 'buy' }, { ANNON_AGENT: 'true', ANNON_CONFIG: '/evil/config.json' }),
+  ).rejects.toMatchObject({ code: 'config_conflict' });
 });

@@ -28,10 +28,18 @@ export type SignerConfig =
       identity: Identity;
       publicKey?: string;
     };
-export const configPath = (o: Partial<Input>, env: Environment) =>
-  env.ANNON_AGENT === 'true'
-    ? join(homedir(), '.config', 'annon', 'config.json')
-    : (o.config ?? env.ANNON_CONFIG ?? join(homedir(), '.config', 'annon', 'config.json'));
+export const configPath = (o: Partial<Input>, env: Environment) => {
+  const home = join(homedir(), '.config', 'annon', 'config.json');
+  if (env.ANNON_AGENT !== 'true') return o.config ?? env.ANNON_CONFIG ?? home;
+  // Agent mode pins the home config; a different ANNON_CONFIG is an operator mistake, not a silent override.
+  if (env.ANNON_CONFIG && resolve(env.ANNON_CONFIG) !== resolve(home))
+    throw new AdapterError(
+      'config_conflict',
+      'ANNON_AGENT=true always uses ~/.config/annon/config.json; unset ANNON_CONFIG or point it there.',
+      2,
+    );
+  return home;
+};
 /** The launcher environment and its config are the agent policy anchor, never per-call flags. */
 export async function agentPolicy(o: Input, env: Environment, forced = false): Promise<boolean> {
   const pinned = configPath({}, env);

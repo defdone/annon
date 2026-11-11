@@ -9,6 +9,10 @@ it.each([
   'setTimeout("alert(1)", 1)',
   'setInterval(`alert(1)`, 1)',
   'globalThis.Function("return 1")',
+  '(0, eval)("alert(1)")',
+  'const f = eval; f("alert(1)")',
+  'Reflect.construct(Function, ["return 1"])',
+  '(0, Function)("return 1")',
 ])('fails the build on emitted dynamic code: %s', async (contents) => {
   await expect(
     build({ ...browserBuildOptions, entryPoints: [], stdin: { contents }, write: false }),

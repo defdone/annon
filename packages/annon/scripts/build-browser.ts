@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { type BuildOptions, build, type Plugin } from 'esbuild';
 import ts from 'typescript';
@@ -56,6 +57,27 @@ const emittedCsp: Plugin = {
           ts.ScriptKind.JS,
         );
         const inspect = (node: ts.Node) => {
+          // Any value use of eval ((0, eval)(x), const f = eval) except as a property name.
+          if (
+            ts.isIdentifier(node) &&
+            node.text === 'eval' &&
+            !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)
+          )
+            throw new Error('Browser CSP forbids emitted dynamic code: eval reference');
+          // Function used as a constructor indirectly: Reflect.construct/apply(Function, ...), (0, Function)(x).
+          if (
+            ts.isIdentifier(node) &&
+            node.text === 'Function' &&
+            ((ts.isCallExpression(node.parent) &&
+              node.parent.arguments[0] === node &&
+              ts.isPropertyAccessExpression(node.parent.expression) &&
+              ts.isIdentifier(node.parent.expression.expression) &&
+              node.parent.expression.expression.text === 'Reflect') ||
+              (ts.isBinaryExpression(node.parent) &&
+                node.parent.operatorToken.kind === ts.SyntaxKind.CommaToken &&
+                node.parent.right === node))
+          )
+            throw new Error('Browser CSP forbids emitted dynamic code: indirect Function');
           if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
             const callee = node.expression;
             const name = ts.isIdentifier(callee)
@@ -95,5 +117,11 @@ export const browserBuildOptions: BuildOptions = {
   plugins: [cspDependencies, emittedCsp],
 };
 
-if (process.argv[1] === fileURLToPath(import.meta.url))
-  await build({ ...browserBuildOptions, outfile: 'dist/browser/login-bundle.js' });
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const outfile = 'dist/browser/login-bundle.js';
+  // Never leave a stale or rejected bundle behind: write only after the emitted-code scan passed.
+  await rm(outfile, { force: true });
+  const result = await build({ ...browserBuildOptions, outfile, write: false });
+  await mkdir(dirname(outfile), { recursive: true });
+  for (const f of result.outputFiles) await writeFile(f.path, f.contents);
+}
