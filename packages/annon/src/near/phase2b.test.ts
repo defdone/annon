@@ -29,12 +29,12 @@ const rpc = (value: unknown) => {
 };
 afterEach(() => vi.unstubAllGlobals());
 describe('contract e08df29 wire shapes', () => {
-  it('wraps unlock args with the canonical message and nullable header; claim grant is optional', () => {
+  it('wraps unlock args with the canonical message and nullable header; omitted claim grant canonicalizes to zero', () => {
     const args = { purchase: buildPurchaseMessage(purchase), logs: [], header: null };
     // Logs are validated separately; this checks the transaction shape.
     expect(contractArgs({ method: 'unlock', args })).toEqual({ args });
     expect(canonicalRequest({ method: 'claim_key', args: { purchase_id: terms.file_id } })).toEqual(
-      { method: 'claim_key', args: { purchase_id: terms.file_id } },
+      { method: 'claim_key', args: { purchase_id: terms.file_id, grant: 0 } },
     );
     expect(() => canonicalRequest({ method: 'unlock', args: { ...args, purchase } })).toThrow();
   });

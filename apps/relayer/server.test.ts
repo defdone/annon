@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Annon } from '../../packages/annon/src/api/annon.ts';
+import * as rpcModule from '../../packages/annon/src/near/rpc.ts';
 import { createAdapter } from '../../packages/annon/src/node/adapter.ts';
+import * as relayModule from '../../packages/annon/src/relay/relay.ts';
 import {
   canonicalRequest,
   checkRelay,
@@ -87,7 +89,12 @@ describe('relayer HTTP', () => {
   });
 
   it('refuses to start on a missing or malformed setting, instead of serving without a limit', () => {
-    const base = { CONTRACT_ID: 'c.near', RELAYER_ACCOUNT: 'r.near', RELAYER_KEY: 'ed25519:x' };
+    const base = {
+      DEV_ALLOW_ANY_SELLER: '1',
+      CONTRACT_ID: 'c.near',
+      RELAYER_ACCOUNT: 'r.near',
+      RELAYER_KEY: 'ed25519:x',
+    };
     expect(fromEnv(base).config).toMatchObject({ perDay: 500, perIpHour: 60 });
     expect(fromEnv({ ...base, PER_DAY: '0' }).config.perDay).toBe(0);
     for (const [name, bad] of [
@@ -148,12 +155,12 @@ describe('relayer HTTP', () => {
     for (let i = 0; i < 3; i++) {
       expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, unsafe)).status).toBe(425);
       expect(hits.get('ip:buyer')?.n).toBe(0);
-      expect(hits.get('day')?.n).toBe(0);
+      expect(hits.get('day:unlock')?.n).toBe(0);
     }
     expect(hits.get('req:buyer')?.n).toBe(3);
     expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, ok)).status).toBe(200);
     expect(hits.get('ip:buyer')?.n).toBe(1);
-    expect(hits.get('day')?.n).toBe(1);
+    expect(hits.get('day:unlock')?.n).toBe(1);
     expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, unsafe)).status).toBe(429);
     expect(unsafe).toHaveBeenCalledTimes(3);
   });
@@ -165,6 +172,10 @@ describe('relayer HTTP', () => {
     expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, refused)).status).toBe(400);
     expect(hits.get('ip:buyer')?.n).toBe(1);
     let reject: (error: Error) => void = () => {};
+    let entered!: () => void;
+    const admitted = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
     const pending = handle(
       c,
       'POST',
@@ -174,8 +185,10 @@ describe('relayer HTTP', () => {
       async () =>
         new Promise<never>((_resolve, r) => {
           reject = r;
+          entered();
         }),
     );
+    await admitted;
     const newerWindow = { n: 1, until: Date.now() + 7200000 };
     hits.set('ip:other', newerWindow);
     reject(new RelayError('payment_not_safe'));
@@ -199,7 +212,7 @@ describe('relayer HTTP', () => {
         );
       }
       expect(hits.get('ip:buyer')?.n).toBe(1);
-      expect(hits.get('day')?.n).toBe(1);
+      expect(hits.get('day:unlock')?.n).toBe(1);
       expect(send).toHaveBeenCalledTimes(1);
       expect(lookup).toHaveBeenCalledTimes(3);
       expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, send, () => null)).status).toBe(
@@ -234,8 +247,17 @@ describe('relayer HTTP', () => {
   it("gives a failed request's budget back to its own day, not to the next", async () => {
     const c = config({ perDay: 1, perIpHour: 100 });
     let fail: (e: Error) => void = () => {};
-    const late = () => new Promise<{ txHash: string }>((_, no) => (fail = no));
+    let entered!: () => void;
+    const admitted = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const late = () =>
+      new Promise<{ txHash: string }>((_, no) => {
+        fail = no;
+        entered();
+      });
     const first = handle(c, 'POST', '/v1/relay', 'a', body, late);
+    await admitted;
     vi.setSystemTime(Date.now() + 86_400_000 + 1);
     try {
       expect((await handle(c, 'POST', '/v1/relay', 'b', body, ok)).status).toBe(200);
@@ -266,7 +288,7 @@ describe('relayer limits memory', () => {
     await handle(config(), 'POST', '/v1/relay', 'fresh', '{', async () => ({ txHash: 'H' }));
     expect(hits.size).toBeLessThan(10);
     for (let i = 0; i < 100_000; i++) hits.set(`ip:live${i}`, { n: 1, until: now + 3_600_000 });
-    expect((await handle(config(), 'POST', '/v1/relay', 'another', body, ok)).status).toBe(429);
+    expect((await handle(config(), 'POST', '/v1/relay', 'another', body, ok)).status).toBe(200);
   });
 });
 
@@ -553,7 +575,12 @@ describe('adapter to relayer boundary without a signing transport', () => {
 });
 
 it('requires separate durable keeper credentials and budgets when explicitly enabled', () => {
-  const base = { CONTRACT_ID: 'c.near', RELAYER_ACCOUNT: 'r.near', RELAYER_KEY: 'ed25519:fake' };
+  const base = {
+    DEV_ALLOW_ANY_SELLER: '1',
+    CONTRACT_ID: 'c.near',
+    RELAYER_ACCOUNT: 'r.near',
+    RELAYER_KEY: 'ed25519:fake',
+  };
   expect(fromEnv(base).keeperSeconds).toBe(0);
   expect(() => fromEnv({ ...base, KEEPER_SECONDS: '30' })).toThrow('KEEPER_ACCOUNT');
   const enabled = {
@@ -612,6 +639,7 @@ it('delivers every keeper alert as bounded webhook JSON and swallows failures wi
 });
 it('validates optional keeper webhook HTTPS URLs and balance low water', () => {
   const enabled = {
+    DEV_ALLOW_ANY_SELLER: '1',
     CONTRACT_ID: 'c.near',
     RELAYER_ACCOUNT: 'r.near',
     RELAYER_KEY: 'fake',
@@ -691,3 +719,194 @@ it('uses Discord Slack-compatible incoming webhooks and times out stalled delive
     timeout.mockRestore();
   }
 });
+
+it('reserves an independent daily pool for unlock and buckets IPv6 clients by /64', async () => {
+  const c = config({ perDay: 2, unlockReserved: 1, perMethodDay: { claim_key: 1 }, perIpHour: 1 });
+  const claim = JSON.stringify({ method: 'claim_key', args: { purchase_id: terms.file_id } });
+  expect((await handle(c, 'POST', '/v1/relay', 'a', claim, ok)).status).toBe(200);
+  expect((await handle(c, 'POST', '/v1/relay', 'b', claim, ok)).status).toBe(503);
+  expect((await handle(c, 'POST', '/v1/relay', 'c', body, ok)).status).toBe(200);
+  hits.clear();
+  expect((await handle(c, 'POST', '/v1/relay', '2001:db8:1:2::1', body, ok)).status).toBe(200);
+  expect((await handle(c, 'POST', '/v1/relay', '2001:0db8:0001:0002::2', body, ok)).status).toBe(
+    429,
+  );
+});
+it('requires a seller allowlist unless development sponsorship is explicit', () => {
+  const base = { CONTRACT_ID: 'c.near', RELAYER_ACCOUNT: 'r.near', RELAYER_KEY: 'fake' };
+  expect(() => fromEnv(base)).toThrow('SELLERS');
+  expect(fromEnv({ ...base, DEV_ALLOW_ANY_SELLER: '1' }).config.policy).toBeDefined();
+});
+
+it('reports low relayer liquid balance and prepaid storage with the shared alert mechanism', async () => {
+  const { relayerAlerts } = await import('./server.ts');
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url, init) => {
+      const q = JSON.parse(String(init?.body));
+      const result =
+        q.method === 'block'
+          ? { header: { hash: 'final' } }
+          : q.method === 'gas_price'
+            ? { gas_price: '1' }
+            : q.method === 'EXPERIMENTAL_protocol_config'
+              ? {
+                  runtime_config: {
+                    min_gas_purchase_price: '1',
+                    storage_amount_per_byte: '1',
+                    transaction_costs: {
+                      action_receipt_creation_config: {
+                        send_sir: 1,
+                        send_not_sir: 1,
+                        execution: 1,
+                      },
+                      action_creation_config: {
+                        function_call_cost: { send_sir: 1, send_not_sir: 1, execution: 1 },
+                        function_call_cost_per_byte: { send_sir: 1, send_not_sir: 1, execution: 1 },
+                      },
+                    },
+                  },
+                }
+              : q.params.request_type === 'view_account'
+                ? { amount: '1', locked: '0', storage_usage: 0 }
+                : { result: [...Buffer.from('"1"')] };
+      return Response.json({ id: q.id, result });
+    }),
+  );
+  const c = config({ balanceLowWater: 10n, storageLowWater: 10n });
+  expect(await relayerAlerts(c)).toEqual([
+    expect.objectContaining({ type: 'low_balance', balance: '1' }),
+    expect.objectContaining({ type: 'storage_low', reserve: '1' }),
+  ]);
+  expect(await relayerAlerts(c)).toEqual([]);
+});
+
+it('returns Retry-After on every retryable refusal and bounds log fields', async () => {
+  const { logField } = await import('./server.ts');
+  for (const code of ['limited', 'unavailable', 'payment_not_safe'] as const) {
+    const out = await handle(config(), 'POST', '/v1/relay', code, body, async () => {
+      throw new RelayError(code);
+    });
+    expect(out.headers?.['Retry-After']).toMatch(/^[0-9]+$/);
+  }
+  expect(logField('a'.repeat(10000), 32)).toHaveLength(32);
+  expect(logField({ huge: 'a'.repeat(10000) }, 66)).toBeUndefined();
+});
+
+it('caches keeper get_config across scheduled passes', async () => {
+  const { keeper } = await import('./server.ts');
+  const dir = await mkdtemp(join(tmpdir(), 'annon-config-cache-'));
+  const getConfig = vi
+    .spyOn(rpcModule, 'getConfig')
+    .mockResolvedValue({ network: 'near:mainnet' } as Awaited<
+      ReturnType<typeof rpcModule.getConfig>
+    >);
+  const keep = vi
+    .spyOn(relayModule, 'keep')
+    .mockResolvedValue({ sent: [], errors: [], incidents: [] });
+  vi.useFakeTimers();
+  const stop = keeper(
+    config({
+      keeper: {
+        sender: { accountId: 'keeper.near', key: 'fake' },
+        stateDir: dir,
+        hourlyBudget: 1n,
+        dailyBudget: 1n,
+        gasPrice: 1n,
+        reserveLowWater: 0n,
+      },
+    }),
+    1,
+  );
+  try {
+    await vi.waitFor(() => expect(keep).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => expect(keep).toHaveBeenCalledTimes(2));
+    expect(getConfig).toHaveBeenCalledTimes(1);
+  } finally {
+    stop();
+    vi.useRealTimers();
+    getConfig.mockRestore();
+    keep.mockRestore();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('enforces the global daily cap while reserving unlock capacity across method pools', async () => {
+  const c = config({
+    perDay: 4,
+    unlockReserved: 2,
+    perIpHour: 100,
+    perMethodDay: { claim_key: 1 },
+  });
+  const claim = JSON.stringify({ method: 'claim_key', args: { purchase_id: terms.file_id } });
+  const reopen = JSON.stringify({ method: 'reopen', args: {} });
+  expect((await handle(c, 'POST', '/v1/relay', 'a', claim, ok)).status).toBe(200);
+  expect((await handle(c, 'POST', '/v1/relay', 'b', claim, ok)).status).toBe(503);
+  expect((await handle(c, 'POST', '/v1/relay', 'c', reopen, ok)).status).toBe(200);
+  expect((await handle(c, 'POST', '/v1/relay', 'd', reopen, ok)).status).toBe(503);
+  expect((await handle(c, 'POST', '/v1/relay', 'e', body, ok)).status).toBe(200);
+  expect((await handle(c, 'POST', '/v1/relay', 'f', body, ok)).status).toBe(200);
+  expect((await handle(c, 'POST', '/v1/relay', 'g', body, ok)).status).toBe(503);
+  expect(hits.get('day')?.n).toBe(4);
+});
+it('normalizes scoped IPv6 without throwing and keeps quota Retry-After until the window end', async () => {
+  const { ipBucket } = await import('./server.ts');
+  expect(ipBucket('fe80::1%en0')).toBe(ipBucket('fe80::2%en1'));
+  const until = Date.now() + 123000;
+  const out = await handle(config(), 'POST', '/v1/relay', 'buyer', body, async () => {
+    throw Object.assign(new RelayError('limited'), { retryAt: until });
+  });
+  expect(out.headers?.['Retry-After']).toBe('123');
+});
+
+it('awaits cached claim lookup before charging admission or daily budgets', async () => {
+  const c = config({
+    perDay: 0,
+    perIpHour: 0,
+    sender: { accountId: 'relay.testnet', key: 'synthetic' },
+  });
+  // Coarse polling still needs capacity; admission and daily budgets can be exhausted.
+  c.perIpHour = 1;
+  hits.set('ip:buyer', { n: 1, until: Date.now() + 3600000 });
+  const send = vi.fn(async () => ({ txHash: 'new' }));
+  const lookup = vi.fn(async () => ({ txHash: 'cached' }));
+  const result = await handle(
+    c,
+    'POST',
+    '/v1/relay',
+    'buyer',
+    JSON.stringify({ method: 'claim_key', args: { purchase_id: terms.file_id, grant: 0 } }),
+    send,
+    lookup,
+  );
+  expect(result).toMatchObject({ status: 200, body: { txHash: 'cached' } });
+  expect(send).not.toHaveBeenCalled();
+  expect(hits.has('day')).toBe(false);
+});
+
+it.each(['global', 'pool'] as const)(
+  'still limits claims across grants by the %s daily cap',
+  async (limit) => {
+    const c = config({
+      perDay: limit === 'global' ? 2 : 4,
+      unlockReserved: 0,
+      perMethodDay: { claim_key: limit === 'pool' ? 1 : 3 },
+      perIpHour: 100,
+    });
+    const send = vi.fn(async () => ({ txHash: 'synthetic-hash' }));
+    const bodyFor = (grant: number) =>
+      JSON.stringify({ method: 'claim_key', args: { purchase_id: terms.file_id, grant } });
+    expect(
+      (await handle(c, 'POST', '/v1/relay', 'buyer', bodyFor(0), send, () => null)).status,
+    ).toBe(200);
+    if (limit === 'global')
+      expect(
+        (await handle(c, 'POST', '/v1/relay', 'buyer', bodyFor(1), send, () => null)).status,
+      ).toBe(200);
+    expect(
+      (await handle(c, 'POST', '/v1/relay', 'buyer', bodyFor(2), send, () => null)).status,
+    ).toBe(503);
+    expect(send).toHaveBeenCalledTimes(limit === 'global' ? 2 : 1);
+  },
+);

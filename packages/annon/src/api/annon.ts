@@ -158,6 +158,7 @@ export class Annon {
   private readonly sellerKeys: Store<SellerKeyRecord>;
   private readonly sells: Store<SellRecord>;
   private readonly recoveries: Store<RecoveryRecord>;
+  private readonly unlocked = new Map<string, unknown>();
   constructor(private readonly o: AnnonOptions) {
     account(o.contractId);
     network(o.network);
@@ -674,7 +675,15 @@ export class Annon {
       baseRpc: this.o.baseRpc,
       store: this.store,
     });
-    if (next.step === 'unlock') await this.call('unlock', { args: next.args });
+    if (next.step === 'unlock') {
+      const answer = await this.call('unlock', { args: next.args });
+      this.unlocked.set(id, answer);
+      // Bound answers retained by status-only callers; evicted entries use claim_key.
+      if (this.unlocked.size > 64) {
+        const oldest = this.unlocked.keys().next().value;
+        if (oldest !== undefined) this.unlocked.delete(oldest);
+      }
+    }
     return (await getPurchase(this.o.nearRpc, this.o.contractId, id)) !== null;
   }
   async open(o: {
@@ -713,11 +722,26 @@ export class Annon {
     );
     if (o.record && hex(inspected.headerHash) !== o.record.checkedHeaderHash)
       throw new Error('header differs from the checked purchase header');
-    const answer = await this.call('claim_key', { purchase_id: id, grant });
+    const cached = grant === 0 ? this.unlocked.get(id) : undefined;
+    if (grant === 0) this.unlocked.delete(id);
+    let ckd: Uint8Array | undefined;
+    if (cached) {
+      try {
+        ckd = await this.answer(cached, secret, fileId);
+      } catch {
+        /* A missing or invalid unlock answer falls back to the usual verified claim. */
+      }
+    }
+    if (!ckd)
+      ckd = await this.answer(
+        await this.call('claim_key', { purchase_id: id, grant }),
+        secret,
+        fileId,
+      );
     return openPay2(o.file, {
       contractId: this.o.contractId,
       listing: listing(fileId, f),
-      ckdSecret: async () => this.answer(answer, secret, fileId),
+      ckdSecret: async () => ckd,
     });
   }
   async recover(o: {

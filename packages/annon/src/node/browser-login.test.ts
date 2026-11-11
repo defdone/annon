@@ -1,8 +1,11 @@
+import { execFile } from 'node:child_process';
 import { request } from 'node:http';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { TransactionUncertain } from '../wallet/uncertain.js';
 import { startBrowserSession } from './browser-login.js';
+
+vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
 const send = (url: string, path: string, headers: Record<string, string>, body?: unknown) =>
   new Promise<{ status: number; headers: Record<string, unknown>; body: string }>(
@@ -300,3 +303,50 @@ it.each([false, true])(
     }
   },
 );
+
+it('gives the browser opener only desktop routing variables', async () => {
+  const { browserOpenerEnv } = await import('./browser-login.js');
+  expect(
+    browserOpenerEnv({
+      PATH: '/bin',
+      HOME: '/fake',
+      DISPLAY: ':1',
+      BROWSER: 'fake-browser',
+      XDG_CURRENT_DESKTOP: 'test-desktop',
+      DESKTOP_SESSION: 'test-session',
+      LANG: 'C',
+      ANNON_BACKUP_SECRET: 'secret',
+      ANNON_EVM_PRIVATE_KEY: 'key',
+      PRIVATE_KEY: 'key',
+      AWS_SECRET_ACCESS_KEY: 'secret',
+    }),
+  ).toEqual({
+    PATH: '/bin',
+    HOME: '/fake',
+    DISPLAY: ':1',
+    BROWSER: 'fake-browser',
+    XDG_CURRENT_DESKTOP: 'test-desktop',
+    DESKTOP_SESSION: 'test-session',
+    LANG: 'C',
+  });
+});
+
+it('passes the minimal environment to the mocked opener without launching a GUI', async () => {
+  vi.stubEnv('ANNON_BACKUP_SECRET', 'fake-secret');
+  vi.stubEnv('PRIVATE_KEY', 'fake-key');
+  const session = await startBrowserSession({});
+  try {
+    expect(execFile).toHaveBeenCalledWith(
+      expect.any(String),
+      [expect.stringMatching(/^http:\/\/127\.0\.0\.1:/)],
+      { env: expect.any(Object) },
+      expect.any(Function),
+    );
+    const env = vi.mocked(execFile).mock.calls.at(-1)?.[2] as { env: NodeJS.ProcessEnv };
+    expect(env.env).not.toHaveProperty('ANNON_BACKUP_SECRET');
+    expect(env.env).not.toHaveProperty('PRIVATE_KEY');
+  } finally {
+    await session.close();
+    vi.unstubAllEnvs();
+  }
+});

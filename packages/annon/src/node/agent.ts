@@ -55,11 +55,21 @@ export async function agentPolicy(o: Input, env: Environment, forced = false): P
     (o.command === 'init' ||
       o.command === 'login' ||
       (o.config !== undefined && resolve(o.config) !== resolve(pinned)) ||
-      o.stateDir !== undefined)
+      o.stateDir !== undefined ||
+      [
+        o.contractId,
+        o.nearRpc,
+        o.baseRpc,
+        o.relayer,
+        o.network,
+        o.trustContract,
+        o.moderator,
+        o.maxPrice,
+      ].some((v) => v !== undefined))
   )
     throw new AdapterError(
       'agent_policy',
-      'Agent mode pins the launcher config and budget ledger, and refuses init, login and state-dir overrides.',
+      'Agent mode pins deployment, trust, price and state policy; per-call overrides, init and login are refused.',
       2,
     );
   return agent;
@@ -88,6 +98,7 @@ export async function savePublicConfig(
     'baseRpc',
     'network',
     'stateDir',
+    'workDir',
     'relayer',
     'maxPrice',
     'trustContract',

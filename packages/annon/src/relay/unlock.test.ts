@@ -111,3 +111,13 @@ describe('Base unlock contract timing', () => {
     await expect(checkRelay(request(), options)).rejects.toMatchObject({ code: 'taken_down' });
   });
 });
+
+it('refuses unlock below the sponsorship floor before reading the payment', async () => {
+  await expect(
+    checkRelay(request(), {
+      ...options,
+      policy: { ...options.policy, minPrice: BigInt(purchase.price) + 1n },
+    }),
+  ).rejects.toMatchObject({ code: 'not_sponsored' });
+  expect(getReceipt).not.toHaveBeenCalled();
+});

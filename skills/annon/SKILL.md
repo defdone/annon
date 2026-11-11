@@ -35,13 +35,14 @@ Buy directly with NEAR USDC, via Base x402 with an EVM wallet, or through 1Click
 ```sh
 annon buy https://host.example/report --route near --wallet near --json
 annon buy https://host.example/report --route base --wallet evm --json
-annon buy offer.json --url https://host.example/report --route 1click --wallet solana --from-chain solana --json
+annon buy https://host.example/report --route 1click --wallet solana --from-chain solana --json
 ```
 
 URLs accept HTTPS, and plain HTTP only for `localhost`, `127.0.0.1` or `[::1]`,
 for example `http://localhost:8790/file`. This also applies to verify.
 
-`offer.json` is decoded x402 PAYMENT-REQUIRED JSON. Every buy requires a human-approved `--max-price 0.2`, `ANNON_MAX_PRICE`, or config
+Human CLI use may accept decoded x402 PAYMENT-REQUIRED JSON as `offer.json`; agent purchases
+refuse offer files and require a config-allowlisted URL. Every buy requires a human-approved `--max-price 0.2`, `ANNON_MAX_PRICE`, or config
 `maxPrice` in decimal USDC. Never derive the cap from the offer or choose it on the user's behalf. An offer file also requires `--url` with the independently selected resource URL. A moderated offer requires an explicitly accepted `--moderator account.near`.
 The selected signing wallet is the recovery identity; `--recovery kind:id` checks it.
 1Click selects the unique source-chain USDC by default. For other tokens or ambiguous
@@ -53,7 +54,7 @@ Annon does not automatically fund that deposit.
 ```sh
 annon status 0xPURCHASE_ID --json
 annon open 0xPURCHASE_ID --output report.pdf --json
-annon open report.pay2 --purchase /private/purchase-backup.json --output report.pdf --json
+annon open report.pay2 --purchase purchase-backup.json --output report.pdf --json
 ```
 
 Waiting: after `submitted`, poll `annon_status` (or `annon status`) about every 30 seconds
@@ -75,7 +76,7 @@ Recover on a fresh device using the same recovery wallet and a new local backup 
 
 ```sh
 annon recover --recovery near:alice.near --wallet near --json
-annon open /private/recovery-backup.json --url https://host.example/report --output recovered.pdf --json
+annon open recovery-backup.json --url https://host.example/report --output recovered.pdf --json
 annon verify report.pay2 --json
 annon verify https://host.example/report --json
 annon stop 0xFILE_ID --json
@@ -89,3 +90,24 @@ Read JSON `ok` and `error.code`. Exit 0 means command completion, including depo
 results; 1 is operation failure, 2 arguments/config/keys, 3 contract trust required, 4 pending status.
 Encrypted records and portable backups live under the configured state directory. Keep both
 the state and backup secret private; keep the secret separately from exported backups.
+
+
+For MCP or CLI agent mode, the operator config must include `maxPrice` and `workDir`.
+`ANNON_STATE_DIR` never replaces the configured state directory. Environment price caps can
+only lower the config cap; environment resource URLs intersect the config allowlist. Do not
+change these settings to get a refused purchase through. MCP tools cannot set deployment,
+trust, budget, working directory or credential policy.
+
+Keep `annon_sell.target`/`output` and `annon_open.file`/`output` inside `workDir`. Local
+`annon_verify.target`, non-ID `annon_open.target`, and non-ID `annon_open.purchase` backups are
+confined too. Verify URLs stay remote and purchase IDs stay identifiers. Relative paths
+start there, including the default sell output. The adapter checks real paths and output parents;
+`..`, symlink escapes, dangling symlinks and outside paths return `path_not_allowed`. Ask the
+operator to place intended inputs inside the directory; do not bypass the refusal. Only a
+launcher with `ANNON_AGENT=true` can use `ANNON_WORK_DIR`; it also pins the home config.
+MCP is the policy boundary. A shell agent with the same OS user is not contained by this policy,
+since it can edit configuration or invoke another client.
+
+For `payment_not_safe`, retain the purchase and return its wait guidance immediately in agent,
+JSON and status flows. Human open retries honor `Retry-After` as a minimum within the bounded
+wait policy. The client checks the relayer's sponsorship floor before a Base payment.

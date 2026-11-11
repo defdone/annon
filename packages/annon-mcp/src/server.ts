@@ -37,8 +37,11 @@ export const schemas = {
     ),
   buy: z.strictObject({
     ...common,
-    target: target.describe(`${urlRule} for a file, or path to decoded x402 offer JSON`),
-    url: z.string().optional().describe('Expected resource URL, required for an offer file'),
+    target: target
+      .refine((value) => /^https?:/.test(value), { message: 'Buy requires a resource URL.' })
+      .describe(`${urlRule} for an allowlisted resource`),
+
+    url: z.string().optional().describe('Optional expected resource URL'),
     route: z.enum(['near', 'base', '1click']).optional(),
     origin: z.string().optional().describe('Name of a human-configured allowed origin'),
     recovery: z.string().optional(),

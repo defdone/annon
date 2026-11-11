@@ -19,6 +19,7 @@ import {
 } from '../pay/backup.js';
 import type { typedData } from '../pay/eip3009.js';
 import { purchaseKey } from '../pay/purchase.js';
+import * as recoverySteps from '../pay/recover.js';
 import { paymentRequired } from '../pay/seller.js';
 import { createSplit, type Split } from '../pay/split.js';
 import { memoryStore } from '../pay/store.js';
@@ -219,6 +220,7 @@ function harness(seller: Identity = wallet.identity) {
     backups,
     send,
     calls,
+    answer,
     purchases,
     grants,
     blockedFiles,
@@ -1286,3 +1288,88 @@ describe('high-level one-model API', () => {
     ).rejects.toThrow(/published/);
   });
 });
+
+it.each(['valid', 'absent', 'invalid'] as const)(
+  'reuses only a verified unlock answer on first open: %s',
+  async (mode) => {
+    vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+    const h = harness();
+    const { mpcKey: _pin, ...unpinned } = h.config;
+    const sdk = new Annon(unpinned);
+    await h.sdk.sell({
+      data: body,
+      name: 'x',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      base: { price: '200000', sendTransaction: async () => {} },
+      publish: h.publish,
+    });
+    const required = paymentRequired(
+      {
+        nearRpc: h.config.nearRpc,
+        contractId: h.config.contractId,
+        fileId: h.terms.file_id,
+        url: 'https://files.example/f',
+        header: 'https://files.example/header',
+      },
+      must(await getFile(h.config.nearRpc, h.config.contractId, h.terms.file_id)),
+      must(initial.base).usdc,
+    );
+    const payer = {
+      ...wallet,
+      address: account.address,
+      signTypedData: async (data: ReturnType<typeof typedData>) =>
+        account.signTypedData(data as never),
+    };
+    const bought = await sdk.buy({
+      fileId: h.terms.file_id,
+      header: h.header,
+      recovery: wallet,
+      refund: wallet.identity,
+      payer,
+      maxPrice: 200000n,
+      paymentRequired: required,
+      url: 'https://files.example/f',
+      submitBase: async () => {},
+    });
+    vi.spyOn(recoverySteps, 'nextStep').mockResolvedValue({
+      step: 'unlock',
+      args: { purchase: bought.record.message, logs: [], header: null },
+    });
+    const original = must(h.send.getMockImplementation());
+    h.send.mockImplementation(async (method, args) => {
+      if (method !== 'unlock') return original(method, args);
+      const p = bought.record.purchase;
+      h.purchases.set(bought.record.id, {
+        purchase_id: bought.record.id,
+        file_id: p.file_id,
+        terms_hash: p.terms_hash,
+        recovery: p.recovery,
+        buyer_key: p.buyer_key,
+        grants: 1,
+      });
+      h.grants.set(`${bought.record.id}:0`, p.buyer_key);
+      const answer = h.answer(p.file_id, p.buyer_key);
+      return mode === 'absent'
+        ? null
+        : mode === 'invalid'
+          ? { ...answer, big_c: answer.big_y }
+          : answer;
+    });
+    // The adapter accepts before downloading, then calls open on the same SDK instance.
+    expect(await sdk.accept(bought.record)).toBe(true);
+    expect((await sdk.open({ record: bought.record, file: h.file })).data).toEqual(body);
+    expect(h.send.mock.calls.filter(([method]) => method === 'claim_key')).toHaveLength(
+      mode === 'valid' ? 0 : 1,
+    );
+    expect((await sdk.open({ record: bought.record, file: h.file })).data).toEqual(body);
+    expect(h.send.mock.calls.filter(([method]) => method === 'claim_key')).toHaveLength(
+      mode === 'valid' ? 1 : 2,
+    );
+  },
+);

@@ -2,7 +2,13 @@
 import { base58, base64 } from '@scure/base';
 import { decodeSignedTransaction } from 'near-api-js';
 import { type AnnonEvent, readOutcome, rpcReply, view } from '../near/rpc.js';
-import { BudgetError, type BudgetRecord, reserveSpend } from '../node/budget.js';
+import {
+  BudgetError,
+  type BudgetRecord,
+  reconcileSpend,
+  reserveSpend,
+  type SpendReservation,
+} from '../node/budget.js';
 import type { Store, Versioned } from '../pay/store.js';
 import { network } from '../settle-near/codec.js';
 import {
@@ -31,9 +37,12 @@ export interface KeeperRecord extends Versioned {
     phases: string[];
     /** Persist before broadcast, so expiry remains provable after RPC block garbage collection. */
     reference?: { hash: string; height: number };
+    reservation?: SpendReservation;
+    storageReserved?: string;
   } | null;
   sweep?: { block: string; count: number; from: number };
   balanceLow?: boolean;
+  reserveCheckedAt?: number;
   inFlightAlerted?: boolean;
 }
 export interface RefundSource {
@@ -153,14 +162,21 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
       o.alert?.({ type: 'breaker' });
     }
   };
-  try {
-    const reserve = await view(o.nearRpc, o.contractId, 'receiver_reserve', {});
-    if (typeof reserve !== 'string' || !/^\d+$/.test(reserve))
-      throw new Error('invalid receiver reserve');
-    if (o.reserveLowWater !== undefined && BigInt(reserve) < o.reserveLowWater)
-      o.alert?.({ type: 'reserve_low', reserve });
-  } catch (error) {
-    out.errors.push({ error });
+  const reserveId = `${scope}|reserve-monitor`;
+  if (
+    now() - ((await o.store.load(reserveId))?.reserveCheckedAt ?? Number.NEGATIVE_INFINITY) >=
+    60000
+  ) {
+    try {
+      const reserve = await view(o.nearRpc, o.contractId, 'receiver_reserve', {});
+      if (typeof reserve !== 'string' || !/^\d+$/.test(reserve))
+        throw new Error('invalid receiver reserve');
+      await update(reserveId, { reserveCheckedAt: now() });
+      if (o.reserveLowWater !== undefined && BigInt(reserve) < o.reserveLowWater)
+        o.alert?.({ type: 'reserve_low', reserve });
+    } catch (error) {
+      out.errors.push({ error });
+    }
   }
   const activeId = `${scope}|active:${o.sender.accountId}`;
   const untrack = async (id: string) => {
@@ -330,13 +346,20 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
     }
     attempts++;
     try {
+      const storageReserved =
+        method === 'materialize_refund' ? (o.storagePerRefund ?? 40960000000000000000000n) : 0n;
+      const reservation: SpendReservation = {
+        id: `${id}|${claimed.revision}`,
+        at: now(),
+        amount: String(gas * o.gasPrice * 2n + storageReserved),
+      };
       await reserveSpend(
         o.budgetStore,
         `${o.network}|${o.sender.accountId}|keeper-spend`,
-        gas * o.gasPrice * 2n +
-          (method === 'materialize_refund' ? (o.storagePerRefund ?? 40960000000000000000000n) : 0n),
+        BigInt(reservation.amount),
         { daily: o.dailyBudget, hourly: o.hourlyBudget },
-        now(),
+        reservation.at,
+        reservation.id,
       );
       const tx = await transport.sign(method, args, gas);
       const referenceHash = base58.encode(
@@ -366,6 +389,8 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
             args,
             phases,
             reference: { hash: referenceHash, height: reference.height },
+            reservation,
+            storageReserved: String(storageReserved),
           },
         }))
       )
@@ -543,6 +568,28 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
         events.some((e) => /\b(paus(?:e|ed|ing)|lock(?:ed|ing)?)\b/i.test(String(e.data.reason)));
       const claimed = { ...job, revision: job.revision + 1, stage: 'finalizing' as const };
       if (!(await o.store.compareAndSet(id, job, claimed))) return false;
+      // Refund only complete FINAL burn accounting. Missing data keeps the conservative hold.
+      const final = reply.result as {
+        transaction_outcome?: { outcome?: { tokens_burnt?: unknown } };
+        receipts_outcome?: { outcome?: { tokens_burnt?: unknown } }[];
+      };
+      const burns = [final.transaction_outcome, ...(final.receipts_outcome ?? [])].map(
+        (r) => r?.outcome?.tokens_burnt,
+      );
+      if (
+        tx.reservation &&
+        final.transaction_outcome &&
+        Array.isArray(final.receipts_outcome) &&
+        burns.every((v) => typeof v === 'string' && /^[0-9]+$/.test(v))
+      ) {
+        const actual = burns.reduce<bigint>((sum, v) => sum + BigInt(v as string), 0n);
+        await reconcileSpend(
+          o.budgetStore,
+          `${o.network}|${o.sender.accountId}|keeper-spend`,
+          tx.reservation,
+          actual + BigInt(tx.storageReserved ?? '0'),
+        );
+      }
       // A successful entry may still have failed child receipts. State is authoritative.
       if (tx.method === 'settle') {
         const phases = new Set([
@@ -640,6 +687,37 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
             if (monitored.has(id) || !(await monitor(id, job, snapshot.id))) continue;
           }
           let current = await o.store.load(id);
+          // The pinned page already has enough state to honor backoff without another RPC.
+          // Observed progress in that snapshot may reset backoff; final state is read before sending.
+          let snapshotDue = progress(current?.observed, snapshot) ? 0 : (current?.nextAt ?? 0);
+          const snapshotPhases =
+            snapshot.fund.state === 0
+              ? ['fund']
+              : snapshot.slots.flatMap((slot, i) => (slot.step.state === 0 ? [`slot:${i}`] : []));
+          for (const phase of snapshotPhases) {
+            const record = await o.store.load(`${scope}|delivery:${snapshot.id}|${phase}`);
+            if (!progress(record?.observed, snapshot))
+              snapshotDue = Math.max(snapshotDue, record?.nextAt ?? 0);
+          }
+          if (snapshotDue > now()) {
+            if (
+              snapshot.fund.state === 1 ||
+              (snapshot.fund.state === 2 && snapshot.slots.some((slot) => slot.step.state === 1))
+            ) {
+              out.incidents.push({ classification: 'in_flight', deliveryId: snapshot.id });
+              if (
+                !current?.inFlightAlerted &&
+                (await o.store.compareAndSet(id, current, {
+                  ...current,
+                  id,
+                  revision: (current?.revision ?? -1) + 1,
+                  inFlightAlerted: true,
+                }))
+              )
+                o.alert?.({ type: 'in_flight', deliveryId: snapshot.id });
+            }
+            continue;
+          }
           const d = await getDelivery(o.nearRpc, o.contractId, snapshot.id);
           if (!d) {
             await update(id, { stage: 'retired', tries: 0, nextAt: 0, inFlightAlerted: false });

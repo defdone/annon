@@ -13,10 +13,12 @@
  */
 import { mkdir } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import { join } from 'node:path';
-import { getConfig } from '../../packages/annon/src/near/rpc.ts';
+import { getConfig, rpcReply, view } from '../../packages/annon/src/near/rpc.ts';
 import type { BudgetRecord } from '../../packages/annon/src/node/budget.ts';
 import { fileStore } from '../../packages/annon/src/pay/store-node.ts';
+import { keeperBalance } from '../../packages/annon/src/relay/keeper-balance.ts';
 import type {
   KeeperRecord,
   KeepOptions,
@@ -48,9 +50,17 @@ export interface Config extends Omit<CheckOptions, 'now'> {
   };
   /** Kill switch: answer 503 and send nothing. */
   disabled: boolean;
-  /** New admission attempts per IP per hour, and transactions per day for everyone. */
+  /** New admissions per client per hour, and default daily capacity of each method pool. */
   perIpHour: number;
   perDay: number;
+  unlockReserved?: number;
+  perMethodDay?: Partial<Record<string, number>>;
+  hitsCap?: number;
+  requestMultiplier?: number;
+  retrySeconds?: number;
+  balanceLowWater?: bigint;
+  storageLowWater?: bigint;
+  alertWebhook?: string;
   /** The header a trusted proxy puts the client's IP in; without one, the connection's address. */
   ipHeader?: string;
 }
@@ -81,14 +91,23 @@ const MAX_BODY = 64 * 1024;
 
 // ponytail: counters in memory, reset on restart; one machine. Shared store if it ever scales out.
 export const hits = new Map<string, { n: number; until: number }>();
-/** Above this many counters, expired ones are swept; past the cap, new addresses wait. */
+/** Expired counters are swept; oldest client counters are evicted at capacity. */
 const SWEEP_AT = 10_000;
 const CAP = 100_000;
 /** Charges one use; the counter charged, or null at the limit. */
-function allow(key: string, limit: number, windowMs: number, now: number) {
-  if (hits.size >= SWEEP_AT && !hits.has(key)) {
+function allow(key: string, limit: number, windowMs: number, now: number, cap = CAP) {
+  if (hits.size >= Math.min(SWEEP_AT, cap) && !hits.has(key)) {
     for (const [k, v] of hits) if (v.until <= now) hits.delete(k);
-    if (hits.size >= CAP) return null;
+    while (hits.size >= cap) {
+      let oldest: string | undefined;
+      for (const key of hits.keys())
+        if (key !== 'day' && !key.startsWith('day:')) {
+          oldest = key;
+          break;
+        }
+      if (oldest === undefined) break;
+      hits.delete(oldest);
+    }
   }
   const old = hits.get(key);
   const h = old && old.until > now ? old : { n: 0, until: now + windowMs };
@@ -98,6 +117,29 @@ function allow(key: string, limit: number, windowMs: number, now: number) {
   return h;
 }
 
+/** Canonical IPv6 /64, including compressed notation; mapped IPv4 shares its IPv4 bucket. */
+export function ipBucket(ip: string): string {
+  const address = ip.split('%')[0] ?? ip;
+  if (isIP(address) !== 6) return ip;
+  const canonical = new URL(`http://[${address}]/`).hostname.slice(1, -1);
+  const [left = '', right] = canonical.split('::');
+  const a = left ? left.split(':') : [];
+  const b = right ? right.split(':') : [];
+  const words = right === undefined ? a : [...a, ...Array(8 - a.length - b.length).fill('0'), ...b];
+  if (words.slice(0, 5).every((w) => Number.parseInt(w, 16) === 0) && words[5] === 'ffff') {
+    const n = Number.parseInt(words[6] ?? '0', 16) * 65536 + Number.parseInt(words[7] ?? '0', 16);
+    return [24, 16, 8, 0].map((shift) => (n >>> shift) & 255).join('.');
+  }
+  return `${words
+    .slice(0, 4)
+    .map((w) => Number.parseInt(w, 16).toString(16))
+    .join(':')}::/64`;
+}
+
+type RelayLookup = (
+  ...args: Parameters<typeof relayStatus>
+) => ReturnType<typeof relayStatus> | Awaited<ReturnType<typeof relayStatus>>;
+
 /** One request: status and JSON body. Separate from the socket so it can be tested directly. */
 export async function handle(
   c: Config,
@@ -106,8 +148,22 @@ export async function handle(
   ip: string,
   body: string,
   send: typeof relay = relay,
-  lookup: typeof relayStatus = relayStatus,
-): Promise<{ status: number; body: unknown }> {
+  lookup: RelayLookup = relayStatus,
+): Promise<{ status: number; body: unknown; headers?: Record<string, string> }> {
+  const result = await admission(c, method, path, ipBucket(ip), body, send, lookup);
+  return [429, 503, 425].includes(result.status)
+    ? { ...result, headers: { 'Retry-After': String(result.retrySeconds ?? c.retrySeconds ?? 5) } }
+    : result;
+}
+async function admission(
+  c: Config,
+  method: string,
+  path: string,
+  ip: string,
+  body: string,
+  send: typeof relay,
+  lookup: RelayLookup,
+): Promise<{ status: number; body: unknown; retrySeconds?: number }> {
   if (method === 'GET' && path === '/v1/capabilities') {
     return {
       status: 200,
@@ -129,9 +185,12 @@ export async function handle(
     return { status: 503, body: { error: 'disabled', message: 'relaying is paused' } };
   // Coarse per-IP cap before any parsing, so polling can't be used to load the relayer.
   // Ten times the admission budget leaves room for a client polling every 5 s.
-  if (!allow(`req:${ip}`, c.perIpHour * 10, 3_600_000, Date.now()))
+  if (
+    !allow(`req:${ip}`, c.perIpHour * (c.requestMultiplier ?? 10), 3_600_000, Date.now(), c.hitsCap)
+  )
     return {
       status: 429,
+      retrySeconds: 3600,
       body: { error: 'rate_limited', message: 'too many requests from this address' },
     };
   let req: unknown;
@@ -145,7 +204,7 @@ export async function handle(
   // Invalid requests still go through the IP limiter and the normal relay validation.
   if (validJson) {
     try {
-      const admitted = lookup(req, c);
+      const admitted = await lookup(req, c);
       if (admitted === 'pending')
         return { status: 202, body: { pending: true, retryAfterMs: 5000 } };
       if (admitted)
@@ -158,10 +217,11 @@ export async function handle(
     }
   }
   const now = Date.now();
-  const ipAdmission = allow(`ip:${ip}`, c.perIpHour, 3_600_000, now);
+  const ipAdmission = allow(`ip:${ip}`, c.perIpHour, 3_600_000, now, c.hitsCap);
   if (!ipAdmission) {
     return {
       status: 429,
+      retrySeconds: 3600,
       body: { error: 'rate_limited', message: 'too many requests from this address' },
     };
   }
@@ -169,10 +229,45 @@ export async function handle(
     return { status: 400, body: { error: 'bad_request', message: 'the body is not JSON' } };
   // The day's budget is reserved before sending, so concurrent requests can't overrun it, and
   // given back when `relay` throws: it throws only before anything is sent.
-  const day = allow('day', c.perDay, 86_400_000, now);
+  const relayMethod = (req as { method?: unknown } | null)?.method;
+  const pool =
+    typeof relayMethod === 'string' &&
+    ['register', 'unlock', 'claim_key', 'reopen', 'reopen_seller', 'stop_sales'].includes(
+      relayMethod,
+    )
+      ? relayMethod
+      : 'invalid';
+  const charges: [string, { n: number; until: number }][] = [];
+  const refund = () => {
+    for (const [key, counter] of charges)
+      if (hits.get(key) === counter && counter.n > 0) counter.n--;
+  };
+  const global = allow('day', c.perDay, 86_400_000, now, c.hitsCap);
+  if (global) charges.push(['day', global]);
+  const windowMs = global ? global.until - now : 86_400_000;
+  const reserve = c.unlockReserved ?? Math.ceil(c.perDay / 2);
+  const other =
+    global && pool !== 'unlock'
+      ? allow('day:other', Math.max(0, c.perDay - reserve), windowMs, now, c.hitsCap)
+      : global;
+  if (other && pool !== 'unlock') charges.push(['day:other', other]);
+  const dayKey = `day:${pool}`;
+  const day = other
+    ? allow(dayKey, c.perMethodDay?.[pool] ?? c.perDay, windowMs, now, c.hitsCap)
+    : null;
   if (!day) {
-    return { status: 503, body: { error: 'budget', message: "today's relaying budget is spent" } };
+    refund();
+    const retrySeconds = Math.max(
+      1,
+      Math.ceil(((hits.get('day')?.until ?? now + 86400000) - now) / 1000),
+    );
+    return {
+      status: 503,
+      retrySeconds,
+      body: { error: 'budget', message: "today's relaying budget is spent" },
+    };
   }
+  charges.push([dayKey, day]);
   try {
     const { txHash, uncertain, reason } = await send(req, c);
     // 202: NEAR's answer was lost or unclear; the caller reads the outcome by hash.
@@ -181,7 +276,7 @@ export async function handle(
       : { status: 200, body: { txHash, signer: c.sender.accountId } };
   } catch (e) {
     // Back to the window it was charged to; a newer day keeps its own count.
-    if (hits.get('day') === day && day.n > 0) day.n--;
+    refund();
     if (e instanceof RelayError) {
       if (
         e.code === 'payment_not_safe' &&
@@ -191,7 +286,13 @@ export async function handle(
         ipAdmission.n--;
       if (e.code === 'in_flight')
         return { status: 202, body: { pending: true, retryAfterMs: 5000 } };
-      return { status: STATUS[e.code], body: { error: e.code, message: e.message } };
+      return {
+        status: STATUS[e.code],
+        body: { error: e.code, message: e.message },
+        ...(e.retryAt !== undefined
+          ? { retrySeconds: Math.max(1, Math.ceil((e.retryAt - Date.now()) / 1000)) }
+          : {}),
+      };
     }
     return { status: 500, body: { error: 'internal', message: 'unexpected error' } };
   }
@@ -213,10 +314,12 @@ const CORS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, POST',
   'access-control-allow-headers': 'content-type',
+  'access-control-expose-headers': 'Retry-After',
 };
 
 /** The HTTP server; nothing a client sends can make the request handler throw. */
 export function serve(c: Config, port: number, keeperSeconds = 0) {
+  if (c.alertWebhook !== undefined) webhookUrl(c.alertWebhook);
   if (c.keeper?.alertWebhook !== undefined) webhookUrl(c.keeper.alertWebhook);
   if (
     c.keeper &&
@@ -231,16 +334,21 @@ export function serve(c: Config, port: number, keeperSeconds = 0) {
       if (!res.headersSent && res.writable) res.writeHead(400, CORS).end();
     });
   });
-  server.once('close', stopKeeper);
+  const stopAlerts = monitorRelayer(c);
+  server.once('close', () => {
+    stopKeeper();
+    stopAlerts();
+  });
   return server.listen(port, () =>
     console.log(`annon relayer on :${port} for ${c.contractId} as ${c.sender.accountId}`),
   );
 }
 
 /** Keeper passes every `seconds`, one at a time, each over every delivery. */
-function keeper(c: Config, seconds: number) {
+export function keeper(c: Config, seconds: number) {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let cachedConfig: Awaited<ReturnType<typeof getConfig>> | undefined;
   const pass = async () => {
     if (stopped) return;
     if (!c.disabled) {
@@ -252,8 +360,9 @@ function keeper(c: Config, seconds: number) {
         await mkdir(jobs, { recursive: true, mode: 0o700 });
         await mkdir(budgets, { recursive: true, mode: 0o700 });
         const deliveries: Promise<void>[] = [];
+        cachedConfig ??= await getConfig(c.nearRpc, c.contractId);
         const options: KeepOptions = {
-          network: (await getConfig(c.nearRpc, c.contractId)).network,
+          network: cachedConfig.network,
           nearRpc: c.nearRpc,
           contractId: c.contractId,
           sender: k.sender,
@@ -336,16 +445,87 @@ async function respond(c: Config, req: IncomingMessage, res: ServerResponse) {
       JSON.stringify({
         at: new Date().toISOString(),
         ip,
-        method: r.method,
-        file,
+        method: logField(r.method, 32),
+        file: logField(file, 66),
         status: out.status,
         ...(out.body as object),
       }),
     );
   }
   res
-    .writeHead(out.status, { ...CORS, 'content-type': 'application/json' })
+    .writeHead(out.status, {
+      ...CORS,
+      ...('headers' in out ? out.headers : {}),
+      'content-type': 'application/json',
+    })
     .end(JSON.stringify(out.body));
+}
+
+export const logField = (value: unknown, max: number): string | undefined =>
+  typeof value === 'string' ? value.slice(0, max) : undefined;
+
+type RelayerAlert = {
+  type: 'low_balance' | 'storage_low';
+  balance?: string;
+  needed?: string;
+  reserve?: string;
+};
+const relayerLow = new WeakMap<Config, Set<string>>();
+/** One finalized balance sample; repeated low conditions alert only on transition. */
+export async function relayerAlerts(c: Config): Promise<RelayerAlert[]> {
+  const block = await rpcReply(c.nearRpc, 'block', { finality: 'final' });
+  const hash = (block.result as { header?: { hash?: string } })?.header?.hash;
+  if (block.error || !hash) throw new Error('final relayer balance block unavailable');
+  const price = await rpcReply(c.nearRpc, 'gas_price', { block_id: hash });
+  const gasPrice = (price.result as { gas_price?: string })?.gas_price;
+  if (price.error || typeof gasPrice !== 'string' || !/^[0-9]+$/.test(gasPrice))
+    throw new Error('relayer gas price unavailable');
+  const [funds, storage] = await Promise.all([
+    keeperBalance({
+      nearRpc: c.nearRpc,
+      accountId: c.sender.accountId,
+      contractId: c.contractId,
+      block: hash,
+      gasPrice: BigInt(gasPrice),
+      method: 'unlock',
+      args: {},
+      gas: 300000000000000n,
+    }),
+    view(c.nearRpc, c.contractId, 'storage_balance_of', { account_id: c.sender.accountId }, hash),
+  ]);
+  if (typeof storage !== 'string' || !/^[0-9]+$/.test(storage))
+    throw new Error('relayer storage balance unavailable');
+  const needed = funds.cost > (c.balanceLowWater ?? 0n) ? funds.cost : (c.balanceLowWater ?? 0n);
+  const low: RelayerAlert[] = [];
+  if (funds.balance < needed)
+    low.push({ type: 'low_balance', balance: String(funds.balance), needed: String(needed) });
+  if (BigInt(storage) < (c.storageLowWater ?? 100000000000000000000000n))
+    low.push({ type: 'storage_low', reserve: storage });
+  const old = relayerLow.get(c) ?? new Set<string>();
+  relayerLow.set(c, new Set(low.map((a) => a.type)));
+  return low.filter((a) => !old.has(a.type));
+}
+function monitorRelayer(c: Config): () => void {
+  if (c.balanceLowWater === undefined && c.storageLowWater === undefined && !c.alertWebhook)
+    return () => {};
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout>;
+  const pass = async () => {
+    try {
+      for (const alert of await relayerAlerts(c)) {
+        console.log(JSON.stringify({ relayer: 'alert', ...alert }));
+        if (c.alertWebhook) await deliverKeeperAlert(c.alertWebhook, alert, fetch, 'relayer');
+      }
+    } catch {
+      /* Monitoring failure cannot interrupt admission or expose endpoint credentials. */
+    }
+    if (!stopped) timer = setTimeout(pass, 60000).unref();
+  };
+  timer = setTimeout(pass, 60000).unref();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
 }
 
 function webhookUrl(value: string): string {
@@ -368,8 +548,9 @@ function webhookUrl(value: string): string {
 /** Failures are deliberately contained; only public keeper alert fields are delivered. */
 export async function deliverKeeperAlert(
   url: string,
-  value: Parameters<NonNullable<KeepOptions['alert']>>[0],
+  value: Parameters<NonNullable<KeepOptions['alert']>>[0] | RelayerAlert,
   fetcher: typeof fetch = fetch,
+  source = 'keeper',
 ): Promise<void> {
   try {
     const alert: Record<string, string | number> = { type: value.type };
@@ -377,12 +558,16 @@ export async function deliverKeeperAlert(
       const n = value[field];
       if (typeof n === 'string' && /^[0-9]+$/.test(n)) alert[field] = n;
     }
-    if (Number.isSafeInteger(value.deliveryId) && (value.deliveryId ?? -1) >= 0)
+    if (
+      'deliveryId' in value &&
+      Number.isSafeInteger(value.deliveryId) &&
+      (value.deliveryId ?? -1) >= 0
+    )
       alert.deliveryId = value.deliveryId as number;
     const response = await fetcher(webhookUrl(url), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: `keeper: alert ${JSON.stringify(alert)}`, alert }),
+      body: JSON.stringify({ text: `${source}: alert ${JSON.stringify(alert)}`, alert }),
       signal: AbortSignal.timeout(3000),
       redirect: 'error',
     });
@@ -445,22 +630,49 @@ export function fromEnv(e: Record<string, string | undefined>): {
       keeperConfig.sender.key === env('RELAYER_KEY'))
   )
     throw new Error('keeper requires a separate account and key');
+  const contractId = env('CONTRACT_ID');
+  if (!sellers?.length && e.DEV_ALLOW_ANY_SELLER !== '1')
+    throw new Error('SELLERS is required; DEV_ALLOW_ANY_SELLER=1 is for development only');
+  const perDay = count('PER_DAY', '500');
+  const unlockReserved = count('UNLOCK_RESERVED', String(Math.ceil(perDay / 2)));
+  if (unlockReserved > perDay) throw new Error('UNLOCK_RESERVED cannot exceed PER_DAY');
   return {
     config: {
       nearRpc: env('NEAR_RPC', 'https://rpc.mainnet.fastnear.com'),
       baseRpc: env('BASE_RPC', 'https://mainnet.base.org'),
-      contractId: env('CONTRACT_ID'),
+      contractId,
       usdc: env('USDC', '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'),
       sender: { accountId: env('RELAYER_ACCOUNT'), key: env('RELAYER_KEY') },
       policy: {
         minPrice: BigInt(count('MIN_PRICE', '10000')),
         maxDeadlineSeconds: count('MAX_DEADLINE_SECONDS', '600'),
+        claimsPerPurchase: count('CLAIMS_PER_PURCHASE_DAY', '3'),
+        registrationsPerSeller: count('REGISTRATIONS_PER_SELLER_DAY', '20'),
+        reopensPerWalletFile: count('REOPENS_PER_PURCHASE_DAY', '10'),
+        holdMs: count('HOLD_SECONDS', '900') * 1000,
+        maxWaiting: count('MAX_WAITING', '32'),
+        maxChecking: count('MAX_CHECKING', '32'),
         ...(sellers?.length ? { sellerAllowed: (s: string) => sellers.includes(s) } : {}),
       },
       ...(keeperConfig ? { keeper: keeperConfig } : {}),
       disabled: env('DISABLED', '0') === '1',
       perIpHour: count('PER_IP_HOUR', '60'),
-      perDay: count('PER_DAY', '500'),
+      perDay,
+      unlockReserved,
+      perMethodDay: Object.fromEntries(
+        ['register', 'unlock', 'claim_key', 'reopen', 'reopen_seller', 'stop_sales'].map((m) => [
+          m,
+          count(`PER_DAY_${m.toUpperCase()}`, env('PER_DAY', '500')),
+        ]),
+      ),
+      hitsCap: Math.max(1, count('HITS_CAP', '100000')),
+      requestMultiplier: count('REQUEST_MULTIPLIER', '10'),
+      retrySeconds: count('RETRY_SECONDS', '5'),
+      balanceLowWater: yocto('RELAYER_BALANCE_LOW_WATER', '100000000000000000000000'),
+      storageLowWater: yocto('RELAYER_STORAGE_LOW_WATER', '100000000000000000000000'),
+      ...(e.RELAYER_ALERT_WEBHOOK?.trim()
+        ? { alertWebhook: webhookUrl(e.RELAYER_ALERT_WEBHOOK.trim()) }
+        : {}),
       ...(e.IP_HEADER?.trim() ? { ipHeader: e.IP_HEADER.trim().toLowerCase() } : {}),
     },
     port: count('PORT', '8080'),
