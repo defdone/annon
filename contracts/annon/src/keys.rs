@@ -116,9 +116,17 @@ impl Annon {
         require!(self.file(&file_id).taken_down == 0, "file taken down");
         require!(valid_bls_key(&key), "invalid one-time key");
         let marker = key_marker(&id, &key);
-        let grant = match self.grant_of_key.get(&marker) {
-            Some(g) => *g,
-            None if key == rec.buyer_key => 0,
+        let known = match self.grant_of_key.get(&marker) {
+            Some(g) => Some(*g),
+            None if key == rec.buyer_key => Some(0),
+            None => None,
+        };
+        let grant = match known {
+            // Nothing new to store: the attached deposit goes back whole.
+            Some(g) => {
+                self.pay_for_storage(0);
+                g
+            }
             None => {
                 let before = env::storage_usage();
                 let rec = self.purchases.get_mut(&id).unwrap();

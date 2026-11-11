@@ -103,7 +103,10 @@ valid until: <UTC, YYYY-MM-DD HH:MM:SS UTC>
 ```
 
 `register(args, auth)`; `near` sellers call it themselves; EVM and Solana sellers sign and may
-use the relayer. It stores the terms and requests CKD for the seller key.
+use the relayer. It stores the terms and requests CKD for the seller key. The seller key, like every
+one-time key (`reopen_seller`, `reopen`, the buyer key), must be a compressed G1 point in the
+prime-order subgroup and not the point at infinity: MPC would publish the file key in the clear for
+the point at infinity.
 
 ### 3.3 Header publication
 
@@ -205,7 +208,9 @@ null. After sales stop, `header` must be `"0x<RLP of the payment block header>"`
 log's block hash and number. A payment is allowed if its Base block time is at most
 `sales_stopped_at + STOP_SETTLEMENT_SECONDS`, where `STOP_SETTLEMENT_SECONDS = 300` (inclusive).
 An allowed payment remains unlockable regardless of when unlock runs. A stop during the MPC
-callback can require a retry with the header. Takedown blocks release throughout.
+callback can require a retry with the header. A takedown refuses every new key request (`unlock`,
+`claim_key`, `reopen`, `reopen_seller`); a request already sent to MPC before the takedown may still
+complete, because its answer is published on chain by MPC and cannot be withdrawn.
 
 ## 6. Receiving USDC (`ft_on_transfer`)
 
@@ -253,7 +258,11 @@ States: `Pending → InFlight(attempt) → Done | Pending` for both steps. `InFl
 time or by anyone. Entry points, permissionless and unable to change amounts or destinations:
 `fund_delivery(delivery_id)`, `pay_slot(delivery_id, slot)`. Callbacks are private, check the
 attempt, and write only fixed-width fields with a fixed gas allowance. The keeper calls these after
-each acceptance. Payout state never affects the buyer's entitlement.
+each acceptance. Payout state never affects the buyer's entitlement. Once a delivery is funded and
+every slot is paid, its record is removed and the storage it held returns to the delivery reserve
+(`delivery_settled` event); `get_delivery` then returns null, the purchase keeps its `delivery` id.
+`delivery_count()` is the number of delivery ids ever assigned; ids without a record are refund
+leaves not yet materialized or settled deliveries. `receiver_reserve()` shows the reserve.
 
 Known limit (SECURITY.md): if a callback itself fails (a bug or under-provisioned gas), that slot
 stays `InFlight`: never paid twice, never redirected, fixable only by a contract upgrade.
@@ -274,7 +283,8 @@ Leaf indexes start at 0 and are appended left to right. A proof lists siblings f
 child. The empty root is `zero[32]`.
 
 `materialize_refund(leaf_fields, index, proof: Vec<[u8;32]>)`, payable (the caller funds storage):
-checks inclusion under the current root and a one-time marker, then creates an ordinary refund
+checks inclusion under the current root or one of the last 32 roots (so appends after the proof
+was built do not void it) and a one-time marker, then creates an ordinary refund
 obligation (§7). Events carry every leaf so anyone (the keeper) can build proofs.
 
 ## 9. Key release and recovery

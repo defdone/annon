@@ -236,7 +236,7 @@ impl World {
     }
 
     fn register_args(&self, file: &str, seller: Value) -> Value {
-        json!({ "terms": self.terms(file, seller), "seller_key": hex0x(&[0x33; 48]), "deadline": DEADLINE })
+        json!({ "terms": self.terms(file, seller), "seller_key": G1, "deadline": DEADLINE })
     }
 
     async fn text(&self, method: &str, args: &Value) -> anyhow::Result<String> {
@@ -1000,6 +1000,10 @@ async fn a_near_purchase_is_split_through_intents_and_releases_the_key() -> anyh
         "the excess back to the refund identity"
     );
     assert_eq!(w.intents_balance(w.annon.id().as_str()).await?, 0);
+    assert!(
+        w.delivery(0).await?.is_null(),
+        "a settled delivery frees its storage"
+    );
     let again = w
         .keeper("pay_slot", json!({ "delivery_id": 0, "slot": 0 }), 80)
         .await?;

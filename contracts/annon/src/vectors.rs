@@ -279,3 +279,16 @@ fn seller_and_buyer_texts_match() {
         assert_eq!(text, s(&c["text"]), "{}", c["id"]);
     }
 }
+
+#[test]
+fn publish_texts_match() {
+    for v in load("near-settlement.json")["pay2"].as_array().unwrap() {
+        let i = &v["input"];
+        let text = crate::terms::publish_text(
+            &s(&i["contractId"]).parse().unwrap(),
+            &bytes::<32>(s(&i["fileId"]), "file_id"),
+            &bytes::<32>(s(&v["header_hash"]), "header_hash"),
+        );
+        assert_eq!(text, s(&v["publish_text"]), "{}", v["id"]);
+    }
+}

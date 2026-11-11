@@ -48,6 +48,31 @@ fn then(p: PromiseIndex, method: &str, args: String) {
     );
 }
 
+impl Annon {
+    /// Once a delivery is funded and every slot paid, its record goes and the storage it held
+    /// returns to the delivery reserve, so the reserve is spent only on deliveries still being
+    /// paid out (a flood of tiny refunds can't use it up for good). The events keep the history.
+    fn settle(&mut self, delivery_id: u64) {
+        let done = self
+            .deliveries
+            .get(&delivery_id)
+            .is_some_and(|d| d.fund.state == DONE && d.slots.iter().all(|s| s.step.state == DONE));
+        if !done {
+            return;
+        }
+        self.deliveries.flush();
+        let before = env::storage_usage();
+        self.deliveries.remove(&delivery_id);
+        self.deliveries.flush();
+        let freed = before.saturating_sub(env::storage_usage());
+        self.reserve += env::storage_byte_cost().as_yoctonear() * u128::from(freed);
+        emit(
+            "delivery_settled",
+            json!({ "delivery_id": delivery_id, "freed_bytes": freed }),
+        );
+    }
+}
+
 #[near]
 impl Annon {
     /// Moves what is left of a delivery's USDC into this contract's Intents balance.
@@ -121,6 +146,7 @@ impl Annon {
                 "slot_paid",
                 json!({ "delivery_id": delivery_id, "slot": slot, "local": true }),
             );
+            self.settle(delivery_id);
             return;
         }
         s.step.state = IN_FLIGHT;
@@ -156,6 +182,7 @@ impl Annon {
                 "slot_paid",
                 json!({ "delivery_id": delivery_id, "slot": slot, "attempt": attempt, "to": s.to.text(), "amount": U128(s.amount) }),
             );
+            self.settle(delivery_id);
         } else {
             env::log_str("mt_transfer failed; the slot is pending again");
         }

@@ -14,6 +14,8 @@ use near_sdk::{env, near, require, AccountId, PanicOnDefault};
 
 mod events;
 mod evm;
+#[cfg(test)]
+mod gaps;
 mod identity;
 mod keys;
 mod merkle;

@@ -41,12 +41,20 @@ fn zeros() -> [[u8; 32]; DEPTH + 1] {
     z
 }
 
+/// How many recent roots a proof may name: a proof made against a root stays valid while up to
+/// this many leaves are appended after it, so new deliveries can't keep invalidating a refund.
+pub const RECENT_ROOTS: usize = 32;
+/// Leaves the tree can hold (2^32).
+pub const CAPACITY: u64 = 1 << DEPTH;
+
 #[near(serializers = [borsh])]
 pub struct Accumulator {
     /// The left sibling at each height on the path of the next leaf.
     frontier: [[u8; 32]; DEPTH],
     pub count: u64,
     pub root: [u8; 32],
+    /// The root after each of the last `RECENT_ROOTS` appends, at `count % RECENT_ROOTS`.
+    recent: [[u8; 32]; RECENT_ROOTS],
 }
 
 impl Accumulator {
@@ -55,11 +63,23 @@ impl Accumulator {
             frontier: [[0; 32]; DEPTH],
             count: 0,
             root: zeros()[DEPTH],
+            recent: [zeros()[DEPTH]; RECENT_ROOTS],
         }
     }
 
-    /// Appends a leaf; returns its index. Writes only fixed-size fields.
+    pub fn is_full(&self) -> bool {
+        self.count >= CAPACITY
+    }
+
+    /// Whether `root` is the current root or one of the recent ones.
+    pub fn knows(&self, root: &[u8; 32]) -> bool {
+        &self.root == root || self.recent.contains(root)
+    }
+
+    /// Appends a leaf; returns its index. Writes only fixed-size fields. The caller checks
+    /// `is_full` first.
     pub fn push(&mut self, leaf: [u8; 32]) -> u64 {
+        assert!(!self.is_full(), "refund tree is full");
         let z = zeros();
         let index = self.count;
         let (mut cur, mut i) = (leaf, index);
@@ -74,14 +94,16 @@ impl Accumulator {
         }
         self.root = cur;
         self.count += 1;
+        self.recent[(self.count % RECENT_ROOTS as u64) as usize] = cur;
         index
     }
 }
 
-/// Whether `leaf` is at `index` under `root`, given its sibling path from the bottom.
-pub fn verify(root: &[u8; 32], leaf: [u8; 32], index: u64, proof: &[[u8; 32]]) -> bool {
-    if proof.len() != DEPTH || index >= 1 << DEPTH {
-        return false;
+/// The root a leaf at `index` with this sibling path (from the bottom) leads to; None for a
+/// malformed proof or an index outside the tree.
+pub fn root_of(leaf: [u8; 32], index: u64, proof: &[[u8; 32]]) -> Option<[u8; 32]> {
+    if proof.len() != DEPTH || index >= CAPACITY {
+        return None;
     }
     let mut cur = leaf;
     for (h, sib) in proof.iter().enumerate() {
@@ -91,7 +113,13 @@ pub fn verify(root: &[u8; 32], leaf: [u8; 32], index: u64, proof: &[[u8; 32]]) -
             node(sib, &cur)
         };
     }
-    &cur == root
+    Some(cur)
+}
+
+/// Whether `leaf` is at `index` under `root`, given its sibling path from the bottom.
+#[cfg(test)]
+pub fn verify(root: &[u8; 32], leaf: [u8; 32], index: u64, proof: &[[u8; 32]]) -> bool {
+    root_of(leaf, index, proof).as_ref() == Some(root)
 }
 
 #[cfg(test)]

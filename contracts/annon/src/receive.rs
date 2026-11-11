@@ -7,7 +7,7 @@ use near_sdk::{env, near, require, AccountId};
 use crate::events::emit;
 use crate::evm::{bytes, hex0x};
 use crate::identity::{Identity, IdentityJson};
-use crate::merkle::{verify, Leaf};
+use crate::merkle::{root_of, Leaf};
 use crate::purchase::{parse, Parsed, Purchase};
 use crate::register::now;
 use crate::state::{Delivery, PurchaseRec, Slot, Step, PENDING};
@@ -129,6 +129,12 @@ impl Annon {
 
         let byte = env::storage_byte_cost().as_yoctonear();
         if self.reserve < byte * u128::from(DELIVERY_BYTES) {
+            if self.refunds.is_full() {
+                // ponytail: 2^32 leaves; unreachable in practice. Refused, so NEP-141 returns it.
+                env::log_str("delivery refused: no storage reserve and the refund tree is full");
+                self.next_delivery -= 1;
+                return amount;
+            }
             // No storage of its own: a fixed-size leaf in the refund accumulator instead.
             let leaf = Leaf {
                 network: self.network.clone(),
@@ -257,8 +263,9 @@ impl Annon {
             amount: leaf.amount.0,
         };
         let proof: Vec<[u8; 32]> = proof.iter().map(|p| bytes::<32>(p, "proof")).collect();
+        // The current root or a recent one: deliveries appended meanwhile don't void the proof.
         require!(
-            verify(&self.refunds.root, l.hash(), index, &proof),
+            root_of(l.hash(), index, &proof).is_some_and(|r| self.refunds.knows(&r)),
             "not a leaf of the refund accumulator"
         );
         require!(

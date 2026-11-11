@@ -9,6 +9,7 @@ use near_sdk::{env, near, require, AccountId};
 use crate::events::emit;
 use crate::evm::{bytes, hex0x};
 use crate::identity::{Auth, Identity, IdentityJson};
+use crate::purchase::valid_bls_key;
 use crate::state::File;
 use crate::terms::{self, BaseTerms, NearTerms, Terms};
 use crate::text::utc;
@@ -172,6 +173,8 @@ impl Annon {
     pub fn register(&mut self, args: RegisterArgs, auth: Option<Auth>) {
         let terms = args.terms.decode();
         let seller_key = bytes::<48>(&args.seller_key, "seller_key");
+        // A key MPC can't use fails the release; the point at infinity would publish the file key.
+        require!(valid_bls_key(&seller_key), "invalid one-time key");
         if let Some(why) = terms.problem(&self.network, &self.near_usdc) {
             env::panic_str(why);
         }
@@ -266,6 +269,7 @@ impl Annon {
             "key",
         );
         require!(now() <= args.deadline, "signature expired");
+        require!(valid_bls_key(&key), "invalid one-time key");
         let text = self.reopen_seller_text(args);
         let file = self.file(&file_id);
         self.seller_authorized(file, &text, auth.as_ref());
@@ -328,10 +332,11 @@ mod tests {
     use near_sdk::test_utils::get_created_receipts;
     use near_sdk::NearToken;
 
+    /// Seller reopen arguments for a real one-time key: "44" is 2·G, "55" is G.
     fn seller_args(key: &str) -> SellerArgs {
         SellerArgs {
             file_id: FILE.into(),
-            key: Some(format!("0x{}", key.repeat(48))),
+            key: Some(if key == "44" { G1X2 } else { G1 }.into()),
             deadline: NOW_S + 600,
         }
     }
@@ -629,7 +634,10 @@ mod tests {
         let call = calls_to("v1.signer", "request_app_private_key")
             .pop()
             .unwrap();
-        let key = format!("bls12381g1:{}", bs58::encode([0x33u8; 48]).into_string());
+        let key = format!(
+            "bls12381g1:{}",
+            bs58::encode(hex::decode(&G1[2..]).unwrap()).into_string()
+        );
         assert_eq!(
             call,
             near_sdk::serde_json::json!({ "request": {
