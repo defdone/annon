@@ -99,13 +99,21 @@ Explicit Base fails if that route or a funded EOA is unavailable; it never silen
 another payment route. Each invocation of buy creates a purchase: after an uncertain reply,
 retain the saved backup and check status rather than buying again.
 
-1Click uses `--from-chain` (its blockchain name, e.g. `base`, `eth`, `solana`) and, optionally,
+1Click accepts `--from-chain solana` or `sol` (ID `sol`), `ethereum` or `eth` (ID `eth`),
+`arbitrum`/`arb`, `polygon`/`pol`, `optimism`/`op`, `avalanche`/`avax`, and `berachain`/`bera`.
+Other chain IDs pass through unchanged. EVM refund defaults use `eth`, `base`, `arb`, `pol`, `op`,
+`avax`, `bsc`, `gnosis`, `bera`, `scroll`, `monad`, `xlayer`, `abs`, and `plasma`.
+The optional
 `--from-asset` (the exact `nep141:` asset ID). Without an asset it selects the unique USDC
-entry for that blockchain in 1Click's token list. For BTC, other tokens, or ambiguous USDC
+entry for that blockchain in 1Click's token list. Symbols such as `sUSDC` are not USDC matches. For BTC, other tokens, or ambiguous USDC
 entries, specify `--from-asset`. `--refund-to` must name a refund address on the source
 chain; it defaults to the selected wallet's address only when the chain family matches.
 These also have `ANNON_FROM_CHAIN`, `ANNON_FROM_ASSET`, `ANNON_REFUND_TO` equivalents.
 Human configuration can define named `origins`, for example `{"base-usdc":{"fromChain":"base","fromAsset":"nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"}}`, or the same JSON in `ANNON_ORIGINS`. Select one with `--origin base-usdc`. Each may specify `refundTo`; otherwise the configured `ANNON_REFUND_TO` or matching wallet address is used.
+
+For a human 1Click purchase, the SDK saves the live EXACT_OUTPUT quote and encrypted purchase record before confirmation. The terms show the source chain, asset, symbol and token contract when known, input amount in human and base units, and deposit cutoff. No funds are sent by quoting or confirming these instructions. Recovery proof follows review. Declining buys nothing and leaves an unpaid encrypted purchase record. The same live quote supplies the returned instructions. After review and recovery proof, at least ten minutes must remain before the deposit cutoff, otherwise the CLI returns `quote_expired`: "The 1Click quote expired. Run buy again." Human terminal mode requires a prompt before requesting a quote. Explicit assets bypass token lookup; human units then use the quote's formatted amount when available.
+
+Successful CLI JSON and agent results also include `source` with `chain`, `asset`, `amount`, `amountFormatted` when known, and `depositBefore`, plus available symbol, decimals and contract metadata. JSON and agent modes do not add an interactive prompt. A 1Click failure before deposit instructions return releases the agent budget reservation; returning instructions keeps it reserved.
 
 The result includes `instructions.address`, `amount` in source token base units, `asset`,
 `chain`, optional `memo`, and `qrData`. Fund these externally with the wallet you already use.
@@ -119,7 +127,7 @@ request deadline. That extension must not extend the buyer's cutoff or contract 
 The [1Click OpenAPI](https://1click.chaindefuser.com/docs/v0/openapi.yaml) describes request `deadline`
 as the start of refund handling, response `deadline` as address inactivity, and `timeEstimate` as
 execution time after deposit confirmation. Late delivery can be refused by Annon; service SUCCESS
-alone does not prove acceptance. `status` resumes a saved paid Base purchase by requesting unlock, then checks final NEAR acceptance; 1Click SUCCESS alone
+alone does not prove acceptance. `status` resumes a saved paid Base purchase by requesting unlock, then checks final NEAR acceptance. An unsafe payment returns `payment_not_safe` immediately with exit code 4 (pending); 1Click SUCCESS alone
 does not grant access.
 
 The signing wallet is also the recovery identity. `--recovery kind:id` on buy explicitly

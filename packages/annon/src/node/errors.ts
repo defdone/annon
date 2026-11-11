@@ -1,5 +1,7 @@
 import { SellError } from '../api/annon.js';
+import { NearRpcRateLimited } from '../near/rpc.js';
 import { OneClickRefused } from '../oneclick/oneclick.js';
+import { BaseRpcRateLimited } from '../pay/base.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
 import { BudgetError } from './budget.js';
 
@@ -16,6 +18,7 @@ export class AdapterError extends Error {
 export const usage = () =>
   new AdapterError('invalid_arguments', 'Invalid arguments. Run annon --help.', 2);
 const actions: Record<string, string> = {
+  quote_expired: 'The 1Click quote expired. Run buy again.',
   settlement_processing: 'The purchase is still settling. Check status and resume before opening.',
   storage_required:
     'Prepay storage with storageDeposit before register or reopen, then resume the saved operation.',
@@ -52,6 +55,19 @@ export function publicError(error: unknown): {
   txHash?: string;
   minimumAmountUsdc?: string;
 } {
+  if (error instanceof BaseRpcRateLimited)
+    return {
+      code: 'base_rpc_rate_limited',
+      message:
+        'The Base RPC is rate limiting requests. Configure a Base RPC endpoint with an API key (baseRpc).',
+      exitCode: 1,
+    };
+  if (error instanceof NearRpcRateLimited)
+    return {
+      code: 'near_rpc_rate_limited',
+      message: 'Configure a NEAR RPC endpoint with an API key (nearRpc)',
+      exitCode: 1,
+    };
   if (error instanceof OneClickRefused)
     return {
       code: error.code,

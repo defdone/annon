@@ -140,6 +140,49 @@ describe('relayer HTTP', () => {
     });
   });
 
+  it('refunds unsafe unlock admission but still charges coarse requests and successful admissions', async () => {
+    const c = config({ perIpHour: 1, perDay: 1 });
+    const unsafe = vi.fn(async () => {
+      throw new RelayError('payment_not_safe');
+    });
+    for (let i = 0; i < 3; i++) {
+      expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, unsafe)).status).toBe(425);
+      expect(hits.get('ip:buyer')?.n).toBe(0);
+      expect(hits.get('day')?.n).toBe(0);
+    }
+    expect(hits.get('req:buyer')?.n).toBe(3);
+    expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, ok)).status).toBe(200);
+    expect(hits.get('ip:buyer')?.n).toBe(1);
+    expect(hits.get('day')?.n).toBe(1);
+    expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, unsafe)).status).toBe(429);
+    expect(unsafe).toHaveBeenCalledTimes(3);
+  });
+  it('does not refund other refusals or a newer IP admission window', async () => {
+    const c = config({ perIpHour: 1, perDay: 1 });
+    const refused = async () => {
+      throw new RelayError('bad_signature');
+    };
+    expect((await handle(c, 'POST', '/v1/relay', 'buyer', body, refused)).status).toBe(400);
+    expect(hits.get('ip:buyer')?.n).toBe(1);
+    let reject: (error: Error) => void = () => {};
+    const pending = handle(
+      c,
+      'POST',
+      '/v1/relay',
+      'other',
+      body,
+      async () =>
+        new Promise<never>((_resolve, r) => {
+          reject = r;
+        }),
+    );
+    const newerWindow = { n: 1, until: Date.now() + 7200000 };
+    hits.set('ip:other', newerWindow);
+    reject(new RelayError('payment_not_safe'));
+    expect((await pending).status).toBe(425);
+    expect(hits.get('ip:other')).toEqual(newerWindow);
+    expect(newerWindow.n).toBe(1);
+  });
   it.each(['pending', 'outcome'] as const)(
     'does not charge admitted %s polling against the IP or daily budget',
     async (mode) => {

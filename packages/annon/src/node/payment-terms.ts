@@ -1,4 +1,5 @@
 import type { Config } from '../near/rpc.js';
+import type { OneClickQuote } from '../oneclick/oneclick.js';
 import { usdc } from '../settle-near/codec.js';
 import { BASE_USDC, NEAR_USDC, type NearTerms } from '../settle-near/terms.js';
 import { AdapterError } from './errors.js';
@@ -31,6 +32,44 @@ export function validatePaymentToken(
     );
 }
 
+export interface SourceAsset {
+  chain: string;
+  asset: string;
+  symbol?: string;
+  decimals?: number;
+  contractAddress?: string;
+}
+export interface SourcePayment extends SourceAsset {
+  amount: string;
+  amountFormatted?: string;
+  depositBefore: string;
+}
+export function quotedSource(quote: OneClickQuote, asset: SourceAsset): SourcePayment {
+  const amount = quote.deposit.amount;
+  const decimals = asset.decimals;
+  const q = quote.response.quote as { amountInFormatted?: unknown } | undefined;
+  let formatted: string | undefined;
+  if (decimals !== undefined) {
+    const digits = BigInt(amount)
+      .toString()
+      .padStart(decimals + 1, '0');
+    const fraction = decimals === 0 ? '' : digits.slice(-decimals).replace(/0+$/, '');
+    formatted =
+      (decimals === 0 ? digits : digits.slice(0, -decimals)) + (fraction ? `.${fraction}` : '');
+  } else if (
+    typeof q?.amountInFormatted === 'string' &&
+    /^(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(q.amountInFormatted)
+  ) {
+    formatted = q.amountInFormatted;
+  }
+  return {
+    ...asset,
+    amount,
+    ...(formatted === undefined ? {} : { amountFormatted: formatted }),
+    depositBefore: quote.deposit.depositBefore,
+  };
+}
+
 export function humanPaymentTerms(
   t: {
     file: string;
@@ -42,6 +81,7 @@ export function humanPaymentTerms(
     recipients: NearTerms['recipients'];
     remainder: number;
     baseRecipient?: string | undefined;
+    source?: SourcePayment;
   },
   config?: PaymentConfig,
 ): string {
@@ -61,6 +101,15 @@ export function humanPaymentTerms(
     `Route: ${t.route}`,
     `Token: USDC on ${t.route === 'base' ? 'Base' : 'NEAR'} (${t.token})`,
     `Price: ${usdc(price)} USDC`,
+    ...(t.source
+      ? [
+          `Source chain: ${t.source.chain === 'sol' ? 'Solana (sol)' : t.source.chain === 'eth' ? 'Ethereum (eth)' : t.source.chain}`,
+          `Source asset: ${t.source.symbol ?? t.source.asset}${t.source.contractAddress ? ` (${t.source.contractAddress})` : ''}`,
+          `Source asset ID: ${t.source.asset}`,
+          `Source amount: ${t.source.amountFormatted === undefined ? 'human units unavailable' : `${t.source.amountFormatted} ${t.source.symbol ?? 'tokens'}`} (${t.source.amount} base units)`,
+          `Deposit before: ${t.source.depositBefore}`,
+        ]
+      : []),
     ...t.recipients.map(
       (r, i) => `Recipient: ${recipient(i)} | ${r.bps / 100}% | ${usdc(amounts[i] ?? 0n)} USDC`,
     ),

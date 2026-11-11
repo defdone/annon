@@ -24,6 +24,9 @@ export interface RecoveryRecord extends Versioned {
 export interface SellRecord extends Versioned {
   kind: 'sell';
   terms: import('../settle-near/terms.js').Terms;
+  /** Immutable Base split provenance. Recipients and bps come from terms.near;
+   * totalAllocation is 10000 and distributionIncentive is 0. Optional for older records. */
+  baseSplit?: { address: string; kind: 'push' | 'pull'; salt: string };
   published?: boolean;
   fileKey: string | null;
   sellerSecret: string | null;

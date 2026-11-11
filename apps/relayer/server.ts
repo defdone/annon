@@ -158,7 +158,8 @@ export async function handle(
     }
   }
   const now = Date.now();
-  if (!allow(`ip:${ip}`, c.perIpHour, 3_600_000, now)) {
+  const ipAdmission = allow(`ip:${ip}`, c.perIpHour, 3_600_000, now);
+  if (!ipAdmission) {
     return {
       status: 429,
       body: { error: 'rate_limited', message: 'too many requests from this address' },
@@ -182,6 +183,12 @@ export async function handle(
     // Back to the window it was charged to; a newer day keeps its own count.
     if (hits.get('day') === day && day.n > 0) day.n--;
     if (e instanceof RelayError) {
+      if (
+        e.code === 'payment_not_safe' &&
+        hits.get(`ip:${ip}`) === ipAdmission &&
+        ipAdmission.n > 0
+      )
+        ipAdmission.n--;
       if (e.code === 'in_flight')
         return { status: 202, body: { pending: true, retryAfterMs: 5000 } };
       return { status: STATUS[e.code], body: { error: e.code, message: e.message } };

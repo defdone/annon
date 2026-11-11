@@ -17,7 +17,7 @@ docker run -p 8080:8080 --env-file relayer.env annon-relayer
 | `RELAYER_ACCOUNT` | yes | The NEAR account that sends and pays |
 | `RELAYER_KEY` | yes, secret | A function-call key of that account for the six relay methods, on that contract only |
 | `SELLERS` | no, secret | Comma-separated `kind:id` seller identities (e.g. `evm:0x…`, `near:seller.near`, `solana:<base58>`); empty serves any seller |
-| `NEAR_RPC`, `BASE_RPC` | no | RPC endpoints (defaults: FastNEAR, `mainnet.base.org`) |
+| `NEAR_RPC`, `BASE_RPC` | no | Defaults are public RPC endpoints; use endpoints with API keys for production |
 | `USDC` | no | USDC on Base (default: the canonical address) |
 | `MIN_PRICE` | no | Smallest listing price served, USDC base units (default `10000` = 0.01 USDC) |
 | `MAX_DEADLINE_SECONDS` | no | How far ahead a wallet signature may be valid (default `600`) |
@@ -26,6 +26,8 @@ docker run -p 8080:8080 --env-file relayer.env annon-relayer
 | `DISABLED` | no | `1` answers 503 and sends nothing |
 | `KEEPER_SECONDS` | no | Seconds between keeper passes (default `0`, disabled); enabling requires the keeper settings below |
 | `PORT` | no | Default `8080` |
+
+The relayer needs a Base RPC endpoint with an API key in `BASE_RPC`. The file host (`baseRpc`) and CLI for Base purchases (`baseRpc` / `ANNON_BASE_RPC`) need one too. The public `https://mainnet.base.org` rate-limits the burst of reads made during settlement and unlocking. A keeper polling every few seconds also needs a NEAR RPC endpoint with an API key in `NEAR_RPC`. Keep API keys out of public files.
 
 The account needs prepaid storage on the contract (`storage_deposit`) for `register`, `unlock`
 `reopen` and `reopen_seller`. Numeric settings must be whole numbers; anything else stops the start.

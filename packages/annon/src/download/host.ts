@@ -7,6 +7,8 @@ import { BUYER_PROOF_HEADER, readPurchaseProof, verifyBuyerProof } from './proof
 
 export type HostRecord = import('../pay/settle.js').SellerRecord;
 export interface FileHostOptions extends SettleOptions {
+  /** Host-only diagnostics; never included in the HTTP response. */
+  onPaymentError?(error: PayError): void | Promise<void>;
   headerHash: string;
   file: { size: number; read(start: number): ReadableStream<Uint8Array> };
 }
@@ -31,6 +33,11 @@ export async function serveFile(req: HostRequest, o: FileHostOptions): Promise<H
       headers['PAYMENT-RESPONSE'] = b64json(paymentResponse(await settle(payload, o)));
     } catch (e) {
       if (!(e instanceof PayError)) throw e;
+      try {
+        void Promise.resolve(o.onPaymentError?.(e)).catch(() => {});
+      } catch {
+        // Diagnostics must not change the payment response.
+      }
       if (e.code === 'settlement_processing')
         return { status: 503, headers: { ...headers, 'Retry-After': '5' } };
       return {
