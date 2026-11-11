@@ -4,9 +4,12 @@ import {
   fundDelivery,
   getDelivery,
   listDeliveries,
+  listOpenDeliveries,
   materializeRefund,
+  openDeliveryCount,
   paySlot,
   refundRoot,
+  settle,
 } from './keeper.js';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -42,6 +45,48 @@ it('uses the sandbox keeper call shapes, gas and payable materialization', async
       deposit: 10n ** 22n,
     },
   ]);
+});
+
+it('binds settle and pins all open-index views to the same block', async () => {
+  const call = vi.fn(async (_call: import('../wallet/wallet.js').NearCall) => null);
+  await settle({ call }, terms.contract, 17);
+  expect(call).toHaveBeenCalledWith({
+    receiverId: terms.contract,
+    method: 'settle',
+    args: { delivery_id: 17 },
+    gas: 600000000000000n,
+  });
+  const fetch = vi.fn(async (_url, init) => {
+    const q = JSON.parse(init.body);
+    const v = q.params.method_name === 'open_delivery_count' ? 0 : [];
+    expect(q.params.block_id).toBe(12345);
+    expect(q.params.finality).toBeUndefined();
+    return {
+      json: async () => ({ id: q.id, result: { result: [...Buffer.from(JSON.stringify(v))] } }),
+    };
+  });
+  vi.stubGlobal('fetch', fetch);
+  expect(await openDeliveryCount('https://rpc', terms.contract, 12345)).toBe(0);
+  expect(await listOpenDeliveries('https://rpc', terms.contract, 0, 50, 12345)).toEqual([]);
+  await expect(listOpenDeliveries('https://rpc', terms.contract, 0, 51)).rejects.toThrow();
+});
+
+it('materializes with prepaid storage and zero attached deposit for function-call keys', async () => {
+  const call = vi.fn(async (_call: import('../wallet/wallet.js').NearCall) => null);
+  const args = {
+    leaf: { delivery_id: 3, refund: purchase.refund, amount: '7' },
+    index: 0,
+    proof: Array(32).fill(terms.cipher_hash),
+  };
+  await materializeRefund({ call }, terms.contract, args, 0n);
+  expect(call).toHaveBeenCalledWith({
+    receiverId: terms.contract,
+    method: 'materialize_refund',
+    args,
+    gas: 100000000000000n,
+    deposit: 0n,
+  });
+  expect(() => materializeRefund({ call }, terms.contract, args, -1n)).toThrow();
 });
 it('reads delivery, pages (max 50), and refund root at finality', async () => {
   const step = { state: 0, attempt: 0 };

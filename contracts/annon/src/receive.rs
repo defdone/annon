@@ -14,7 +14,7 @@ use crate::state::{Delivery, PurchaseRec, Slot, Step, PENDING};
 use crate::{Annon, AnnonExt};
 
 /// Storage set aside per delivery before it is written (purchase, delivery with up to 9 slots,
-/// recovery index). Debited by what was actually used.
+/// recovery index and open-delivery index). Debited by what was actually used.
 pub const DELIVERY_BYTES: u64 = 4096;
 
 /// Why a delivery was refunded (stored in `Delivery::reason`).
@@ -71,6 +71,7 @@ impl Annon {
 
     fn new_delivery(&mut self, id: u64, d: Delivery) {
         self.deliveries.insert(id, d);
+        self.open_deliveries.insert(id);
     }
 
     pub(crate) fn index_purchase(&mut self, recovery: &Identity, purchase_id: [u8; 32]) {
@@ -226,6 +227,7 @@ impl Annon {
             }
         }
         self.deliveries.flush();
+        self.open_deliveries.flush();
         self.purchases.flush();
         self.recovery.flush();
         self.recovery_count.flush();
@@ -295,6 +297,7 @@ impl Annon {
         );
         self.materialized.flush();
         self.deliveries.flush();
+        self.open_deliveries.flush();
         self.pay_for_storage(env::storage_usage() - before);
         emit(
             "refund_due",

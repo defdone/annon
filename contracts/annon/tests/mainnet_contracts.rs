@@ -41,6 +41,7 @@ fn borsh_str(s: &str) -> Vec<u8> {
 }
 
 /// A purchase message (§5.1) and its id (§5.2), built here from the spec, not by the contract.
+#[derive(Clone)]
 struct Purchase {
     refund: Value,
     network: String,
@@ -163,11 +164,10 @@ fn measure(label: &str, out: &ExecutionFinalResult, annon: &Contract) {
         .collect();
     for (i, r) in out.receipt_outcomes().iter().enumerate() {
         println!(
-            "RECEIPT {label} {i}: executor={} gas={:.6} Tgas success={} logs={:?}",
+            "RECEIPT {label} {i}: executor={} gas={:.6} Tgas success={}",
             r.executor_id,
             r.gas_burnt.as_gas() as f64 / 1e12,
-            r.is_success(),
-            r.logs
+            r.is_success()
         );
     }
     // Refund receipts on the same account burn zero gas; the callback is the last nonzero one.
@@ -417,6 +417,15 @@ async fn real_mainnet_token_and_intents_maximum_delivery() -> anyhow::Result<()>
     .await?;
     measure("pay-real-locked-failure", &out, &annon);
     assert!(!out.receipt_failures().is_empty());
+    assert!(out
+        .receipt_outcomes()
+        .iter()
+        .any(|r| r.executor_id == *annon.id()
+            && r.is_success()
+            && r.logs
+                .iter()
+                .any(|l| l.contains("\"event\":\"payment_failed\"")
+                    && l.contains("\"state\":\"Pending\""))));
     assert_eq!(delivery(&annon).await?["slots"][0]["step"]["state"], 0);
     assert_eq!(mt(&intents, &evm).await?, 0);
     call(
@@ -541,6 +550,127 @@ async fn real_mainnet_token_and_intents_maximum_delivery() -> anyhow::Result<()>
         );
     }
     assert_eq!(mt(&intents, annon.id().as_str()).await?, 0);
+    // A whole snapshot sweep remains complete while first/middle/last removals swap the live
+    // index. Every page uses the same block, including pages fetched after the removals.
+    for i in 0..6 {
+        let p = Purchase {
+            nonce: [0x60 + i; 32],
+            ..max_p.clone()
+        };
+        let out = pay(p.message()).await?;
+        assert!(out.is_success(), "{:?}", out.failures());
+    }
+    sandbox.fast_forward(3).await?;
+    let snapshot = *sandbox.view_block().await?.header().last_final_block();
+    let count: u64 = annon
+        .view("open_delivery_count")
+        .block_hash(snapshot)
+        .await?
+        .json()?;
+    assert_eq!(count, 6);
+    let mut visited = vec![];
+    for (from, (id, position)) in [(2, "first"), (4, "middle"), (5, "last")]
+        .into_iter()
+        .enumerate()
+    {
+        let page: Vec<Value> = annon
+            .view("list_open_deliveries")
+            .args_json(json!({"from":from * 2,"limit":2}))
+            .block_hash(snapshot)
+            .await?
+            .json()?;
+        visited.extend(page.iter().map(|d| d["id"].as_u64().unwrap()));
+        let out = call(&a, &annon, "settle", json!({"delivery_id":id}), 600, 0).await?;
+        measure(&format!("settle-largest-index-{position}"), &out, &annon);
+        assert!(out.is_success(), "{:?}", out.failures());
+        let settled = out
+            .receipt_outcomes()
+            .iter()
+            .find(|r| {
+                r.executor_id == *annon.id()
+                    && r.logs
+                        .iter()
+                        .any(|l| l.contains("\"event\":\"delivery_settled\""))
+            })
+            .unwrap();
+        let burnt = settled.gas_burnt.as_gas() as f64 / 1e12;
+        println!(
+            "FINAL_CALLBACK index-{position}: burnt={burnt:.6} allowance=15 margin={:.6} Tgas",
+            15.0 - burnt
+        );
+        assert!(settled.is_success() && burnt < 15.0);
+    }
+    visited.sort_unstable();
+    assert_eq!(visited, vec![2, 3, 4, 5, 6, 7]);
+    let live: Vec<Value> = annon
+        .view("list_open_deliveries")
+        .args_json(json!({"from":0,"limit":50}))
+        .await?
+        .json()?;
+    assert!(live
+        .iter()
+        .all(|d| visited.contains(&d["id"].as_u64().unwrap())));
+    // The already-funded route dispatches directly; a second keeper cannot pay twice.
+    let out = call(
+        &a,
+        &annon,
+        "fund_delivery",
+        json!({"delivery_id":3}),
+        150,
+        0,
+    )
+    .await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    // Fault injection with the sandbox-only contract signer: run the private dispatcher with
+    // insufficient gas. The earlier funding callback must survive the failing receipt.
+    let out = call(
+        annon.as_account(),
+        &annon,
+        "dispatch_delivery",
+        json!({"delivery_id":3}),
+        1,
+        0,
+    )
+    .await?;
+    assert!(!out.is_success());
+    let d: Value = annon
+        .view("get_delivery")
+        .args_json(json!({"delivery_id":3}))
+        .await?
+        .json()?;
+    assert_eq!(d["fund"]["state"], 2);
+    assert_eq!(d["funded"], "12000");
+    assert!(d["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["step"]["state"] == 0));
+    let out = call(
+        &a,
+        &annon,
+        "pay_slot",
+        json!({"delivery_id":3,"slot":0}),
+        80,
+        0,
+    )
+    .await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    let out = call(&a, &annon, "settle", json!({"delivery_id":3}), 450, 0).await?;
+    measure("settle-largest-already-funded", &out, &annon);
+    assert!(out.is_success(), "{:?}", out.failures());
+    let out = call(&b, &annon, "settle", json!({"delivery_id":3}), 600, 0).await?;
+    assert!(out.is_success());
+    // The four newly settled maximum deliveries add exactly four shares/refunds, not five.
+    for slot in 0..9 {
+        assert_eq!(
+            mt(&intents, &max_id(slot)).await?,
+            5 * if slot == 8 { 2000 } else { 1250 }
+        );
+    }
+    for id in [6, 7] {
+        let out = call(&a, &annon, "settle", json!({"delivery_id":id}), 600, 0).await?;
+        assert!(out.is_success(), "{:?}", out.failures());
+    }
     let before: String = token
         .view("ft_balance_of")
         .args_json(json!({"account_id":payer.id()}))

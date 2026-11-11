@@ -256,16 +256,71 @@ shares complete without a transfer. A beneficiary equal to this contract complet
 
 States: `Pending → InFlight(attempt) → Done | Pending` for both steps. `InFlight` is never reset by
 time or by anyone. Entry points, permissionless and unable to change amounts or destinations:
-`fund_delivery(delivery_id)`, `pay_slot(delivery_id, slot)`. Callbacks are private, check the
-attempt, and write only fixed-width fields with a fixed gas allowance. The keeper calls these after
-each acceptance. Payout state never affects the buyer's entitlement. Once a delivery is funded and
+`fund_delivery(delivery_id)`, `pay_slot(delivery_id, slot)`, `settle(delivery_id)`. Callbacks are
+private and check both state and attempt. Funding returns to Pending only for a readable used
+amount below the remaining obligation. An unreadable result (including a failed deposit promise)
+leaves funding InFlight: the tokens may already have moved. Payment returns to Pending only for
+an explicitly failed synchronous transfer; an unreadable successful result leaves it InFlight.
+Missing records and stale callbacks are harmless.
+
+`settle` starts funding if Pending, then chains **three separate stages**:
+`USDC ft_transfer_call → on_funded bookkeeping → dispatch_delivery`. The original entry reserves
+the gas for both later receipts; bookkeeping never schedules payments. The private dispatcher
+re-reads the delivery and schedules only Pending slots, only if funding is Done. Its failure cannot
+roll back the earlier funding record: `pay_slot` or another `settle` can continue. An already funded
+delivery dispatches directly; missing/settled and funding-InFlight deliveries are no-ops. Before
+scheduling each transfer, the dispatcher records that slot's InFlight attempt. Parallel callbacks,
+legacy calls, duplicate keepers and delayed dispatchers cannot pay a slot twice.
+
+Allowances, all with unused-gas weight zero: deposit 100 Tgas, each external transfer 30 Tgas,
+each bookkeeping/payment callback 15 Tgas, dispatcher 450 Tgas. Nine chains reserve 405 Tgas,
+leaving 45 Tgas for dispatcher execution and margin. Attach at least 600 Tgas to `settle` when
+funding is Pending (565 reserved downstream, 35 for entry execution and margin); 450 Tgas suffices
+when already funded. Calls below these thresholds are refused before changing state. Measurements
+with the real mainnet USDC and Intents bytecode, including final-callback first/middle/last index
+removal, are in `contracts/annon/tests/mainnet_contracts.gas.txt`. These are allowances, not burn
+estimates. Keepers still pay gas and the contract must have native NEAR for outbound 1-yocto calls.
+
+Payout state never affects the buyer's entitlement. Once a delivery is funded and
 every slot is paid, its record is removed and the storage it held returns to the delivery reserve
 (`delivery_settled` event); `get_delivery` then returns null, the purchase keeps its `delivery` id.
 `delivery_count()` is the number of delivery ids ever assigned; ids without a record are refund
 leaves not yet materialized or settled deliveries. `receiver_reserve()` shows the reserve.
 
-Known limit (SECURITY.md): if a callback itself fails (a bug or under-provisioned gas), that slot
-stays `InFlight`: never paid twice, never redirected, fixable only by a contract upgrade.
+`open_delivery_count()` counts all stored deliveries, including InFlight. Ordinary creation and
+`materialize_refund` insert into the open index; only successful settlement removes from it.
+`list_open_deliveries(from, limit)` returns Delivery views at unordered **index positions**, capped
+at 50. Removal swaps the last entry into the hole. For a complete sweep, pin the count and **every
+page to one finalized block hash/height** using RPC `block_id`; advance by the number of entries
+returned. Concurrent removals cannot skip records in that snapshot, including every record that
+stays open throughout the sweep. New records after that block belong to the next sweep. Archive
+RPC may be needed if a sweep outlives the provider's retention. Across moving blocks a single
+forward offset scan can skip records; restarting at zero gives full coverage once mutations cease,
+but is not a guarantee under continuous churn. The count is not a cursor or a snapshot token.
+
+Delivery and index insertion are flushed and charged together exactly once: ordinary acceptance
+debits the receiver reserve, materialization charges its caller (attached or prepaid storage).
+Retirement flushes and credits the actual freed delivery/index bytes to the receiver reserve once,
+including for caller-sponsored refunds. Purchases, recovery entries and materialization markers
+persist. Each index entry uses 130 bytes, reclaimed on retirement including swap-removal.
+Unit measurements: maximum-size acceptance including nine slots and 64-byte identities
+uses 1,593 bytes, below the unchanged 4,096-byte admission allowance; a materialized refund with a
+10-byte NEAR beneficiary, index and permanent marker uses 332 bytes (0.00332 NEAR at 10^19
+yoctoNEAR/byte).
+
+Conditional liveness: open, actionable deliveries make automatic progress while dependencies
+permit transfers, receipts/callbacks execute successfully, native gas/storage sponsorship remains
+available and at least one funded keeper runs fair snapshot sweeps and retries Pending work.
+Refund leaves additionally need the history/proof prerequisite in §8. Keepers should back off
+retryable dependency failures and alert on InFlight uncertainty; backoff never changes contract
+state. Permissionless methods alone do not supply an executor, NEAR or dependency availability.
+
+Known limit (SECURITY.md): a callback that fails leaves its step InFlight. A timeout, balance query,
+or keeper assertion cannot distinguish a completed transfer from a delayed receipt; resetting it
+could pay twice under another receipt ordering. No reset or administrative override is provided.
+On an upgradeable deployment a reviewed upgrade may repair a provable accounting issue; it cannot
+make an uncertain external effect known by itself. On a locked deployment an in-place upgrade is
+unavailable: a replacement account/version does not recover old obligations automatically.
 
 ## 8. Refund accumulator
 
@@ -287,6 +342,27 @@ checks inclusion under one of the last 32 roots, the current one included (a pro
 while up to 31 more leaves are appended, so build it right before sending) and a one-time marker,
 then creates an ordinary refund
 obligation (§7). Events carry every leaf so anyone (the keeper) can build proofs.
+
+Plain-RPC discovery remains a known gap: the frontier/root cannot recover leaf preimages or all
+sibling hashes. A keeper must retain/replay successful `refund_leaf` events from this executor to
+build proofs, even when it also scans the open index. Later reserve funding does not materialize
+old leaves automatically. Proofs can expire after 32 appends; rebuild against a recent root. No
+commitment format changes are made here.
+
+Storage options were measured with the actual SDK collection and storage accounting. A readable
+map indexed by leaf index, storing `(delivery_id, refund, amount)` with network/contract implicit,
+adds 94 bytes for EVM, 106 for Solana, and 78 + account-length bytes for NEAR (88 for `buyer.near`,
+142 at the 64-byte maximum). At the current storage-byte constant that is 0.00088–0.00142 NEAR
+per leaf for these NEAR examples, or 880–1,420 NEAR per million. Keeping all preimages enables
+proof reconstruction by RPC, but someone must pay **when appended**, exactly when the delivery
+reserve is empty. Silently charging the contract creates an unbounded storage-exhaustion vector.
+Deleting materialized preimages alone also loses proof data for other leaves; hashes/nodes must
+remain available. A separately sponsored preimage reserve is bounded and still needs an exhaustion
+policy; mandatory sender sponsorship changes the NEP-141 ingress/payment flow. Refusing unsponsored
+receipts returns tokens to the NEP-141 sender, which may be a bridge rather than the designated refund
+identity. Therefore no per-leaf storage is added in this change. An indexer-free guarantee requires
+an explicit ingress/storage funding decision; the existing constant-storage accumulator and
+permissionless, caller-funded `materialize_refund` remain available.
 
 ## 9. Key release and recovery
 
@@ -319,12 +395,28 @@ obligation (§7). Events carry every leaf so anyone (the keeper) can build proof
 
 Events (`standard: "annon"`, `version: "2.0.0"`): `file_registered`, `header_published`,
 `delivery_received`, `purchase_accepted`, `refund_due`, `refund_leaf`, `delivery_refused` (log only),
-`funded`, `slot_paid`, `key_requested`, `key_released`, `grant_created`, `sales_stopped`. Never log
+`funded`, `slot_paid`, `delivery_settled`, `funding_failed`, `payment_failed`,
+`key_requested`, `key_released`, `grant_created`, `sales_stopped`. Never log
 secrets.
+
+Failure event data (one object in the NEP-297 `data` array):
+
+| Event | Fields | Meaning |
+|---|---|---|
+| `funding_failed` | `delivery_id`, `attempt`, `state: "Pending"`, `reason: "incomplete_deposit"`, `used`, `remaining` | Readable partial/zero use; retry only the remainder. Also emits `funded` with the accounted progress. |
+| `funding_failed` | `delivery_id`, `attempt`, `state: "InFlight"`, `reason: "unreadable_result"`, `remaining` | Unknown effect; alert, never resend this attempt. |
+| `payment_failed` | `delivery_id`, `slot`, `attempt`, `state: "Pending"`, `reason: "transfer_failed"` | Explicit synchronous transfer failure; safe to retry. |
+| `payment_failed` | `delivery_id`, `slot`, `attempt`, `state: "InFlight"`, `reason: "unreadable_result"` | Successful result could not be read within the bound; alert, never retry. |
+
+Amounts are decimal strings; IDs, slot and attempt are numbers. Stale callbacks emit no failure
+signal. A callback that never executes cannot emit one: reconcile InFlight state and transaction
+outcomes too. Accept events only from successful finalized receipts executed by the trusted Annon
+account; logs from failed receipts or other executors are not evidence of state transitions.
 
 Views: `get_file(file_id)`, `get_purchase(purchase_id)`, `get_grant`,
 `get_delivery(delivery_id)`, `list_deliveries(from, limit)`, `purchases_of(...)`,
-`refund_root()`, `get_config`, `storage_balance_of`.
+`delivery_count()`, `list_open_deliveries(from, limit)`, `open_delivery_count()`,
+`refund_root()`, `receiver_reserve()`, `get_config`, `storage_balance_of`.
 
 - `get_file` → `{terms, terms_hash, header_hash|null, sales_stopped_at|null, taken_down|null}`.
 - `get_purchase` → `{purchase_id, file_id, terms_hash, buyer_key, recovery: Identity,
@@ -334,11 +426,16 @@ Views: `get_file(file_id)`, `get_purchase(purchase_id)`, `get_grant`,
 - `purchases_of({recovery, from, limit})` → purchase ID strings, at most 100; offsets are u32.
 - `get_config` → `{mpc, ckd_domain, foreign_tx_domain, usdc, network, near_usdc, intents}`.
 - Keeper calls: `fund_delivery({delivery_id})` with 150 Tgas, `pay_slot({delivery_id, slot})`
-  with 80 Tgas; delivery views use numeric IDs, decimal-string USDC, and steps
+  with 80 Tgas, `settle({delivery_id})` with 600 Tgas; delivery views use numeric IDs, decimal-string USDC, and steps
   `{state: 0|1|2, attempt: number}`. `list_deliveries({from, limit})` returns at most 50.
+  `list_open_deliveries({from, limit})` also returns at most 50, with snapshot semantics above.
+  SDK `listOpenDeliveries` and `openDeliveryCount` accept an optional RPC block ID for this purpose.
+  Existing `keep()` scheduling is unchanged; these bindings do not implement the next keeper design.
 - `refund_root()` → `{root, count}`. Payable
   `materialize_refund({leaf:{delivery_id, refund: Identity, amount: string}, index, proof})`
   takes 32 sibling hashes and a storage deposit; network/contract come from the deployment.
+  A zero attached deposit instead spends the caller's prepaid contract storage balance, including
+  through the SDK binding, allowing a function-call key to materialize with sponsored storage.
 
 Vectors label the SDK-only accumulator cache `sdk_frontier`; Rust keeps stale frontier slots.
 Only roots and proofs are cross-language wire commitments. Negative entries state `expected.sdk`

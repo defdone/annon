@@ -9,7 +9,7 @@
 //! - `claim_key`, `reopen`: the buyer gets the key, again on any device (`keys.rs`)
 //! - `stop_sales`, `takedown`, `restore` (`moderation.rs`)
 //! - prepaid storage for callers that can't attach a deposit (`storage.rs`)
-use near_sdk::store::LookupMap;
+use near_sdk::store::{IterableSet, LookupMap};
 use near_sdk::{env, near, require, AccountId, PanicOnDefault};
 
 mod events;
@@ -18,6 +18,8 @@ mod evm;
 mod gaps;
 mod identity;
 mod keys;
+#[cfg(test)]
+mod liveness_tests;
 mod merkle;
 mod moderation;
 mod mpc;
@@ -98,6 +100,8 @@ pub struct Annon {
     recovery_count: LookupMap<[u8; 32], u32>,
     recovery: LookupMap<[u8; 36], [u8; 32]>,
     deliveries: LookupMap<u64, Delivery>,
+    /// Every stored delivery, including in-flight work. Removed only on settlement.
+    open_deliveries: IterableSet<u64>,
     next_delivery: u64,
     /// Refunds for deliveries that arrived while the storage reserve was empty.
     refunds: Accumulator,
@@ -152,6 +156,7 @@ impl Annon {
             recovery_count: LookupMap::new(b"c"),
             recovery: LookupMap::new(b"i"),
             deliveries: LookupMap::new(b"d"),
+            open_deliveries: IterableSet::new(b"o"),
             next_delivery: 0,
             refunds: Accumulator::new(),
             materialized: LookupMap::new(b"m"),

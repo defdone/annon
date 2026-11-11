@@ -10,7 +10,7 @@
 //! limit is described in SECURITY.md.
 use near_sdk::json_types::U128;
 use near_sdk::serde_json::json;
-use near_sdk::{env, near, require, Gas, GasWeight, NearToken, PromiseIndex};
+use near_sdk::{env, near, require, Gas, GasWeight, NearToken, PromiseError, PromiseIndex};
 
 use crate::events::emit;
 use crate::identity::{Identity, IdentityJson};
@@ -20,8 +20,12 @@ use crate::{Annon, AnnonExt};
 /// `ft_transfer_call` into Intents: the transfer, Intents' `ft_on_transfer` and the resolver.
 const DEPOSIT_GAS: Gas = Gas::from_tgas(100);
 const MT_TRANSFER_GAS: Gas = Gas::from_tgas(30);
-/// Callbacks only rewrite fixed-width fields, so a fixed allowance is enough.
+/// Includes final delivery/index removal. Real-bytecode measurements: mainnet_contracts.gas.txt.
 const CALLBACK_GAS: Gas = Gas::from_tgas(15);
+/// Nine independent 30 + 15 Tgas payment chains (405), plus dispatch execution and margin.
+const DISPATCH_GAS: Gas = Gas::from_tgas(450);
+/// Deposit (100), bookkeeping (15), dispatch (450), entry execution and margin.
+const SETTLE_GAS: Gas = Gas::from_tgas(600);
 
 fn call(to: &near_sdk::AccountId, method: &str, args: String, gas: Gas) -> PromiseIndex {
     let p = env::promise_batch_create(to);
@@ -36,23 +40,24 @@ fn call(to: &near_sdk::AccountId, method: &str, args: String, gas: Gas) -> Promi
     p
 }
 
-fn then(p: PromiseIndex, method: &str, args: String) {
+fn then(p: PromiseIndex, method: &str, args: String, gas: Gas) -> PromiseIndex {
     let t = env::promise_batch_then(p, &env::current_account_id());
     env::promise_batch_action_function_call_weight(
         t,
         method,
         args.as_bytes(),
         NearToken::from_yoctonear(0),
-        CALLBACK_GAS,
+        gas,
         GasWeight(0),
     );
+    t
 }
 
 impl Annon {
     /// Once a delivery is funded and every slot paid, its record goes and the storage it held
     /// returns to the delivery reserve, so the reserve is spent only on deliveries still being
     /// paid out (a flood of tiny refunds can't use it up for good). The events keep the history.
-    fn settle(&mut self, delivery_id: u64) {
+    fn retire_delivery(&mut self, delivery_id: u64) {
         let done = self
             .deliveries
             .get(&delivery_id)
@@ -61,9 +66,12 @@ impl Annon {
             return;
         }
         self.deliveries.flush();
+        self.open_deliveries.flush();
         let before = env::storage_usage();
         self.deliveries.remove(&delivery_id);
+        self.open_deliveries.remove(&delivery_id);
         self.deliveries.flush();
+        self.open_deliveries.flush();
         let freed = before.saturating_sub(env::storage_usage());
         self.reserve += env::storage_byte_cost().as_yoctonear() * u128::from(freed);
         emit(
@@ -71,21 +79,11 @@ impl Annon {
             json!({ "delivery_id": delivery_id, "freed_bytes": freed }),
         );
     }
-}
 
-#[near]
-impl Annon {
-    /// Moves what is left of a delivery's USDC into this contract's Intents balance.
-    pub fn fund_delivery(&mut self, delivery_id: u64) {
+    /// Returns the bookkeeping receipt, so settle can chain an isolated dispatcher after it.
+    fn start_funding(&mut self, delivery_id: u64) -> PromiseIndex {
         let (to, token) = (self.intents.clone(), self.near_usdc.clone());
-        let d = self
-            .deliveries
-            .get_mut(&delivery_id)
-            .unwrap_or_else(|| env::panic_str("unknown delivery"));
-        require!(
-            d.fund.state == PENDING,
-            "delivery is not waiting to be funded"
-        );
+        let d = self.deliveries.get_mut(&delivery_id).unwrap();
         let amount = d.amount - d.funded;
         d.fund.state = IN_FLIGHT;
         d.fund.attempt += 1;
@@ -100,7 +98,74 @@ impl Annon {
             p,
             "on_funded",
             json!({ "delivery_id": delivery_id, "attempt": attempt }).to_string(),
+            CALLBACK_GAS,
+        )
+    }
+}
+
+#[near]
+impl Annon {
+    /// Permissionless progress: deposit -> bookkeeping -> isolated dispatcher. Already funded
+    /// deliveries dispatch directly. Missing/settled/in-flight deliveries are harmless no-ops.
+    /// Attach 600 Tgas (450 suffices when already funded); no deposit. Never resets InFlight.
+    pub fn settle(&mut self, delivery_id: u64) {
+        let Some(d) = self.deliveries.get(&delivery_id) else {
+            return;
+        };
+        match d.fund.state {
+            PENDING => {
+                require!(env::prepaid_gas() >= SETTLE_GAS, "settle needs 600 Tgas");
+                let bookkeeping = self.start_funding(delivery_id);
+                then(
+                    bookkeeping,
+                    "dispatch_delivery",
+                    json!({ "delivery_id": delivery_id }).to_string(),
+                    DISPATCH_GAS,
+                );
+            }
+            DONE => {
+                require!(
+                    env::prepaid_gas() >= DISPATCH_GAS,
+                    "settle needs 450 Tgas when funded"
+                );
+                self.dispatch_delivery(delivery_id);
+            }
+            _ => {}
+        }
+    }
+
+    /// Re-read durable funding, ignoring the preceding receipt's result. If this receipt fails,
+    /// the funding bookkeeping stays committed and pay_slot/settle remain available.
+    #[private]
+    pub fn dispatch_delivery(&mut self, delivery_id: u64) {
+        let Some(d) = self.deliveries.get(&delivery_id) else {
+            return;
+        };
+        if d.fund.state != DONE {
+            return;
+        }
+        let pending: Vec<u32> = d
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| (s.step.state == PENDING).then_some(i as u32))
+            .collect();
+        for slot in pending {
+            self.pay_slot(delivery_id, slot);
+        }
+    }
+
+    /// Moves what is left of a delivery's USDC into this contract's Intents balance.
+    pub fn fund_delivery(&mut self, delivery_id: u64) {
+        let d = self
+            .deliveries
+            .get(&delivery_id)
+            .unwrap_or_else(|| env::panic_str("unknown delivery"));
+        require!(
+            d.fund.state == PENDING,
+            "delivery is not waiting to be funded"
         );
+        self.start_funding(delivery_id);
     }
 
     /// The result of `fund_delivery`: NEP-141's final used amount, counted exactly.
@@ -109,12 +174,18 @@ impl Annon {
         let used = env::promise_result_checked(0, 64)
             .ok()
             .and_then(|r| near_sdk::serde_json::from_slice::<U128>(&r).ok());
-        let d = self.deliveries.get_mut(&delivery_id).unwrap();
+        let Some(d) = self.deliveries.get_mut(&delivery_id) else {
+            return;
+        };
         if d.fund.state != IN_FLIGHT || d.fund.attempt != attempt {
             return;
         }
         let Some(U128(used)) = used else {
-            env::log_str("deposit outcome unknown; the delivery stays in flight");
+            emit(
+                "funding_failed",
+                json!({ "delivery_id": delivery_id, "attempt": attempt,
+                "state": "InFlight", "reason": "unreadable_result", "remaining": U128(d.amount - d.funded) }),
+            );
             return;
         };
         d.funded += used.min(d.amount - d.funded);
@@ -123,6 +194,14 @@ impl Annon {
             "funded",
             json!({ "delivery_id": delivery_id, "attempt": attempt, "used": U128(used), "funded": U128(d.funded) }),
         );
+        if d.fund.state == PENDING {
+            emit(
+                "funding_failed",
+                json!({ "delivery_id": delivery_id, "attempt": attempt,
+                "state": "Pending", "reason": "incomplete_deposit", "used": U128(used),
+                "remaining": U128(d.amount - d.funded) }),
+            );
+        }
     }
 
     /// Credits one slot of a funded delivery to its beneficiary's Intents account.
@@ -146,7 +225,7 @@ impl Annon {
                 "slot_paid",
                 json!({ "delivery_id": delivery_id, "slot": slot, "local": true }),
             );
-            self.settle(delivery_id);
+            self.retire_delivery(delivery_id);
             return;
         }
         s.step.state = IN_FLIGHT;
@@ -164,27 +243,48 @@ impl Annon {
             p,
             "on_paid",
             json!({ "delivery_id": delivery_id, "slot": slot, "attempt": attempt }).to_string(),
+            CALLBACK_GAS,
         );
     }
 
     /// The result of `pay_slot`. `mt_transfer` is one synchronous step: a failure moved nothing.
     #[private]
     pub fn on_paid(&mut self, delivery_id: u64, slot: u32, attempt: u32) {
-        let ok = env::promise_result_checked(0, 64).is_ok();
-        let d = self.deliveries.get_mut(&delivery_id).unwrap();
-        let s = &mut d.slots[slot as usize];
+        let result = env::promise_result_checked(0, 64);
+        let Some(d) = self.deliveries.get_mut(&delivery_id) else {
+            return;
+        };
+        let Some(s) = d.slots.get_mut(slot as usize) else {
+            return;
+        };
         if s.step.state != IN_FLIGHT || s.step.attempt != attempt {
             return;
         }
+        let ok = match result {
+            Ok(_) => true,
+            Err(PromiseError::Failed) => false,
+            Err(_) => {
+                emit(
+                    "payment_failed",
+                    json!({ "delivery_id": delivery_id, "slot": slot,
+                    "attempt": attempt, "state": "InFlight", "reason": "unreadable_result" }),
+                );
+                return;
+            }
+        };
         s.step.state = if ok { DONE } else { PENDING };
         if ok {
             emit(
                 "slot_paid",
                 json!({ "delivery_id": delivery_id, "slot": slot, "attempt": attempt, "to": s.to.text(), "amount": U128(s.amount) }),
             );
-            self.settle(delivery_id);
+            self.retire_delivery(delivery_id);
         } else {
-            env::log_str("mt_transfer failed; the slot is pending again");
+            emit(
+                "payment_failed",
+                json!({ "delivery_id": delivery_id, "slot": slot,
+                "attempt": attempt, "state": "Pending", "reason": "transfer_failed" }),
+            );
         }
     }
 }
@@ -249,6 +349,28 @@ impl Annon {
         (from..self.next_delivery.min(from.saturating_add(limit.min(50))))
             .filter_map(|i| self.deliveries.get(&i).map(|d| view(i, d)))
             .collect()
+    }
+
+    /// All stored deliveries, including InFlight, in unordered index positions; at most 50.
+    /// Removal swaps the last entry into the removed position. Pin EVERY page and the count of
+    /// a full sweep to ONE finalized block via RPC block_id: concurrent removals then cannot
+    /// skip a delivery that stays open. Advance by the number of returned entries. Across moving
+    /// blocks, a single forward sweep can skip entries; repeat from zero, with coverage only
+    /// guaranteed once mutations cease. New records after a snapshot belong to the next sweep.
+    pub fn list_open_deliveries(&self, from: u64, limit: u64) -> Vec<DeliveryView> {
+        if from >= u64::from(self.open_deliveries.len()) {
+            return vec![];
+        }
+        self.open_deliveries
+            .iter()
+            .skip(from as usize)
+            .take(limit.min(50) as usize)
+            .map(|id| view(*id, self.deliveries.get(id).unwrap()))
+            .collect()
+    }
+
+    pub fn open_delivery_count(&self) -> u64 {
+        u64::from(self.open_deliveries.len())
     }
 
     /// The refund accumulator: its root and number of leaves.

@@ -500,6 +500,7 @@ async fn callbacks_are_private() -> anyhow::Result<()> {
             json!({ "file_id": w.file(1), "key": G1, "reason": "claim", "who": "x" }),
         ),
         ("on_funded", json!({ "delivery_id": 0, "attempt": 1 })),
+        ("dispatch_delivery", json!({ "delivery_id": 0 })),
         (
             "on_paid",
             json!({ "delivery_id": 0, "slot": 0, "attempt": 1 }),
