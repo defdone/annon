@@ -227,3 +227,7 @@ unlock support, disabled state and minimum sponsored price.
 A final unlock CKD answer can supply the first open using exactly the same final-grant and MPC
 pairing verification as `claim_key`. An optional configured MPC pin remains enforced, but is not
 required for this optimization. Missing or invalid answers fall back to verified `claim_key`.
+
+Streaming sell/open accepts regular files only, refusing FIFOs; long output basenames can exceed the filesystem name limit because temporary files append a random suffix. Local verify still buffers the file.
+Interrupted processes may leave private `.tmp` plaintext files or `.annon-spool-*` encrypted directories beside the output; remove these leftovers before retrying.
+Outputs are published with a hard link, so the output directory must be on a filesystem that supports hard links (not exFAT or FAT32, and not some network or FUSE mounts); otherwise the final step fails with no output written.

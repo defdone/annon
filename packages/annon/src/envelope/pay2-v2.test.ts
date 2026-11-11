@@ -11,6 +11,7 @@ import {
   sha256,
   verifyPreview,
 } from './pay2.js';
+import { blobSource, openTo } from './replay.js';
 import { openStream, sealStreamWithKey } from './stream.js';
 
 const fileId = new Uint8Array(32).fill(4);
@@ -83,6 +84,17 @@ for (const authKind of [0, 1, 2] as const)
       expect(h.version).toBe(2);
       expect(h.authKind).toBe(authKind);
       expect((await open(file, openOpts)).data).toEqual(data);
+      const pieces: Uint8Array[] = [];
+      await openTo(
+        blobSource(new Blob([file])),
+        new WritableStream({
+          write: (part) => {
+            pieces.push(part);
+          },
+        }),
+        openOpts,
+      );
+      expect(Buffer.concat(pieces)).toEqual(Buffer.from(data));
       expect((await inspect(file, listing, contractId)).usable).toBe(true);
       expect(
         (await verifyPreview(await sealed.preview({ meta: true, data: true }), listing)).preview,

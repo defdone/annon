@@ -18,6 +18,7 @@ export class AdapterError extends Error {
 export const usage = () =>
   new AdapterError('invalid_arguments', 'Invalid arguments. Run annon --help.', 2);
 const actions: Record<string, string> = {
+  source_changed: 'The source changed between passes. Restore the original file before retrying.',
   quote_expired: 'The 1Click quote expired. Run buy again.',
   settlement_processing: 'The purchase is still settling. Check status and resume before opening.',
   storage_required:

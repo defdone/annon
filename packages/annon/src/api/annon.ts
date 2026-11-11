@@ -4,9 +4,18 @@ import {
   inspectHeader,
   type Listing,
   open as openPay2,
-  sealWithKey,
   sha256,
 } from '../envelope/pay2.js';
+import {
+  type PreparedSeal,
+  prepareOpen,
+  prepareSeal,
+  type ReplayableSource,
+  type SellData,
+  type Spool,
+  withReplay,
+} from '../envelope/replay.js';
+import { SourceChangedError } from '../envelope/stream.js';
 import { fileAppId, keyFromSecret, oneTimeKey, openAnswer } from '../keys/near-ckd.js';
 import {
   type FileInfo,
@@ -82,8 +91,8 @@ export interface AnnonOptions {
   mpcKey?: string;
   now?: () => number;
 }
-export interface SellOptions {
-  data: Uint8Array;
+export interface SellOptions<T extends SellData = Uint8Array> {
+  data: T;
   name: string;
   mime: string;
   seller: IdentityWallet;
@@ -96,8 +105,12 @@ export interface SellOptions {
   moderator?: string;
   fileId?: string;
   previewLen?: number;
-  /** Store/host the encrypted file and its public header. Called after header authorization. */
-  publish: (file: { file: Uint8Array; header: Uint8Array; terms: Terms }) => Promise<void>;
+  /** Store/host the encrypted file and its public header. Consume streamed files fully before resolving. Called after header authorization. */
+  publish: (file: {
+    file: import('../envelope/replay.js').SellFile<T>;
+    header: Uint8Array;
+    terms: Terms;
+  }) => Promise<void>;
 }
 export interface BuyOptions {
   fileId: string;
@@ -150,7 +163,8 @@ export class SellError extends Error {
         : 'Sell incomplete; resume with fileId.',
       options,
     );
-    if (options?.cause instanceof PayError) this.code = options.cause.code;
+    if (options?.cause instanceof PayError || options?.cause instanceof SourceChangedError)
+      this.code = options.cause.code;
   }
 }
 export class Annon {
@@ -270,14 +284,14 @@ export class Annon {
       throw new PayError('network_mismatch');
     return f;
   }
-  async sell(o: SellOptions) {
+  async sell<T extends SellData>(o: SellOptions<T>) {
     const config = await getConfig(this.o.nearRpc, this.o.contractId);
     if (config.network !== this.o.network) throw new PayError('network_mismatch');
     const assets = { nearUsdc: config.nearUsdc, baseUsdc: config.usdc };
     const seller = parseIdentity(o.seller.identity);
     const fileId = o.fileId ?? `0x${randomHex(32)}`;
     const fileKey = crypto.getRandomValues(new Uint8Array(32));
-    const s = await sealWithKey(fileKey, o.data, {
+    const s = await prepareSeal(fileKey, o.data, {
       fileId: bytes(fileId, 32),
       name: o.name,
       mime: o.mime,
@@ -347,11 +361,11 @@ export class Annon {
     }
   }
   /** Resume with the original plaintext; the saved file key reproduces the registered cipher hash. */
-  async resumeSell(o: {
+  async resumeSell<T extends SellData>(o: {
     fileId: string;
-    data: Uint8Array;
+    data: T;
     seller: IdentityWallet;
-    publish: SellOptions['publish'];
+    publish: SellOptions<T>['publish'];
   }) {
     const job = await this.sells.load(`annon/sell/${o.fileId}`);
     if (!job) throw new Error('no saved sell job');
@@ -366,7 +380,7 @@ export class Annon {
     )
       throw new Error('sell job identity mismatch');
     await this.o.writeBackup(job.id, await exportSell(job, this.o.backupSecret));
-    const s = await sealWithKey(bytes(job.fileKey, 32), o.data, {
+    const s = await prepareSeal(bytes(job.fileKey, 32), o.data, {
       fileId: bytes(o.fileId, 32),
       name: job.name,
       mime: job.mime,
@@ -421,11 +435,11 @@ export class Annon {
     key.secret.fill(0);
     return answer;
   }
-  private async finishSell(
+  private async finishSell<T extends SellData>(
     job: SellRecord,
-    s: Awaited<ReturnType<typeof sealWithKey>>,
+    s: PreparedSeal<T>,
     seller: IdentityWallet,
-    publish: SellOptions['publish'],
+    publish: SellOptions<T>['publish'],
     registered: boolean,
   ) {
     const fileId = job.terms.file_id;
@@ -456,7 +470,7 @@ export class Annon {
       if (!(await this.sells.compareAndSet(`annon/sell/${fileId}`, current, next)))
         throw new PayError('store_conflict');
     }
-    const file = await s.finish({
+    const { file, header, consumed, cancel } = await s.finish({
       contractId: this.o.contractId,
       ckdSecret: ckd,
       seller: job.terms.seller,
@@ -473,15 +487,20 @@ export class Annon {
             },
           }),
     });
-    const headerLen = new DataView(file.buffer, file.byteOffset).getUint32(8);
-    const header = file.subarray(0, headerLen);
-    if (seller.identity.kind === 'near')
-      await this.call(
-        'publish_header',
-        { file_id: fileId, header_hash: hex(await sha256(header.subarray(0, headerLen - 65))) },
-        seller,
-      );
-    await publish({ file, header, terms: job.terms });
+    const headerLen = header.length;
+    try {
+      if (seller.identity.kind === 'near')
+        await this.call(
+          'publish_header',
+          { file_id: fileId, header_hash: hex(await sha256(header.subarray(0, headerLen - 65))) },
+          seller,
+        );
+      await publish({ file, header, terms: job.terms });
+      if (!consumed()) throw new Error('publish did not consume the complete file stream');
+    } catch (error) {
+      await cancel(error).catch(() => {});
+      throw error;
+    }
     const sellerKeyName = `annon/seller-key/${fileId}`;
     const sellerKey = await this.sellerKeys.load(sellerKeyName);
     if (
@@ -691,6 +710,24 @@ export class Annon {
     record?: PurchaseRecord;
     recovery?: RecoveryRecord;
   }): Promise<{ meta: FileMeta; data: Uint8Array }> {
+    return this.openSource(o) as Promise<{ meta: FileMeta; data: Uint8Array }>;
+  }
+  /** Replay PAY2 to a provisional sink; resolve after every check. Single-use streams require a ciphertext spool. */
+  async openTo(o: {
+    file: ReplayableSource | ReadableStream<Uint8Array>;
+    sink: WritableStream<Uint8Array>;
+    spool?: Spool;
+    record?: PurchaseRecord;
+    recovery?: RecoveryRecord;
+  }): Promise<{ meta: FileMeta }> {
+    return withReplay(o.file, (file) => this.openSource({ ...o, file }), o.spool);
+  }
+  private async openSource(o: {
+    file: Uint8Array | ReplayableSource;
+    sink?: WritableStream<Uint8Array>;
+    record?: PurchaseRecord;
+    recovery?: RecoveryRecord;
+  }): Promise<{ meta: FileMeta; data?: Uint8Array }> {
     if (!o.record && !o.recovery)
       throw new TypeError('a saved purchase or recovery grant is required');
     const r = o.recovery;
@@ -715,8 +752,23 @@ export class Annon {
     )
       throw new Error('saved key does not match the final grant');
     const f = await this.file(fileId);
+    const prepared =
+      o.file instanceof Uint8Array
+        ? undefined
+        : await prepareOpen(o.file, {
+            listing: listing(fileId, f),
+            contractId: this.o.contractId,
+          });
     const inspected = await inspectHeader(
-      o.file.subarray(0, new DataView(o.file.buffer, o.file.byteOffset).getUint32(8)),
+      prepared
+        ? prepared.header
+        : (o.file as Uint8Array).subarray(
+            0,
+            new DataView(
+              (o.file as Uint8Array).buffer,
+              (o.file as Uint8Array).byteOffset,
+            ).getUint32(8),
+          ),
       listing(fileId, f),
       this.o.contractId,
     );
@@ -738,7 +790,11 @@ export class Annon {
         secret,
         fileId,
       );
-    return openPay2(o.file, {
+    if (prepared) {
+      if (!o.sink) throw new TypeError('a plaintext sink is required');
+      return { meta: await prepared.writeTo(o.sink, async () => ckd) };
+    }
+    return openPay2(o.file as Uint8Array, {
       contractId: this.o.contractId,
       listing: listing(fileId, f),
       ckdSecret: async () => ckd,

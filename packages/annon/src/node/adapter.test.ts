@@ -309,9 +309,16 @@ it.each([
         }),
         sdk(options) {
           const sdk = new Annon(options);
-          vi.spyOn(sdk, 'open').mockImplementation(async (o) => {
-            expect(o.file).toEqual(file);
-            return { meta: { name: 'f', mime: '', size: data.length }, data };
+          vi.spyOn(sdk, 'openTo').mockImplementation(async (o) => {
+            expect(
+              new Uint8Array(
+                await new Response(
+                  o.file instanceof ReadableStream ? o.file : o.file.read(),
+                ).arrayBuffer(),
+              ),
+            ).toEqual(file);
+            await new Blob([data]).stream().pipeTo(o.sink);
+            return { meta: { name: 'f', mime: '', size: data.length } };
           });
           return sdk;
         },

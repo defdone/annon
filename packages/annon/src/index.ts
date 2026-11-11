@@ -6,6 +6,7 @@ export {
   SellError,
   type SellOptions,
 } from './api/annon.js';
+export { blobSource, openTo, type ReplayableSource, type Spool } from './envelope/replay.js';
 export {
   type Deposit,
   OneClick,

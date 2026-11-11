@@ -51,8 +51,17 @@ import {
 const subtle = globalThis.crypto.subtle;
 const utf8 = new TextEncoder();
 
+/** A replay no longer matches the source authenticated in the first pass. */
+export class SourceChangedError extends RangeError {
+  readonly code = 'source_changed';
+  constructor() {
+    super('source changed between passes');
+    this.name = 'SourceChangedError';
+  }
+}
+
 /** Copies into a bounded destination, never concatenates or queues source chunks. */
-class ByteReader {
+export class ByteReader {
   private readonly reader: ReadableStreamDefaultReader<Uint8Array>;
   private pending: Uint8Array = new Uint8Array();
   private at = 0;
@@ -147,11 +156,12 @@ export interface StreamSealed {
   fileId: Bytes;
   /** Register this value before calling finish, as with the one-shot seal. */
   cipherHash: Bytes;
+  preview: import('./pay2.js').Sealed['preview'];
   /**
    * A NEW stream of the same immutable plaintext, from byte zero. Signs the final header and
    * returns header then ciphertext under backpressure. Each replay chunk must match its
    * first-pass hash before it is emitted. A changed replay errors; discard its entire output.
-   * Source length mismatches in either pass throw RangeError. Source errors propagate unchanged.
+   * First-pass length mismatches throw RangeError; replay changes throw SourceChangedError. Source errors propagate unchanged.
    */
   finish(
     plaintext: ReadableStream<Uint8Array>,
@@ -231,24 +241,27 @@ export async function sealStreamWithKey(
     prefix.subarray(FIXED + 32 * (kc + i), FIXED + 32 * (kc + i + 1)),
   );
 
-  async function* encrypt(input: ByteReader) {
+  async function* encrypt(input: ByteReader, replay = false) {
     let remaining = size;
     for (let i = 0; i < n; i++) {
       const length =
         i === 0 ? metaLen : i === 1 && previewLen > 0 ? previewLen : Math.min(C, remaining);
       const piece = i === 0 ? meta : await input.read(length);
-      if (piece.length !== length) throw new RangeError('plaintext shorter than size');
+      if (piece.length !== length)
+        throw replay ? new SourceChangedError() : new RangeError('plaintext shorter than size');
       if (i > 0) remaining -= length;
       const last = i === n - 1;
       if (last && (await input.read(1)).length !== 0)
-        throw new RangeError('plaintext longer than size');
+        throw replay ? new SourceChangedError() : new RangeError('plaintext longer than size');
       yield await gcm('encrypt', await chunkKey(key, fileId, i), last, piece);
     }
   }
   const input = new ByteReader(plaintext);
+  const previewWire: Bytes[] = [];
   try {
     let i = 0;
     for await (const wire of encrypt(input)) {
+      if (i < kc) previewWire.push(wire);
       (hashes[i++] as Bytes).set(await sha256(wire));
     }
   } finally {
@@ -265,6 +278,7 @@ export async function sealStreamWithKey(
     commits,
     hashes,
   });
+  let finished: Bytes | undefined;
   return {
     fileId: copy(fileId),
     cipherHash,
@@ -295,16 +309,39 @@ export async function sealStreamWithKey(
         await sha256(header, mac),
       );
       const finalHeader = concat(header, mac, sig);
+      finished = finalHeader;
       return output(replay, async function* (reader) {
         yield finalHeader;
         let i = 0;
-        for await (const wire of encrypt(reader)) {
+        for await (const wire of encrypt(reader, true)) {
           if (!equal(await sha256(wire), hashes[i++] as Bytes)) {
-            throw new Error('plaintext changed between sealing passes');
+            throw new SourceChangedError();
           }
           yield wire;
         }
       });
+    },
+    async preview(show) {
+      if (!finished) throw new Error('call finish first: the preview carries the final header');
+      if (show.data && previewLen === 0) throw new RangeError('sealed without a preview');
+      const prefixOnly = finished.slice(0, prefix.length);
+      prefixOnly[6] = 0;
+      new DataView(prefixOnly.buffer).setUint32(8, 0);
+      const b64 = (b: Uint8Array) => {
+        let text = '';
+        for (const byte of b) text += String.fromCharCode(byte);
+        return btoa(text);
+      };
+      const chunks = [];
+      for (const i of [0, 1]) {
+        if (!(i === 0 ? show.meta : show.data)) continue;
+        chunks.push({
+          index: i,
+          key: b64(await chunkKey(key, fileId, i)),
+          data: b64(previewWire[i] as Bytes),
+        });
+      }
+      return { v: 1, header: b64(prefixOnly), chunks };
     },
   };
 }
@@ -314,13 +351,15 @@ export interface OpenStreamOptions extends Omit<OpenOptions, 'ckdSecret'> {
   ckdSecret: OpenOptions['ckdSecret'];
   /** Authenticated metadata. Like plaintext, discard it if the stream later errors. */
   onMeta?: (meta: FileMeta) => void;
+  /** @internal Bind a replay to the header validated before key release. */
+  expectedHeader?: Uint8Array;
 }
 
 /**
  * Checks the fixed fields that decide how much to read (spec 6, step 1, up to `headerLen`), then
  * reads the rest; `parseHeader` checks everything else on the whole header.
  */
-async function readHeader(input: ByteReader): Promise<Bytes> {
+export async function readHeader(input: ByteReader): Promise<Bytes> {
   const fixed = await input.read(FIXED);
   if (fixed.length < 4 || !MAGIC.every((byte, i) => fixed[i] === byte))
     throw new Pay2Error('bad_magic');
@@ -345,9 +384,12 @@ async function readHeader(input: ByteReader): Promise<Bytes> {
 export function openStream(
   file: ReadableStream<Uint8Array>,
   opts: OpenStreamOptions,
+  /** @internal Full plaintext size established by the replayable validation pass. */
+  expectedSize?: number,
 ): ReadableStream<Uint8Array> {
   return output(file, async function* (input) {
     const header = await readHeader(input);
+    if (opts.expectedHeader && !equal(header, opts.expectedHeader)) throw new SourceChangedError();
     const h = await checkSigned(header, opts.listing, opts.contractId);
     const stanza = h.stanzas
       .map((s) => (s.type === NEAR_CKD ? nearCkd(s.body) : undefined))
@@ -405,6 +447,8 @@ export function openStream(
       }
       if (i === 0) {
         meta = parseMeta(piece, h);
+        if (expectedSize !== undefined && meta.size !== expectedSize)
+          throw new Pay2Error('meta_invalid', 'chunk lengths do not add up to the size');
         opts.onMeta?.({ ...meta });
       } else {
         size += piece.length;

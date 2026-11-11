@@ -194,13 +194,15 @@ async function harness(
       sdk = new Annon(o);
       vi.spyOn(sdk, 'sell').mockImplementation(async (args) => {
         calls.push({ command: 'sell', args });
-        await args.publish({ file, header, terms: finalTerms });
-        return { file, header, terms: finalTerms, baseSplit, preview: sealed.preview };
+        const output = args.data instanceof Uint8Array ? file : new Blob([file]).stream();
+        await args.publish({ file: output, header, terms: finalTerms });
+        return { file: output, header, terms: finalTerms, baseSplit, preview: sealed.preview };
       });
       vi.spyOn(sdk, 'resumeSell').mockImplementation(async (args) => {
         calls.push({ command: 'resumeSell', args });
-        await args.publish({ file, header, terms: finalTerms });
-        return { file, header, terms: finalTerms, baseSplit, preview: sealed.preview };
+        const output = args.data instanceof Uint8Array ? file : new Blob([file]).stream();
+        await args.publish({ file: output, header, terms: finalTerms });
+        return { file: output, header, terms: finalTerms, baseSplit, preview: sealed.preview };
       });
       if (!realBuy)
         vi.spyOn(sdk, 'buy').mockImplementation(async (args) => {
@@ -263,9 +265,11 @@ async function harness(
         if (unsafeUnlock) await o.send?.('unlock', { args: {} });
         return true;
       });
-      vi.spyOn(sdk, 'open').mockImplementation(async (args) => {
+      vi.spyOn(sdk, 'openTo').mockImplementation(async (args) => {
         calls.push({ command: 'open', args });
-        return { meta: { name: 'file.txt', mime: 'text/plain', size: data.length }, data };
+        if (args.file instanceof ReadableStream) await must(args.spool)(args.file, async () => {});
+        await new Blob([data]).stream().pipeTo(args.sink);
+        return { meta: { name: 'file.txt', mime: 'text/plain', size: data.length } };
       });
       vi.spyOn(sdk, 'recover').mockImplementation(async (args) => {
         calls.push({ command: 'recover', args });
@@ -627,9 +631,9 @@ it.each(['wrong secret', 'missing record', 'corrupt record'])(
       sdk(options) {
         const sdk = new Annon(options);
         vi.spyOn(sdk, 'accept').mockResolvedValue(true);
-        vi.spyOn(sdk, 'open').mockResolvedValue({
-          meta: { name: 'file.txt', mime: 'text/plain', size: h.data.length },
-          data: h.data,
+        vi.spyOn(sdk, 'openTo').mockImplementation(async (args) => {
+          await new Blob([h.data]).stream().pipeTo(args.sink);
+          return { meta: { name: 'file.txt', mime: 'text/plain', size: h.data.length } };
         });
         const load = sdk.store.load.bind(sdk.store);
         vi.spyOn(sdk.store, 'load').mockImplementation(async (name) => {
@@ -1354,9 +1358,67 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     expect(result.fileId).toBe(terms.file_id);
     expect(result.baseSplit).toEqual(h.baseSplit);
     expect(h.calls).toMatchObject([
-      { command: 'resumeSell', args: { fileId: terms.file_id, data: h.data } },
+      {
+        command: 'resumeSell',
+        args: {
+          fileId: terms.file_id,
+          data: expect.objectContaining({ size: h.data.length, read: expect.any(Function) }),
+        },
+      },
     ]);
     expect(await readFile(join(h.dir, 'resumed.pay2'))).toEqual(Buffer.from(h.file));
+  });
+  it('surfaces source_changed through CLI and MCP with a resumable fileId', async () => {
+    const { sealStreamWithKey } = await import('../../annon/src/envelope/stream.js');
+    const source = new Blob([new Uint8Array(65540)]);
+    const sealed = await sealStreamWithKey(
+      new Uint8Array(32).fill(5),
+      source.stream(),
+      source.size,
+      { fileId: bytes(terms.file_id, 32), name: 'f', mime: '', authKind: 2 },
+    );
+    const stream = await sealed.finish(new Blob([new Uint8Array(source.size).fill(1)]).stream(), {
+      contractId: terms.contract,
+      seller: { kind: 'near', id: terms.contract },
+      ckdSecret: new Uint8Array(48).fill(7),
+    });
+    let cause: unknown;
+    try {
+      await new Response(stream).arrayBuffer();
+    } catch (error) {
+      cause = error;
+    }
+    expect(cause).toMatchObject({ code: 'source_changed' });
+    const execute = async () => {
+      throw new SellError(terms.file_id, { cause });
+    };
+    const out = vi.fn();
+    expect(
+      await runCli(
+        ['sell', 'file', '--price', '1', '--split', `near:${terms.contract}:10000`, '--json'],
+        execute,
+        out,
+      ),
+    ).toBe(1);
+    expect(JSON.parse(out.mock.calls[0]?.[0] ?? '')).toMatchObject({
+      error: { code: 'source_changed', fileId: terms.file_id },
+    });
+    const c = await connect(execute);
+    try {
+      const result = await c.client.callTool({
+        name: 'annon_sell',
+        arguments: { target: 'file', price: '1', split: `near:${terms.contract}:10000` },
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: 'source_changed',
+          fileId: terms.file_id,
+          message: expect.stringContaining('Resume'),
+        },
+      });
+    } finally {
+      await c.close();
+    }
   });
   it('reports a failed sell fileId through both CLI and MCP without upstream secrets', async () => {
     const execute = async () => {

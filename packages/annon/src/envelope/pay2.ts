@@ -3,8 +3,8 @@ import { account } from '../settle-near/codec.js';
  * PAY2, the Annon file format: `specs/pay2.md`. WebCrypto only, so the same code runs in browsers
  * and Node. `open` runs the checks of spec section 6 in its order and fails with its error codes.
  *
- * ponytail: whole files in memory (input and output). Fine up to Partner's 500 MiB limit on a
- * desktop; switch `open` to a ReadableStream (spec section 6 allows it) when phones need more.
+ * These convenience functions buffer input and output. For bounded-memory file operations,
+ * use stream.ts and replay.ts, which share this module's format and crypto primitives.
  */
 
 import { hex as canonicalHex } from '../settle-near/codec.js';
