@@ -1,0 +1,19 @@
+{
+  "requestDeadline": "2026-11-10T21:15:41.462Z",
+  "quote": {
+    "amountIn": "202064",
+    "amountInFormatted": "0.202064",
+    "amountInUsd": "0.201977516608",
+    "minAmountIn": "200043",
+    "amountOut": "200000",
+    "amountOutFormatted": "0.2",
+    "amountOutUsd": "0.199914400000",
+    "minAmountOut": "200000",
+    "timeEstimate": 20,
+    "refundFee": "9949",
+    "withdrawFee": "0",
+    "deadline": "2026-11-13T21:15:41.462Z",
+    "timeWhenInactive": "2026-11-13T21:15:41.462Z",
+    "depositAddress": "2DYKaRPBeNM5WdW8rNsYEktjPrnd89Mm4Lzp3qonSzoj"
+  }
+}

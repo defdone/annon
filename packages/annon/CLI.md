@@ -21,7 +21,7 @@ Create a public configuration file and name it with `--config /path/config.json`
 }
 ```
 
-Contract ID and both RPC URLs must be supplied by human configuration or CLI flags; there are no implicit RPC endpoints. No deployment is implicitly trusted. The first interactive command asks whether you trust
+Contract ID and NEAR RPC must be supplied by human configuration or CLI flags; there are no implicit RPC endpoints. Base RPC is required only for Base purchases, Base listing creation and resuming Base unlock. NEAR-only verify/status and purchases need no Base RPC. No deployment is implicitly trusted. The first interactive command asks whether you trust
 the configured contract to release file keys. `--trust-contract` records explicit trust
 without a prompt. Trust is keyed by network, NEAR RPC and contract; changing any requires
 new trust. An offer cannot select a different contract. MCP shares the trust store. For a server, human configuration may set `trustContract: true` or `ANNON_TRUST_CONTRACT=true`; tool calls cannot grant trust.
@@ -56,7 +56,7 @@ Sell, buy, open, recover and stop also require a user-held random 32-byte backup
 encoded as 64 lowercase hex characters in `ANNON_BACKUP_SECRET`, or in the file named by
 `--backup-secret-file` / `ANNON_BACKUP_SECRET_FILE`. Create it with a cryptographic random
 generator and keep it outside the repository. It is never derived from a wallet signature.
-`verify` and accepted/read-only `status` need neither a wallet nor this secret. A pending Base `status` with saved state and a backup secret may send `unlock` through the configured relayer or NEAR wallet.
+`verify` and accepted/read-only `status` need neither a wallet nor this secret. A pending Base `status` with saved state and a backup secret may send `unlock` through the configured relayer or NEAR wallet. Status can update encrypted local state and backups: expired/canceled Base payments are marked with `paymentState`, preserving the purchase, attempts and recovery key. It never deletes the purchase record.
 
 State directories are created with mode 0700 and records/outputs with 0600. Keep existing
 state directories private. Purchases and recovery grants are encrypted by the SDK; portable
@@ -74,6 +74,7 @@ totaling 10000. The first split recipient gets the rounding remainder.
 
 ```sh
 annon sell report.pdf --price 0.2 --split near:alice.near:10000 --wallet near --output report.pay2
+annon sell report.pdf --resume 0xFILE_ID --wallet near --output resumed.pay2
 annon sell report.pdf --price 0.2 --split evm:0x1111111111111111111111111111111111111111:10000 --wallet evm --base
 annon buy https://host.example/report --route near --wallet near
 annon buy offer.json --url https://host.example/report --route base --wallet evm --max-price 0.2
@@ -103,9 +104,21 @@ entry for that blockchain in 1Click's token list. For BTC, other tokens, or ambi
 entries, specify `--from-asset`. `--refund-to` must name a refund address on the source
 chain; it defaults to the selected wallet's address only when the chain family matches.
 These also have `ANNON_FROM_CHAIN`, `ANNON_FROM_ASSET`, `ANNON_REFUND_TO` equivalents.
+Human configuration can define named `origins`, for example `{"base-usdc":{"fromChain":"base","fromAsset":"nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"}}`, or the same JSON in `ANNON_ORIGINS`. Select one with `--origin base-usdc`. Each may specify `refundTo`; otherwise the configured `ANNON_REFUND_TO` or matching wallet address is used.
+
 The result includes `instructions.address`, `amount` in source token base units, `asset`,
 `chain`, optional `memo`, and `qrData`. Fund these externally with the wallet you already use.
-Never omit a required memo. `status` resumes a saved paid Base purchase by requesting unlock, then checks final NEAR acceptance; 1Click SUCCESS alone
+Never omit a required memo. `instructions.depositBefore` is the cutoff for a **confirmed** deposit;
+`purchaseExpiresAt` is the later contract delivery deadline. The SDK reserves ten minutes between them,
+refuses insufficient windows or a swap estimate longer than that buffer, and checks the entire echoed
+quote request. Origin-chain confirmation time must fit before `depositBefore`; an estimate is not a
+settlement guarantee. Do not deposit after that cutoff even if the service address stays active.
+The three recorded quotes return an address-inactivity `quote.deadline` 72 hours after the echoed
+request deadline. That extension must not extend the buyer's cutoff or contract purchase expiry.
+The [1Click OpenAPI](https://1click.chaindefuser.com/docs/v0/openapi.yaml) describes request `deadline`
+as the start of refund handling, response `deadline` as address inactivity, and `timeEstimate` as
+execution time after deposit confirmation. Late delivery can be refused by Annon; service SUCCESS
+alone does not prove acceptance. `status` resumes a saved paid Base purchase by requesting unlock, then checks final NEAR acceptance; 1Click SUCCESS alone
 does not grant access.
 
 The signing wallet is also the recovery identity. `--recovery kind:id` on buy explicitly
@@ -123,8 +136,10 @@ a URL checks only its public header. Verification does not prove future host ava
 Opening a Base purchase requests unlock before the grant-proved download. It also resends its saved signed payload with the download when present;
 it does not create a fresh payment authorization after a lost reply.
 
-Key release timeout retries are bounded to three attempts with backoff, using the same
-unlock/reopen/claim request. Registration, transfers and payment authorization are never
+Key release transport timeout retries are bounded to three attempts with backoff, using the same
+unlock/reopen/claim request. In-flight relayer replies (`202` pending, or a legacy duplicate `409`)
+are polled every five seconds for at most three minutes. A known transaction hash is retained
+across outcome timeouts, so it is looked up without reposting. If still pending, retain state and retry. Registration, transfers and payment authorization are never
 blindly retried. Raw upstream errors are intentionally suppressed to avoid leaking secrets.
 
 | Exit | Meaning |
@@ -141,9 +156,19 @@ blindly retried. Raw upstream errors are intentionally suppressed to avoid leaki
 plaintext and its file ID; `sdk.resumeSell({ fileId, data, seller, publish })` reconstructs the
 same ciphertext, checks the registered commitment, and completes header publication/hosting.
 It uses `reopenSeller` if registration landed without a usable CKD response, and retains the
-CKD secret in the encrypted job for publication retries. `sdk.reopenSeller({ fileId, seller })`
+CKD secret in the encrypted job only for publication retries. After publication, the saved job and its current
+portable backup contain public terms/metadata and a `published` marker, with `fileKey`,
+`sellerSecret` and `ckdSecret` cleared. Seller one-time keys are cleared from their records and
+current backups after the CKD response is opened. Recovery of a published listing needs control of the registered seller
+wallet and the existing PAY2 ciphertext; request a fresh CKD response with `reopenSeller` to open
+that file. Before publication, resume requires the original plaintext and the pending sell job.
+Plaintext alone can create a new listing, but cannot reproduce the old ciphertext after cleanup. A published job cannot recreate ciphertext using a retained file key. User-made
+backup copies and external backup history cannot be erased by the SDK; remove obsolete pre-publication
+copies if this retention policy matters to you. `sdk.reopenSeller({ fileId, seller })`
 also works on a fresh device and backs up its new one-time key before the call. These are SDK
-methods; the CLI does not expose seller resume yet. Base split creation occurs before the
+methods; the CLI exposes `sell original.pdf --resume 0xFILE_ID`, and MCP exposes
+`annon_sell` with `target` and `resume`. A failure after saving the registration job reports `fileId`
+in the safe error so it can be resumed without inspecting backups. Base split creation occurs before the
 saved registration job, so a failed split deployment still needs separate reconciliation.
 
 The SDK reads `get_config.mpc` and `ckd_domain`, then that account's `public_key` at finality.

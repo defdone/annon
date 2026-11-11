@@ -115,7 +115,7 @@ describe('keep', () => {
     await keep(o);
     expect(calls()).toEqual([['fund_delivery', { delivery_id: 5 }]]);
   });
-  it('isolates a malformed delivery and a signing failure, then backs off repeated pending slots', async () => {
+  it('isolates a malformed delivery and a signing failure, then retries pending slots after the normal hold', async () => {
     near([{ ...delivery(0, 0, [0]), amount: 'bad' }, delivery(1, 0, [0]), delivery(2, 2, [0])]);
     created.mockRejectedValueOnce(new Error('unavailable'));
     const first = await keep(o);
@@ -127,7 +127,7 @@ describe('keep', () => {
     const n = created.mock.calls.length;
     vi.setSystemTime(time + 120002);
     await keep(o);
-    expect(created).toHaveBeenCalledTimes(n);
+    expect(created).toHaveBeenCalledTimes(n + 2);
     vi.useRealTimers();
   });
 
@@ -160,3 +160,31 @@ describe('keep', () => {
     expect(result.sent).toHaveLength(1);
   });
 });
+
+it.each(['success', 'outage', 'finished'] as const)(
+  'resets keeper backoff after %s',
+  async (kind) => {
+    const time = Date.now();
+    try {
+      near([delivery(0, 0, [0])]);
+      await keep(o);
+      vi.setSystemTime(time + 60001);
+      if (kind === 'outage') created.mockRejectedValueOnce(new Error('RPC down'));
+      if (kind === 'finished') near([delivery(0, 2, [2])]);
+      await keep(o);
+      near([delivery(0, 0, [0])]);
+      vi.setSystemTime(time + 120002);
+      const n = created.mock.calls.length;
+      await keep(o);
+      expect(created).toHaveBeenCalledTimes(n + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+it('does not defer the 10001st pending step behind a daily retry-map cap', async () => {
+  near(Array.from({ length: 10001 }, (_, i) => delivery(i, 0, [0])));
+  const r = await keep({ ...o, maxPages: 201 });
+  expect(r.errors).toEqual([]);
+  expect(r.sent).toHaveLength(10001);
+}, 30000);

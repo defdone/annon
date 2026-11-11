@@ -76,3 +76,11 @@ describe('annon CLI boundary', () => {
     });
   });
 });
+
+it('parses sell resume with original plaintext and no new listing terms', () => {
+  expect(parseCli(['sell', 'original.txt', '--resume', `0x${'ab'.repeat(32)}`])).toMatchObject({
+    command: 'sell',
+    target: 'original.txt',
+    resume: `0x${'ab'.repeat(32)}`,
+  });
+});

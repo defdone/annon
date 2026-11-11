@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Annon, type AnnonOptions } from '../../annon/src/api/annon.js';
+import { Annon, type AnnonOptions, SellError } from '../../annon/src/api/annon.js';
 import { parseHeader, sealWithKey, sha256 } from '../../annon/src/envelope/pay2.js';
 import { keyFromSecret } from '../../annon/src/keys/near-ckd.js';
 import type { FileInfo } from '../../annon/src/near/rpc.js';
@@ -111,12 +111,17 @@ async function harness() {
   });
   const env = {
     ANNON_MAX_PRICE: '0.2',
+    ANNON_ORIGINS: JSON.stringify({
+      'base-usdc': { fromChain: 'base', fromAsset: 'nep141:base-usdc' },
+    }),
+    ANNON_ALLOWED_RESOURCES: 'https://files.example/file',
     ANNON_BACKUP_SECRET: 'ab'.repeat(32),
     ANNON_EVM_PRIVATE_KEY: `0x${'42'.repeat(32)}`,
   };
   const wait = vi.fn(async (_ms: number) => {});
   const notify = vi.fn();
   const adapter = createAdapter(env, {
+    agent: true,
     wait,
     notify,
     wallet: async () => wallet,
@@ -138,6 +143,11 @@ async function harness() {
       sdk = new Annon(o);
       vi.spyOn(sdk, 'sell').mockImplementation(async (args) => {
         calls.push({ command: 'sell', args });
+        await args.publish({ file, header, terms: finalTerms });
+        return { file, header, terms: finalTerms, preview: sealed.preview };
+      });
+      vi.spyOn(sdk, 'resumeSell').mockImplementation(async (args) => {
+        calls.push({ command: 'resumeSell', args });
         await args.publish({ file, header, terms: finalTerms });
         return { file, header, terms: finalTerms, preview: sealed.preview };
       });
@@ -241,6 +251,7 @@ async function harness() {
     fetcher,
     file,
     header,
+    agent: true,
     wait,
     notify,
     get options() {
@@ -311,9 +322,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       const bought = await call('annon_buy', {
         target: h.offerFile,
         route: '1click',
-        fromChain: 'base',
-        fromAsset: 'nep141:base-usdc',
-        refundTo: terms.seller.id,
+        origin: 'base-usdc',
       });
       expect(bought.result).toMatchObject({
         state: 'deposit_required',
@@ -537,6 +546,9 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     'backupSecretFile',
     'moderator',
     'evmKeyFile',
+    'refundTo',
+    'fromChain',
+    'fromAsset',
   ])('rejects tool-controlled configuration: %s', async (field) => {
     const execute = vi.fn(async () => ({}));
     const c = await connect(execute);
@@ -570,7 +582,118 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
         target: h.offerFile,
         url: 'https://other.example/file',
       }),
-    ).rejects.toThrow(/resource mismatch/);
+    ).rejects.toMatchObject({ code: 'resource_not_allowed' });
     expect(h.calls).toEqual([]);
+  });
+  it('rejects a larger CLI cap before any wallet or payment work', async () => {
+    const h = await harness();
+    await expect(
+      h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile, maxPrice: '9' }),
+    ).rejects.toMatchObject({ code: 'price_above_max' });
+    expect(h.calls).toEqual([]);
+  });
+  it('uses only configured origin names and the wallet refund address', async () => {
+    const h = await harness();
+    await h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.offerFile,
+      route: '1click',
+      origin: 'base-usdc',
+    });
+    const args = h.calls.find((c) => c.command === 'buy')?.args as { origin: { refundTo: string } };
+    expect(args.origin.refundTo).toBe(
+      privateKeyToAccount(`0x${'42'.repeat(32)}`).address.toLowerCase(),
+    );
+    await expect(
+      h.adapter({
+        ...h.defaults,
+        command: 'buy',
+        target: h.offerFile,
+        route: '1click',
+        origin: 'attacker',
+      }),
+    ).rejects.toMatchObject({ code: 'origin_not_allowed' });
+  });
+  it('resumes a sell through the real MCP schema without price or split', async () => {
+    const execute = vi.fn(async () => ({ fileId: terms.file_id }));
+    const connection = await connect(execute);
+    try {
+      const r = await connection.client.callTool({
+        name: 'annon_sell',
+        arguments: { target: 'original.txt', resume: terms.file_id },
+      });
+      expect(r.isError).not.toBe(true);
+      expect(execute).toHaveBeenCalledWith(
+        expect.objectContaining({ command: 'sell', resume: terms.file_id }),
+      );
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('requires a human-allowed URL for an MCP offer file even when agent URL and offer agree', async () => {
+    const h = await harness();
+    h.env.ANNON_ALLOWED_RESOURCES = 'https://human.example/file';
+    await expect(
+      h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile }),
+    ).rejects.toMatchObject({ code: 'resource_not_allowed' });
+    expect(h.calls).toEqual([]);
+  });
+  it('executes sell resume through the adapter with the original plaintext', async () => {
+    const h = await harness();
+    const result = await h.adapter({
+      ...h.defaults,
+      command: 'sell',
+      target: h.plaintext,
+      resume: terms.file_id,
+      output: join(h.dir, 'resumed.pay2'),
+    });
+    expect(result.fileId).toBe(terms.file_id);
+    expect(h.calls).toMatchObject([
+      { command: 'resumeSell', args: { fileId: terms.file_id, data: h.data } },
+    ]);
+    expect(await readFile(join(h.dir, 'resumed.pay2'))).toEqual(Buffer.from(h.file));
+  });
+  it('reports a failed sell fileId through both CLI and MCP without upstream secrets', async () => {
+    const execute = async () => {
+      throw new SellError(terms.file_id, { cause: new Error('SECRET_VALUE') });
+    };
+    const out = vi.fn();
+    expect(
+      await runCli(
+        ['sell', 'file', '--price', '0.2', '--split', 'near:seller.near:10000', '--json'],
+        execute,
+        out,
+      ),
+    ).toBe(1);
+    expect(JSON.parse(out.mock.calls[0]?.[0] ?? '')).toMatchObject({
+      error: { code: 'sell_incomplete', fileId: terms.file_id },
+    });
+    expect(JSON.stringify(out.mock.calls)).not.toContain('SECRET_VALUE');
+    const c = await connect(execute);
+    try {
+      const result = await c.client.callTool({
+        name: 'annon_sell',
+        arguments: { target: 'file', price: '0.2', split: 'near:seller.near:10000' },
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: { code: 'sell_incomplete', fileId: terms.file_id },
+      });
+      expect(JSON.stringify(result)).not.toContain('SECRET_VALUE');
+    } finally {
+      await c.close();
+    }
+  });
+  it('verifies and reads accepted status with only a NEAR RPC configured', async () => {
+    const h = await harness();
+    const { baseRpc: _baseRpc, ...defaults } = h.defaults;
+    expect(await h.adapter({ ...defaults, command: 'verify', target: h.localFile })).toMatchObject({
+      verified: true,
+    });
+    expect(
+      await h.adapter({ ...defaults, command: 'status', target: terms.file_id }),
+    ).toMatchObject({ state: 'accepted' });
+    expect(h.fetcher).not.toHaveBeenCalled();
   });
 });

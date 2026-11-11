@@ -13,23 +13,33 @@ const price = z
   .regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/)
   .describe('USDC decimal amount, up to six decimal places.');
 export const schemas = {
-  sell: z.strictObject({
-    ...common,
-    target: target.describe('Local plaintext file'),
-    price,
-    split: target.describe('Comma-separated kind:id:bps recipients, totaling 10000'),
-    base: z.boolean().optional(),
-    moderator: z.string().optional(),
-    output: z.string().optional(),
-  }),
+  sell: z
+    .strictObject({
+      ...common,
+      target: target.describe('Local plaintext file'),
+      resume: z
+        .string()
+        .regex(/^0x[0-9a-f]{64}$/)
+        .optional(),
+      price: price.optional(),
+      split: target.describe('Comma-separated kind:id:bps recipients, totaling 10000').optional(),
+      base: z.boolean().optional(),
+      moderator: z.string().optional(),
+      output: z.string().optional(),
+    })
+    .refine(
+      (value) =>
+        value.resume
+          ? !value.price && !value.split && !value.base && !value.moderator
+          : !!value.price && !!value.split,
+      { message: 'Provide price/split for a new listing, or resume without new terms.' },
+    ),
   buy: z.strictObject({
     ...common,
     target: target.describe('HTTPS file URL or path to decoded x402 offer JSON'),
     url: z.string().optional().describe('Expected resource URL, required for an offer file'),
     route: z.enum(['near', 'base', '1click']).optional(),
-    fromChain: z.string().optional(),
-    fromAsset: z.string().optional(),
-    refundTo: z.string().optional(),
+    origin: z.string().optional().describe('Name of a human-configured allowed origin'),
     recovery: z.string().optional(),
   }),
   open: z.strictObject({
@@ -65,10 +75,14 @@ const descriptions = {
 const outputSchema = z.object({
   ok: z.boolean(),
   result: z.record(z.string(), z.unknown()).optional(),
-  error: z.object({ code: z.string(), message: z.string() }).optional(),
+  error: z
+    .object({ code: z.string(), message: z.string(), fileId: z.string().optional() })
+    .optional(),
 });
 export function createServer(
-  execute: (input: Input) => Promise<Record<string, unknown>> = createAdapter(),
+  execute: (input: Input) => Promise<Record<string, unknown>> = createAdapter(process.env, {
+    agent: true,
+  }),
 ) {
   const server = new McpServer({ name: 'annon', version: '0.0.0' });
   for (const command of ['sell', 'buy', 'open', 'verify', 'recover', 'status'] as const) {

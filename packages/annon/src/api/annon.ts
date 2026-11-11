@@ -128,6 +128,21 @@ const listing = (fileId: string, f: FileInfo): Listing => ({
   seller: f.seller,
   ...(f.headerHash ? { publishedHeaderHash: f.headerHash } : {}),
 });
+export class SellError extends Error {
+  readonly code?: string;
+  constructor(
+    readonly fileId: string,
+    options?: ErrorOptions,
+  ) {
+    super(
+      options?.cause instanceof Error
+        ? options.cause.message
+        : 'Sell incomplete; resume with fileId.',
+      options,
+    );
+    if (options?.cause instanceof PayError) this.code = options.cause.code;
+  }
+}
 export class Annon {
   readonly store: Store<PurchaseRecord>;
   private readonly sellerKeys: Store<SellerKeyRecord>;
@@ -307,9 +322,13 @@ export class Annon {
       previewLen: o.previewLen ?? 0,
       ckdSecret: null,
     };
-    if (!(await this.sells.compareAndSet(`annon/sell/${fileId}`, null, job)))
-      throw new PayError('store_conflict');
-    return this.finishSell(job, s, o.seller, o.publish, false);
+    try {
+      if (!(await this.sells.compareAndSet(`annon/sell/${fileId}`, null, job)))
+        throw new PayError('store_conflict');
+      return await this.finishSell(job, s, o.seller, o.publish, false);
+    } catch (cause) {
+      throw new SellError(fileId, { cause });
+    }
   }
   /** Resume with the original plaintext; the saved file key reproduces the registered cipher hash. */
   async resumeSell(o: {
@@ -320,6 +339,11 @@ export class Annon {
   }) {
     const job = await this.sells.load(`annon/sell/${o.fileId}`);
     if (!job) throw new Error('no saved sell job');
+    if (job.published) {
+      await this.o.writeBackup(job.id, await exportSell(job, this.o.backupSecret));
+      throw new Error('sell already published; secrets cleared');
+    }
+    if (!job.fileKey || !job.sellerSecret) throw new Error('sell job has no file key');
     if (
       job.terms.contract !== this.o.contractId ||
       identityJson(job.terms.seller) !== identityJson(o.seller.identity)
@@ -338,7 +362,11 @@ export class Annon {
     const registered = await getFile(this.o.nearRpc, this.o.contractId, o.fileId);
     if (registered && registered.termsHash !== termsHash(job.terms, assetsFor(job.terms)))
       throw new Error('registered sell job mismatch');
-    return this.finishSell(job, s, o.seller, o.publish, registered !== null);
+    try {
+      return await this.finishSell(job, s, o.seller, o.publish, registered !== null);
+    } catch (cause) {
+      throw new SellError(o.fileId, { cause });
+    }
   }
   /** A new seller one-time key is backed up before the single-use reopen_seller call. */
   async reopenSeller(o: { fileId: string; seller: IdentityWallet }): Promise<Uint8Array> {
@@ -361,11 +389,21 @@ export class Annon {
       throw new PayError('store_conflict');
     const args = { file_id: o.fileId, key: hex(key.publicKeyBytes), deadline: next.deadline };
     const auth = await this.auth(o.seller, reopenSellerText(this.o.contractId, args, f.seller));
-    return this.answer(
+    const answer = await this.answer(
       await this.call('reopen_seller', { args, ...(auth ? { auth } : {}) }, o.seller),
       key.secret,
       o.fileId,
     );
+    if (
+      !(await this.sellerKeys.compareAndSet(keyName, next, {
+        ...next,
+        revision: next.revision + 1,
+        buyerSecret: null,
+      }))
+    )
+      throw new PayError('store_conflict');
+    key.secret.fill(0);
+    return answer;
   }
   private async finishSell(
     job: SellRecord,
@@ -380,7 +418,7 @@ export class Annon {
     else {
       if (registered) ckd = await this.reopenSeller({ fileId, seller });
       else {
-        const key = keyFromSecret(bytes(job.sellerSecret, 32));
+        const key = keyFromSecret(bytes(job.sellerSecret as string, 32));
         const args = {
           terms: job.terms,
           seller_key: hex(key.publicKeyBytes),
@@ -428,6 +466,31 @@ export class Annon {
         seller,
       );
     await publish({ file, header, terms: job.terms });
+    const sellerKeyName = `annon/seller-key/${fileId}`;
+    const sellerKey = await this.sellerKeys.load(sellerKeyName);
+    if (
+      sellerKey?.buyerSecret &&
+      !(await this.sellerKeys.compareAndSet(sellerKeyName, sellerKey, {
+        ...sellerKey,
+        revision: sellerKey.revision + 1,
+        buyerSecret: null,
+      }))
+    )
+      throw new PayError('store_conflict');
+    const current = await this.sells.load(`annon/sell/${fileId}`);
+    if (
+      !current ||
+      !(await this.sells.compareAndSet(`annon/sell/${fileId}`, current, {
+        ...current,
+        revision: current.revision + 1,
+        published: true,
+        fileKey: null,
+        sellerSecret: null,
+        ckdSecret: null,
+      }))
+    )
+      throw new PayError('store_conflict');
+    ckd.fill(0);
     return { terms: job.terms, file, header, preview: s.preview };
   }
   async buy(o: BuyOptions): Promise<Bought> {
@@ -557,6 +620,7 @@ export class Annon {
     if (!id) throw new TypeError('missing purchase id');
     if (await getPurchase(this.o.nearRpc, this.o.contractId, id)) return true;
     if (record?.purchase.route !== 'base-usdc') return false;
+    if (!this.o.baseRpc) throw new Error('configure baseRpc to resume a Base purchase');
     const next = await nextStep(record, {
       nearRpc: this.o.nearRpc,
       baseRpc: this.o.baseRpc,
@@ -576,7 +640,8 @@ export class Annon {
     if (r && r.grant === null) throw new Error('recovery grant is not final');
     const id = r?.purchase_id ?? o.record?.id;
     if (!id) throw new TypeError('missing purchase id');
-    await this.accept(o.record, id);
+    if (!(await this.accept(o.record, id)))
+      throw new PayError('settlement_processing', 'purchase not accepted; check status and resume');
     const fileId = r?.file_id ?? o.record?.purchase.file_id;
     if (!fileId) throw new TypeError('missing file id');
     const grant = r?.grant ?? 0;

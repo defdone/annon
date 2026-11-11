@@ -50,6 +50,7 @@ export interface PaymentAttempt {
 
 export interface PurchaseRecord extends Versioned {
   schemaVersion: 2;
+  paymentState?: 'expired' | 'canceled';
   purchase: Purchase;
   message: string;
   buyerSecret: string;

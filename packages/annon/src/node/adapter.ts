@@ -33,9 +33,14 @@ import {
 } from './wallets.js';
 
 export interface Dependencies {
+  /** Server-owned policy; never taken from tool arguments. */
+  agent?: boolean;
   sdk?: (
     options: AnnonOptions,
-  ) => Pick<Annon, 'sell' | 'buy' | 'open' | 'recover' | 'stop' | 'store' | 'accept'>;
+  ) => Pick<
+    Annon,
+    'sell' | 'buy' | 'open' | 'recover' | 'stop' | 'store' | 'accept' | 'resumeSell'
+  >;
   wallet?: typeof loadWallet;
   file?: typeof getFile;
   purchase?: typeof getPurchase;
@@ -153,7 +158,13 @@ async function originFor(
   env: Environment,
   wallet: LocalWallet,
   fetcher: typeof fetch,
+  c: Config,
 ): Promise<Origin> {
+  if (o.origin) {
+    if (!c.origins || !Object.hasOwn(c.origins, o.origin))
+      return fail('origin_not_allowed', 'Choose a human-configured origin name.', 2);
+    o = { ...o, ...c.origins[o.origin] };
+  }
   const chain = o.fromChain ?? env.ANNON_FROM_CHAIN;
   if (!chain)
     return fail(
@@ -287,6 +298,8 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
       return selected;
     };
     const send: NonNullable<AnnonOptions['send']> = async (method, args, owner) => {
+      if (method === 'unlock' && !c.baseRpc)
+        return fail('base_rpc_required', 'Configure baseRpc before resuming a Base purchase.', 2);
       const signer =
         owner ?? (selected?.identity.kind === 'near' ? (selected as NearWallet) : undefined);
       let submitted: { txHash: string; signer: string } | undefined;
@@ -306,8 +319,22 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
             body: JSON.stringify(method === 'claim_key' ? { method, args } : { method, ...args }),
             signal: AbortSignal.timeout(60000),
           });
+          if (r.status === 409) {
+            const body = (await r.json()) as { error?: string };
+            if (body.error === 'duplicate') throw new Error('relayer in flight; retry');
+          }
           if (![200, 202].includes(r.status)) throw new Error('relayer refused');
-          submitted = (await r.json()) as { txHash: string; signer: string };
+          const body = (await r.json()) as { txHash?: string; signer?: string; pending?: boolean };
+          if (r.status === 202 && body.pending === true)
+            throw new Error('relayer in flight; retry');
+          if (
+            typeof body.txHash !== 'string' ||
+            !body.txHash ||
+            typeof body.signer !== 'string' ||
+            !body.signer
+          )
+            throw new Error('invalid relayer transaction response');
+          submitted = { txHash: body.txHash, signer: body.signer };
         }
         const tx = submitted;
         const result = await txOutcome(c.nearRpc, tx.txHash, tx.signer, c.contractId, 'FINAL', {
@@ -324,18 +351,22 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
         throw new Error(`transaction ${result.state}`);
       };
       // Only repeat idempotent release requests. Registration and payment are never blindly retried.
-      for (let attempt = 0; ; attempt++) {
+      let timeouts = 0;
+      let pending = 0;
+      for (;;) {
         try {
           return await call();
         } catch (error) {
+          const inFlight = /in flight/i.test(error instanceof Error ? error.message : '');
+          const timeout = /timeout|timed out/i.test(error instanceof Error ? error.message : '');
           if (
             !['unlock', 'reopen', 'claim_key'].includes(method) ||
-            attempt >= 2 ||
-            !/timeout|timed out/i.test(error instanceof Error ? error.message : '')
+            (!inFlight && !timeout) ||
+            (inFlight ? pending++ >= 36 : timeouts++ >= 2)
           )
             throw error;
-          d.notify?.('Key release timed out; retrying the saved request.');
-          await wait(1000 * 2 ** attempt);
+          d.notify?.('Key release pending; retrying the saved request.');
+          await wait(inFlight ? 5000 : 1000 * 2 ** (timeouts - 1));
         }
       }
     };
@@ -360,8 +391,26 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
       };
     }
     if (o.command === 'sell') {
-      if (!o.target || !o.price || !o.split) throw usage();
+      if (!o.target) throw usage();
       const seller = await wallet();
+      const output = o.output ?? `${o.target}.pay2`;
+      await newOutput(output);
+      const publish = async (file: { file: Uint8Array }) => {
+        await writeFile(output, file.file, { mode: 0o600, flag: 'wx' });
+      };
+      if (o.resume) {
+        if (!isId(o.resume) || o.price || o.split || o.base || o.moderator) throw usage();
+        const result = await sdk.resumeSell({
+          fileId: o.resume,
+          data: new Uint8Array(await readFile(o.target)),
+          seller,
+          publish,
+        });
+        return { fileId: result.terms.file_id, file: output, terms: result.terms };
+      }
+      if (!o.price || !o.split) throw usage();
+      if (o.base && !c.baseRpc)
+        return fail('base_rpc_required', 'Configure baseRpc before creating a Base listing.', 2);
       const recipients = o.split.split(',').map((entry) => {
         const at = entry.lastIndexOf(':');
         return { identity: identity(entry.slice(0, at)), bps: Number(entry.slice(at + 1)) };
@@ -382,8 +431,6 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
           'Base listings require an EVM wallet and EVM split recipients.',
           2,
         );
-      const output = o.output ?? `${o.target}.pay2`;
-      await newOutput(output);
       const result = await sdk.sell({
         data: new Uint8Array(await readFile(o.target)),
         name: basename(o.target),
@@ -401,9 +448,7 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
             }
           : {}),
         ...(o.moderator ? { moderator: o.moderator } : {}),
-        publish: async (file) => {
-          await writeFile(output, file.file, { mode: 0o600, flag: 'wx' });
-        },
+        publish,
       });
       return { fileId: result.terms.file_id, file: output, terms: result.terms };
     }
@@ -419,12 +464,25 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
       const maxPrice = BigInt(amount(cap));
       if (c.maxPrice && maxPrice > BigInt(amount(c.maxPrice)))
         return fail('price_above_max', 'The requested cap exceeds the configured maximum.', 2);
+      if (
+        d.agent &&
+        !/^https?:/.test(o.target) &&
+        (!o.url || !c.allowedResources?.some((url) => sameResource(url, o.url ?? '')))
+      )
+        return fail(
+          'resource_not_allowed',
+          'Offer-file purchases require a human-allowed resource URL.',
+          2,
+        );
+      if (d.agent && (o.refundTo || o.fromChain || o.fromAsset))
+        return fail('origin_not_allowed', 'Use a human-configured origin name.', 2);
       const buyer = await wallet();
       const found = await offer(o.target, c, fetcher, undefined, o.url);
       const { f, listing } = await readListing(found.fileId);
       await inspectHeader(found.header, listing, c.contractId);
       const route =
-        o.route ?? (o.fromChain ? '1click' : buyer.identity.kind === 'near' ? 'near' : 'base');
+        o.route ??
+        (o.fromChain || o.origin ? '1click' : buyer.identity.kind === 'near' ? 'near' : 'base');
       if (route === 'near' && buyer.identity.kind !== 'near')
         return fail(
           'near_wallet_required',
@@ -440,7 +498,9 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
           'The Base route requires an EVM wallet and a Base offer.',
           2,
         );
-      const origin = route === '1click' ? await originFor(o, env, buyer, fetcher) : undefined;
+      if (route === 'base' && !c.baseRpc)
+        return fail('base_rpc_required', 'Configure baseRpc before a Base purchase.', 2);
+      const origin = route === '1click' ? await originFor(o, env, buyer, fetcher, c) : undefined;
       const before = await resources.load(found.fileId);
       if (
         !(await resources.compareAndSet(found.fileId, before, {

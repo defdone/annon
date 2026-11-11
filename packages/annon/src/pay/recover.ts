@@ -26,7 +26,14 @@ export async function nextStep(r: PurchaseRecord, o: NextStepOptions): Promise<N
     return header ? { step: 'resend', header } : { step: 'wait' };
   }
   if (s.state !== 'paid') {
-    if (!(await o.store.compareAndSet(purchaseKey(r.id), r, null)))
+    if (
+      r.paymentState !== s.state &&
+      !(await o.store.compareAndSet(purchaseKey(r.id), r, {
+        ...r,
+        revision: r.revision + 1,
+        paymentState: s.state,
+      }))
+    )
       throw new PayError('store_conflict');
     return { step: 'buy' };
   }
