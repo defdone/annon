@@ -4,6 +4,7 @@
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !packages/annon/package.json
+!packages/annon-mcp/package.json
 !packages/annon/src
 !apps/relayer/package.json
 !apps/relayer/server.ts
