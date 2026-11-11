@@ -441,7 +441,15 @@ async fn real_mainnet_token_and_intents_maximum_delivery() -> anyhow::Result<()>
         .await?;
         measure(&format!("pay-real-slot-{slot}"), &out, &annon);
         assert!(out.is_success(), "{:?}", out.failures());
-        assert_eq!(delivery(&annon).await?["slots"][slot]["step"]["state"], 2);
+        if slot < 8 {
+            assert_eq!(delivery(&annon).await?["slots"][slot]["step"]["state"], 2);
+        } else {
+            // The last slot settles the delivery: its record goes, its storage returns to the reserve.
+            assert!(
+                delivery(&annon).await?.is_null(),
+                "a settled delivery is removed"
+            );
+        }
     }
     assert_eq!(mt(&intents, &evm).await?, 1250);
     // Solana identity maps to lower-case hex in the contract's Intents account id.
