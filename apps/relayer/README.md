@@ -2,9 +2,9 @@
 
 An HTTP front for `relay` from `@defdone/annon`: it sends `register`, `unlock`, `claim_key`, `reopen`, `reopen_seller` and
 `stop_sales` to an Annon contract and pays the NEAR gas, for people and agents without a NEAR
-account. It also runs the keeper: after each NEAR purchase or refund it calls `fund_delivery` and
-`pay_slot`, which anyone may call and which can't change an amount or a destination. It keeps no
-database. Run one instance: its limits live in memory.
+account. An optional keeper uses a separate account/key, durable retry/submission state, and
+persisted NEAR budgets to call permissionless `settle`. Relay admission limits remain in memory.
+Run one relayer instance per relay signing key.
 
 ```
 docker build -f apps/relayer/Dockerfile -t annon-relayer .     # from the repository root
@@ -15,7 +15,7 @@ docker run -p 8080:8080 --env-file relayer.env annon-relayer
 |---|---|---|
 | `CONTRACT_ID` | yes | The Annon contract, e.g. `v1.annon.defdone.near` |
 | `RELAYER_ACCOUNT` | yes | The NEAR account that sends and pays |
-| `RELAYER_KEY` | yes, secret | A function-call key of that account for these six methods plus `fund_delivery` and `pay_slot`, on that contract only |
+| `RELAYER_KEY` | yes, secret | A function-call key of that account for the six relay methods, on that contract only |
 | `SELLERS` | no, secret | Comma-separated `kind:id` seller identities (e.g. `evm:0x…`, `near:seller.near`, `solana:<base58>`); empty serves any seller |
 | `NEAR_RPC`, `BASE_RPC` | no | RPC endpoints (defaults: FastNEAR, `mainnet.base.org`) |
 | `USDC` | no | USDC on Base (default: the canonical address) |
@@ -24,7 +24,7 @@ docker run -p 8080:8080 --env-file relayer.env annon-relayer
 | `PER_IP_HOUR`, `PER_DAY` | no | Requests per IP per hour, transactions per day (defaults `60`, `500`) |
 | `IP_HEADER` | no | The header your proxy sets to the client's IP (e.g. `fly-client-ip`), only behind a proxy that overwrites it; without it, the connection's address is used |
 | `DISABLED` | no | `1` answers 503 and sends nothing |
-| `KEEPER_SECONDS` | no | Seconds between keeper passes (default `30`); `0` turns the keeper off |
+| `KEEPER_SECONDS` | no | Seconds between keeper passes (default `0`, disabled); enabling requires the keeper settings below |
 | `PORT` | no | Default `8080` |
 
 The account needs prepaid storage on the contract (`storage_deposit`) for `register`, `unlock`
@@ -42,17 +42,28 @@ is available it returns HTTP 202 `{pending:true,retryAfterMs:5000}`. Clients ret
 request; a cached hash is always checked against the expected method/arguments via NEAR RPC.
 The cache is process-local; contract checks remain authoritative after a restart.
 
-Each keeper pass reads `delivery_count` once and up to 20 `list_deliveries` pages of 50 IDs.
-This costs `1 + min(20, ceil(delivery_count / 50))` contract view calls per pass (excluding
-transport retries). At the default 30-second interval, a full scan takes about
-`30 * ceil(ceil(delivery_count / 50) / 20)` seconds, plus RPC and sending time. IDs include
-settled gaps and reserved refund leaves: scan cost grows with historical IDs. Old IDs must be
-revisited because refund leaves can materialize there later. A larger SDK `maxPages` reduces
-scan latency at the cost of more views per pass. No daily 10,000-step retry cap exists.
-Each attempted step has a one-minute hold; successful passes and RPC/signing outages cannot
-accumulate exponential per-step delays. Expired holds are swept each pass. Steps observed in
-flight are never sent again until a contract callback makes them due.
+## Separate keeper configuration
+
+| Variable | Required when enabled | Meaning |
+| --- | --- | --- |
+| `KEEPER_ACCOUNT`, `KEEPER_KEY` | yes | Dedicated account/key, distinct from both relay credentials; allow `settle` and `materialize_refund` on this contract |
+| `KEEPER_STATE_DIR` | yes | Private durable mounted directory; `jobs` and `budgets` survive restarts |
+| `KEEPER_HOURLY_BUDGET`, `KEEPER_DAILY_BUDGET` | yes | Conservative NEAR spend caps, integer yoctoNEAR |
+| `KEEPER_GAS_PRICE` | no | Maximum yoctoNEAR/gas, default `100000000`; higher network prices refuse new signing |
+| `KEEPER_RESERVE_LOW_WATER` | no | Alert threshold in yoctoNEAR, default `40960000000000000000000` (0.04096 NEAR) |
+
+Set `KEEPER_SECONDS=30` to enable. The account needs gas, a sufficient key allowance, and prepaid contract storage for refund materialization. The keeper has its own nonce queue, so relay requests do not serialize behind it. Shutdown cancels future passes. Mount a writable persistent volume owned by the container's `node` user at `KEEPER_STATE_DIR`.
+
+A sweep pins `open_delivery_count` and all open-index pages to one finalized block and persists its cursor. `settle` attaches 600 Tgas (450 when already funded). Final state and successful trusted-executor failure events drive per-phase/slot backoff: 1, 2, 4, 8, 16, then 30 minutes with jitter. Inclusion never resets retries. Signed hashes/bytes persist before submission; InFlight steps are never reset or newly submitted. A shared breaker slows Intents pause/locked-sender failures. Monitor structured `keeper: incident` and `keeper: alert` records for transport, finalized failures, uncertainty, InFlight and low reserves.
+
+Hourly/daily UTC gas reservations persist and are retained after uncertainty. Charges use twice attached gas times the configured maximum gas price; refund storage has an additional conservative reservation. This intentionally overcounts actual burn. Deleting state defeats limits and can lose transaction recovery; keep it backed up and private.
+
+Reserve exhaustion produces refund leaves **outside the open-delivery index**. The server has no bundled indexer or leaf-history source. SDK embedders can supply `RefundSource` to `keep` to materialize provided current proofs using prepaid storage and zero attached deposit. Operators must supply complete leaf history and refresh proofs within the last-32-root window. The environment-only server services open deliveries; supply `config.keeper.refunds` when embedding `serve`, or wire a source through the SDK, for unmaterialized leaves. No keeper can resolve a permanently unavailable dependency or safely reset an uncertain InFlight payment. See the [SDK README](../../packages/annon/README.md#durable-keeper).
 
 The isolated production-install test is opt-in: `ANNON_TEST_CONTAINER=1 pnpm --filter
 @defdone/annon-relayer test`. CI runs it explicitly. Ordinary `pnpm test` does not install
 packages or contact the registry for this check.
+
+Keeper jobs use the contract's finalized network identity, rather than the RPC URL, for durable job and spending scopes. Changing RPC providers retains outstanding work and gas reservations. Gas-price checks use an explicit current finalized block hash. Both `fromEnv` and `serve` require separate relay/keeper accounts and keys before starting the keeper.
+
+Unknown transactions are checked against the keeper access-key nonce and reference-block age at finality, using the protocol's transaction validity period in blocks. Proven consumed/expired transactions release unresolved capacity after a finalized delivery read and durable backoff. Missing validity evidence remains uncertain. The keeper classifies dependency pause/lock failures only from structured trusted-executor failures and trusted failure-event reasons; transaction metadata such as `block_hash` never trips the breaker.

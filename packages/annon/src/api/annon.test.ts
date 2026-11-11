@@ -334,6 +334,146 @@ describe('high-level one-model API', () => {
     });
     expect(transferPurchase).toHaveBeenCalledTimes(1);
   });
+  it('persists and returns purchaseId and txHash as uncertain after an ambiguous NEAR submission', async () => {
+    const { TransactionUncertain } = await import('../wallet/uncertain.js');
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'x',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    });
+    const payer = {
+      identity: { kind: 'near' as const, id: 'buyer.near' },
+      authorize: async () => undefined,
+      call: vi.fn(),
+      transferPurchase: vi.fn(async () => {
+        throw new TransactionUncertain('KNOWN-HASH');
+      }),
+    };
+    const bought = await h.sdk.buy({
+      fileId: h.terms.file_id,
+      header: h.header,
+      recovery: wallet,
+      refund: payer.identity,
+      payer,
+      maxPrice: 200000n,
+    });
+    expect(bought.uncertain).toEqual({ purchaseId: bought.record.id, txHash: 'KNOWN-HASH' });
+    const restored = await importPurchase(must(h.backups.get(bought.record.id)), h.backupSecret);
+    expect(restored.nearSubmission).toEqual({ state: 'uncertain', txHash: 'KNOWN-HASH' });
+    expect(payer.transferPurchase).toHaveBeenCalledTimes(1);
+  });
+  it.each(['receiver', 'method', 'args', 'gas', 'deposit', 'failed'])(
+    'never saves forged nearSubmission evidence after a definite %s rejection',
+    async (mismatch) => {
+      const { configuredWallet } = await import('../node/signer-wallet.js');
+      const { signingRequest } = await import('../node/signing.js');
+      const h = harness();
+      await h.sdk.sell({
+        data: body,
+        name: 'x',
+        mime: '',
+        seller: wallet,
+        near: {
+          price: '200000',
+          recipients: [{ identity: wallet.identity, bps: 10000 }],
+          remainder: wallet.identity,
+        },
+        publish: h.publish,
+      });
+      const existingBackups = new Set(h.backups.keys());
+      const originalFetch = globalThis.fetch;
+      const payer = await configuredWallet(
+        { mode: 'browser', identity: { kind: 'near', id: 'buyer.near' } },
+        {
+          nearRpc: 'https://fake.rpc',
+          baseRpc: '',
+          contractId: 'annon.near',
+          network: 'near:testnet',
+          stateDir: '/unused',
+        },
+        { command: 'buy' },
+        {},
+        { read: vi.fn(), create: vi.fn() },
+        async () => ({
+          url: 'http://127.0.0.1:1234/#FAKE',
+          pairingCode: 'FAKE',
+          close: async () => {},
+          async request<T>(
+            action: { id: string; expiresAt: number },
+            verify: (r: T) => Promise<void>,
+          ) {
+            const q = action as ReturnType<typeof signingRequest>;
+            const p = q.payload as {
+              receiverId: string;
+              method: string;
+              args: object;
+              gas: string;
+              deposit: string;
+            };
+            vi.stubGlobal(
+              'fetch',
+              vi.fn(async (url, init) => {
+                const rpc = JSON.parse(String(init?.body));
+                if (rpc.method !== 'tx' && rpc.method !== 'EXPERIMENTAL_tx_status')
+                  return originalFetch(url, init);
+                return Response.json({
+                  id: rpc.id,
+                  result: {
+                    final_execution_status: 'FINAL',
+                    transaction: {
+                      hash: 'FORGED',
+                      signer_id: q.account,
+                      receiver_id: mismatch === 'receiver' ? 'evil.near' : p.receiverId,
+                      actions: [
+                        {
+                          FunctionCall: {
+                            method_name: mismatch === 'method' ? 'other' : p.method,
+                            args: Buffer.from(
+                              JSON.stringify(mismatch === 'args' ? {} : p.args),
+                            ).toString('base64'),
+                            gas: mismatch === 'gas' ? '1' : p.gas,
+                            deposit: mismatch === 'deposit' ? '0' : p.deposit,
+                          },
+                        },
+                      ],
+                    },
+                    status: mismatch === 'failed' ? { Failure: 'rejected' } : { SuccessValue: '' },
+                    receipts_outcome: [],
+                  },
+                });
+              }),
+            );
+            const result = { txHash: 'FORGED' } as T;
+            await verify(result);
+            return result;
+          },
+        }),
+        () => null,
+      );
+      await expect(
+        h.sdk.buy({
+          fileId: h.terms.file_id,
+          header: h.header,
+          recovery: wallet,
+          refund: payer.identity,
+          payer: payer as import('../wallet/wallet.js').NearWallet,
+          maxPrice: 200000n,
+        }),
+      ).rejects.toThrow();
+      const purchaseBackups = [...h.backups].filter(([id]) => !existingBackups.has(id));
+      expect(purchaseBackups).toHaveLength(1);
+      for (const [, backup] of purchaseBackups)
+        expect((await importPurchase(backup, h.backupSecret)).nearSubmission).toBeUndefined();
+    },
+  );
   it('recovers on a fresh device through purchases_of and reopen, persisting the fresh secret first', async () => {
     const h = harness();
     await h.sdk.sell({

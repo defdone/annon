@@ -30,7 +30,9 @@ import {
   purchaseId,
 } from '../settle-near/purchase.js';
 import { type SettlementAssets, termsHash } from '../settle-near/terms.js';
-import { deliveryCount, listDeliveries } from './keeper.js';
+import { type KeepOptions, type KeepResult, runKeeper } from './keeper-runner.js';
+
+export type { KeeperRecord, KeepOptions, KeepResult, RefundSource } from './keeper-runner.js';
 
 export type RelayRequest =
   | { method: 'register'; args: RegisterArgs; auth: Authorization }
@@ -341,11 +343,10 @@ const MAX_WAITING = 32;
 const accounts = new Map<string, Account>();
 const held = new Map<string, number>();
 const submitted = new Map<string, RelayResult>();
-const keepCursors = new Map<string, number>();
 const counts = new Map<string, { n: number; until: number }>();
 /** When each recent write was sent, per payer and contract (see `enoughStorage`). */
 const writes = new Map<string, number[]>();
-let queue: Promise<unknown> = Promise.resolve();
+const queues = new Map<string, Promise<unknown>>();
 let waiting = 0;
 
 /** How many operations and limit counters are kept; for tests. */
@@ -355,7 +356,6 @@ export const relayCounters = () => counts.size + held.size;
 export function resetRelayState() {
   held.clear();
   submitted.clear();
-  keepCursors.clear();
   counts.clear();
   accounts.clear();
   writes.clear();
@@ -459,9 +459,12 @@ const senderKey = (o: { nearRpc: string; sender: Sender }) =>
   `${o.nearRpc}|${o.sender.accountId}|${o.sender.key}`;
 
 /** Runs jobs one at a time, in order: checks and nonces never interleave. */
-function enqueue<T>(job: () => Promise<T>): Promise<T> {
-  const next = queue.then(job, job);
-  queue = next.catch(() => {});
+function enqueue<T>(job: () => Promise<T>, scope = 'relay'): Promise<T> {
+  const next = (queues.get(scope) ?? Promise.resolve()).then(job, job);
+  queues.set(
+    scope,
+    next.catch(() => {}),
+  );
   return next;
 }
 
@@ -599,7 +602,7 @@ export async function relay(
       submitted.set(id, { txHash, uncertain: true });
       if (write) writes.get(scope)?.push(Date.now()) ?? writes.set(scope, [Date.now()]);
       return send(o, key, txHash, signed);
-    });
+    }, senderKey(o));
     held.set(id, Date.now() + HOLD);
     submitted.set(id, out);
     return out;
@@ -647,94 +650,17 @@ async function sign(
   };
 }
 
-/** Normal per-step retry hold. Inclusion is not execution success; never accumulate outage delays. */
-const KEEP_HOLD = 60_000;
-/** Deliveries per `list_deliveries` page (the contract's maximum). */
-const PAGE = 50;
-
-export interface KeepResult {
-  sent: { method: 'fund_delivery' | 'pay_slot'; args: object; result: RelayResult }[];
-  errors: { from?: number; deliveryId?: number; error: unknown }[];
-}
-
-/**
- * A bounded keeper pass cycling over delivery ids (`0 .. delivery_count`): a pending deposit gets
- * `fund_delivery`, a pending slot of a funded delivery gets `pay_slot`. Revisit the whole range: a refund materialized from the refund tree takes an old, empty id, and a step can go back
- * to pending after a failed transfer. Steps in flight are never sent again: only their callback
- * moves them on, so nothing is paid twice. Sent with the relayer's key, in the same line as
- * relayed requests. Anyone may make these calls; the contract fixes every amount and destination.
- */
-// A cursor bounds each pass while retaining eventual scans of old refund-leaf ids.
-export async function keep(o: {
-  nearRpc: string;
-  contractId: string;
-  sender: Sender;
-  /** Bound views per pass; subsequent passes cycle through old ids, including late materializations. */
-  maxPages?: number;
-}): Promise<KeepResult> {
-  const sent: KeepResult['sent'] = [];
-  const errors: KeepResult['errors'] = [];
+/** A dedicated account/key has its own nonce queue, independent from relay traffic. */
+export async function keep(o: KeepOptions): Promise<KeepResult> {
   const key = senderKey(o);
-  const count = await deliveryCount(o.nearRpc, o.contractId);
-  for (const [k, v] of held)
-    if (v <= Date.now()) {
-      held.delete(k);
-      submitted.delete(k);
-    }
-  const maxPages = o.maxPages ?? 20;
-  if (!Number.isSafeInteger(maxPages) || maxPages < 1)
-    throw new TypeError('invalid keeper page budget');
-  const scope = `${o.nearRpc}|${o.contractId}`;
-  const pages = Math.ceil(count / PAGE);
-  const start = (keepCursors.get(scope) ?? 0) % (pages || 1);
-  for (let i = 0; i < Math.min(pages, maxPages); i++) {
-    const pageIndex = (start + i) % pages;
-    const from = pageIndex * PAGE;
-    keepCursors.set(scope, (pageIndex + 1) % pages);
-    let page: Awaited<ReturnType<typeof listDeliveries>>;
-    try {
-      page = await listDeliveries(o.nearRpc, o.contractId, from, PAGE, (error) =>
-        errors.push({ from, error }),
-      );
-    } catch (error) {
-      errors.push({ from, error });
-      continue;
-    }
-    for (const d of page) {
-      const due: [KeepResult['sent'][number]['method'], object][] =
-        d.fund.state === 0
-          ? [['fund_delivery', { delivery_id: d.id }]]
-          : d.fund.state === 2
-            ? d.slots.flatMap((x, slot) =>
-                x.step.state === 0
-                  ? [['pay_slot', { delivery_id: d.id, slot }] as ['pay_slot', object]]
-                  : [],
-              )
-            : [];
-      for (const [method, args] of due) {
-        const id = `${o.nearRpc}|${o.contractId}|keep:${method}:${JSON.stringify(args)}`;
-        const now = Date.now();
-        if ((held.get(id) ?? 0) > now) continue;
-        held.set(id, now + KEEP_HOLD);
-        try {
-          const result = await enqueue(async () => {
-            const tx = await sign(
-              o,
-              key,
-              method,
-              args,
-              method === 'fund_delivery' ? 150000000000000n : 80000000000000n,
-            );
-            return send(o, key, tx.txHash, tx.signed);
-          });
-          sent.push({ method, args, result });
-        } catch (error) {
-          errors.push({ deliveryId: d.id, error });
-        }
-      }
-    }
-  }
-  return { sent, errors };
+  return enqueue(
+    () =>
+      runKeeper(o, {
+        sign: (method, args, gas) => sign(o, key, method, args, gas),
+        send: (hash, signed) => send(o, key, hash, signed),
+      }),
+    key,
+  );
 }
 
 /**

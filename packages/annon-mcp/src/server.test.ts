@@ -32,9 +32,10 @@ afterEach(async () => {
   for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
-async function harness() {
+async function harness(agent = true, prompt?: (message: string) => Promise<boolean>) {
   const dir = await mkdtemp(join(tmpdir(), 'annon-mcp-'));
   directories.push(dir);
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ dailyBudget: '10' }));
   const account = privateKeyToAccount(`0x${'42'.repeat(32)}`);
   const wallet = {
     identity: { kind: 'evm' as const, id: account.address.toLowerCase() },
@@ -112,6 +113,8 @@ async function harness() {
     throw new Error('Unexpected network access');
   });
   const env = {
+    ANNON_CONFIG: join(dir, 'config.json'),
+    ANNON_STATE_DIR: dir,
     ANNON_MAX_PRICE: '0.2',
     ANNON_ORIGINS: JSON.stringify({
       'base-usdc': { fromChain: 'base', fromAsset: 'nep141:base-usdc' },
@@ -123,7 +126,8 @@ async function harness() {
   const wait = vi.fn(async (_ms: number) => {});
   const notify = vi.fn();
   const adapter = createAdapter(env, {
-    agent: true,
+    agent,
+    ...(prompt ? { prompt } : {}),
     wait,
     notify,
     wallet: async () => wallet,
@@ -235,7 +239,6 @@ async function harness() {
     nearRpc: 'https://rpc.example',
     baseRpc: 'https://base.example',
     config: join(dir, 'config.json'),
-    stateDir: dir,
     trustContract: true,
     wallet: 'evm' as const,
     url: 'https://files.example/file',
@@ -615,7 +618,11 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
   it('requires a human-configured price cap and independently checks an offer-file resource URL', async () => {
     const h = await harness();
     const noCap = createAdapter(
-      { ANNON_BACKUP_SECRET: h.env.ANNON_BACKUP_SECRET },
+      {
+        ANNON_CONFIG: h.env.ANNON_CONFIG,
+        ANNON_STATE_DIR: h.env.ANNON_STATE_DIR,
+        ANNON_BACKUP_SECRET: h.env.ANNON_BACKUP_SECRET,
+      },
       { wallet: vi.fn() },
     );
     await expect(
@@ -742,4 +749,60 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     ).toMatchObject({ state: 'accepted' });
     expect(h.fetcher).not.toHaveBeenCalled();
   });
+});
+
+it('charges the agent daily budget before buy and preserves it across adapter restarts', async () => {
+  const h = await harness();
+  await writeFile(h.defaults.config, JSON.stringify({ dailyBudget: '0.3' }));
+  const input = {
+    ...h.defaults,
+    command: 'buy' as const,
+    target: h.offerFile,
+    route: '1click' as const,
+    origin: 'base-usdc',
+  };
+  await h.adapter(input);
+  await expect(h.adapter(input)).rejects.toMatchObject({ code: 'budget_exceeded' });
+  expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(1);
+});
+
+it('refuses an agent payment without a persisted budget before invoking buy', async () => {
+  const h = await harness();
+  await writeFile(h.defaults.config, '{}');
+  await expect(
+    h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.offerFile,
+      route: '1click',
+      origin: 'base-usdc',
+    }),
+  ).rejects.toMatchObject({ code: 'budget_required' });
+  expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(0);
+});
+
+it('shows exact human payment terms and refuses payment until confirmed', async () => {
+  const prompt = vi.fn(async (_message: string) => false);
+  const h = await harness(false, prompt);
+  await expect(
+    h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile, route: 'base' }),
+  ).rejects.toMatchObject({ code: 'confirmation_required' });
+  expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(0);
+  expect(prompt).toHaveBeenCalledTimes(1);
+  const shown = prompt.mock.calls[0]?.[0] ?? '';
+  expect(shown).toContain(terms.file_id);
+  expect(shown).toContain('eip155:8453');
+  expect(shown).toContain(terms.near.price);
+  expect(shown).toContain(must(terms.base).pay_to);
+  for (const r of terms.near.recipients) expect(shown).toContain(r.identity.id);
+});
+
+it('human JSON mode never prompts or silently pays using a local key', async () => {
+  const prompt = vi.fn(async (_message: string) => true);
+  const h = await harness(false, prompt);
+  await expect(
+    h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile, route: 'base', json: true }),
+  ).rejects.toMatchObject({ code: 'confirmation_required' });
+  expect(prompt).not.toHaveBeenCalled();
+  expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(0);
 });

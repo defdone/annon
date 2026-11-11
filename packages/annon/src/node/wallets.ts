@@ -1,6 +1,4 @@
-import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { promisify } from 'node:util';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { Account, KeyPair, type KeyPairString } from 'near-api-js';
 import { createPublicClient, createWalletClient, http } from 'viem';
@@ -12,6 +10,7 @@ import { identityJson, parseIdentity } from '../settle-near/identity.js';
 import { type EvmWallet, type IdentityWallet, nearKeyPairWallet } from '../wallet/wallet.js';
 import type { Input } from './cli.js';
 import { AdapterError } from './errors.js';
+import { decodeKeychain, type Keychain, osKeychain } from './keychain.js';
 
 export type Environment = Record<string, string | undefined>;
 export type LocalWallet = IdentityWallet & {
@@ -47,33 +46,11 @@ export async function readBackupSecret(o: Partial<Input>, env: Environment): Pro
     );
   }
 }
-/** near-cli-rs native macOS keychain; lookup only the account and public key explicitly selected. */
-async function keychain(o: Partial<Input>, env: Environment): Promise<string> {
-  const account = o.nearAccount ?? env.ANNON_NEAR_ACCOUNT;
-  const publicKey = o.nearPublicKey ?? env.ANNON_NEAR_PUBLIC_KEY;
-  if (process.platform !== 'darwin' || !account || !publicKey) throw credentialsError();
-  parseIdentity({ kind: 'near', id: account });
-  if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]+$/.test(publicKey)) throw credentialsError();
-  const network = (o.network ?? env.ANNON_NETWORK ?? 'near:mainnet').replace(/^near:/, '');
-  if (!['mainnet', 'testnet'].includes(network)) throw credentialsError();
-  const result = await promisify(execFile)(
-    '/usr/bin/security',
-    [
-      'find-generic-password',
-      '-s',
-      `near-${network}-${account}`,
-      '-a',
-      `${account}:${publicKey}`,
-      '-w',
-    ],
-    { maxBuffer: 16384, timeout: 10000 },
-  );
-  return result.stdout;
-}
 export async function loadWallet(
   o: Partial<Input>,
   env: Environment,
   nearRpc: string,
+  keychain: Keychain = osKeychain,
 ): Promise<LocalWallet> {
   try {
     const selected = o.wallet ?? (o.recovery ? identity(o.recovery).kind : env.ANNON_WALLET);
@@ -126,10 +103,24 @@ export async function loadWallet(
       };
     } else if (selected === 'near') {
       const file = o.nearKeyFile ?? env.ANNON_NEAR_KEY_FILE;
-      const raw =
-        file || env.ANNON_NEAR_CREDENTIALS
-          ? await source(file, env.ANNON_NEAR_CREDENTIALS)
-          : await keychain(o, env);
+      let raw: string;
+      if (file || env.ANNON_NEAR_CREDENTIALS) raw = await source(file, env.ANNON_NEAR_CREDENTIALS);
+      else {
+        const account = o.nearAccount ?? env.ANNON_NEAR_ACCOUNT;
+        const publicKey = o.nearPublicKey ?? env.ANNON_NEAR_PUBLIC_KEY;
+        const network = (o.network ?? env.ANNON_NETWORK ?? 'near:mainnet').replace(/^near:/, '');
+        if (
+          !account ||
+          !publicKey ||
+          !/^ed25519:[1-9A-HJ-NP-Za-km-z]+$/.test(publicKey) ||
+          !['mainnet', 'testnet'].includes(network)
+        )
+          throw credentialsError();
+        parseIdentity({ kind: 'near', id: account });
+        raw = decodeKeychain(
+          await keychain.read(`near-${network}-${account}/${account}:${publicKey}`),
+        );
+      }
       const c = JSON.parse(raw) as {
         account_id?: string;
         private_key?: string;

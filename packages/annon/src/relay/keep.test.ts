@@ -1,190 +1,494 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import finalizedSettle from '../../test/keeper-final.json' with { type: 'json' };
+import type { BudgetRecord } from '../node/budget.js';
+import { memoryStore } from '../pay/store.js';
+import type { KeeperRecord } from './keeper-runner.js';
 import { keep, resetRelayState } from './relay.js';
 
 const created = vi.hoisted(() => vi.fn());
-vi.mock('near-api-js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('near-api-js')>();
-  return {
-    ...original,
-    Account: class {
-      createSignedTransaction = created;
+vi.mock('near-api-js', async (original) => ({
+  ...(await original<typeof import('near-api-js')>()),
+  Account: class {
+    createSignedTransaction = created;
+  },
+  decodeSignedTransaction: () => ({
+    transaction: {
+      nonce: 1n,
+      publicKey: { toString: () => 'ed25519:fake' },
+      blockHash: new Uint8Array(32),
     },
-    encodeTransaction: () => new Uint8Array([1, 2, 3]),
-  };
-});
-
-const o = {
-  nearRpc: 'https://near.rpc',
-  contractId: 'annon.near',
-  sender: { accountId: 'relayer.near', key: 'ed25519:test-double' },
-};
-const step = (state: 0 | 1 | 2) => ({ state, attempt: state === 0 ? 0 : 1 });
-const slot = (state: 0 | 1 | 2) => ({
-  to: { kind: 'near', id: 'seller.near' },
-  amount: '9500',
-  step: step(state),
-});
-const delivery = (id: number, fund: 0 | 1 | 2, slots: (0 | 1 | 2)[]) => ({
+  }),
+  encodeTransaction: () => new Uint8Array([1, 2, 3]),
+}));
+const d = (id = 0, fund: 0 | 1 | 2 = 0, slots: (0 | 1 | 2)[] = [0]) => ({
   id,
-  amount: '10000',
+  amount: '10',
   sender: 'intents.near',
   purchase: null,
   reason: 0,
-  fund: step(fund),
-  funded: fund === 2 ? '10000' : '0',
-  slots: slots.map(slot),
+  fund: { state: fund, attempt: 0 },
+  funded: fund === 2 ? '10' : '0',
+  slots: slots.map((state) => ({
+    to: { kind: 'near', id: 'seller.near' },
+    amount: '10',
+    step: { state, attempt: 0 },
+  })),
 });
-
-/** NEAR as seen by the keeper: `list_deliveries` pages and accepted transactions. */
-function near(all: ReturnType<typeof delivery>[]) {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (_url, init) => {
-      const q = JSON.parse(String(init?.body));
-      if (q.method !== 'query')
-        return { json: async () => ({ id: q.id, result: { final_execution_status: 'INCLUDED' } }) };
-      if (q.params.method_name === 'delivery_count') {
-        const count = all.length ? Math.max(...all.map((d) => d.id)) + 1 : 0;
-        return {
-          json: async () => ({ id: q.id, result: { result: [...Buffer.from(String(count))] } }),
-        };
-      }
-      const { from, limit } = JSON.parse(Buffer.from(q.params.args_base64, 'base64').toString());
-      const page = all.filter((d) => d.id >= from && d.id < from + limit);
-      return {
-        json: async () => ({
-          id: q.id,
-          result: { result: [...Buffer.from(JSON.stringify(page))] },
-        }),
-      };
-    }),
-  );
-}
-
-const calls = () =>
-  created.mock.calls.map(([tx]) => {
-    const fc = tx.actions[0].functionCall;
-    return [fc.methodName, JSON.parse(Buffer.from(fc.args).toString())];
-  });
-
+let all = [d()];
+let final = false;
+let reason = '';
+let failSend = false;
+let unknown = false;
+let keyNonce = 0;
+let referenceHeight = 99999;
+let finalHeight = 100000;
+let referenceUnavailable = false;
+let failureExecutor = 'intents.near';
+let queries: { method: string; params: Record<string, unknown> }[];
+const opts = () => ({
+  nearRpc: 'https://rpc',
+  network: 'near:mainnet',
+  contractId: 'annon.near',
+  sender: { accountId: 'keeper.near', key: 'ed25519:fake' },
+  store: memoryStore<KeeperRecord>(),
+  budgetStore: memoryStore<BudgetRecord>(),
+  hourlyBudget: 10n ** 24n,
+  dailyBudget: 10n ** 24n,
+  gasPrice: 100000000n,
+  now: () => 100000,
+  jitter: () => 0.5,
+});
 beforeEach(() => {
   resetRelayState();
   created.mockReset();
-  created.mockResolvedValue({ transaction: { encode: () => new Uint8Array([1, 2, 3]) } });
+  let nonce = 0;
+  created.mockImplementation(async () => {
+    const n = ++nonce;
+    return { transaction: { encode: () => new Uint8Array([1, 2, n]) } };
+  });
+  all = [d()];
+  final = false;
+  reason = '';
+  failSend = false;
+  unknown = false;
+  keyNonce = 0;
+  referenceHeight = 99999;
+  finalHeight = 100000;
+  referenceUnavailable = false;
+  failureExecutor = 'intents.near';
+  queries = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_u, init) => {
+      const q = JSON.parse(String(init?.body));
+      queries.push({ method: q.method, params: q.params });
+      let result: unknown;
+      if (q.method === 'block' && q.params.block_id && referenceUnavailable)
+        return Response.json({ id: q.id, error: { cause: { name: 'UNKNOWN_BLOCK' } } });
+      if (q.method === 'block')
+        result = {
+          header: {
+            hash: q.params.block_id ?? 'FINAL-BLOCK',
+            height: q.params.block_id ? referenceHeight : finalHeight,
+          },
+        };
+      else if (q.method === 'EXPERIMENTAL_protocol_config')
+        result = { transaction_validity_period: 86400 };
+      else if (q.method === 'query' && q.params.request_type === 'view_access_key')
+        result = { nonce: keyNonce, permission: 'FullAccess' };
+      else if (q.method === 'gas_price') result = { gas_price: '100000000' };
+      else if (q.method === 'query') {
+        const a = JSON.parse(Buffer.from(q.params.args_base64, 'base64').toString());
+        const value =
+          q.params.method_name === 'open_delivery_count'
+            ? all.length
+            : q.params.method_name === 'list_open_deliveries'
+              ? all.slice(a.from, a.from + a.limit)
+              : q.params.method_name === 'get_delivery'
+                ? (all.find((x) => x.id === a.delivery_id) ?? null)
+                : '0';
+        result = { result: [...Buffer.from(JSON.stringify(value))] };
+      } else if (q.method === 'send_tx') {
+        if (failSend) throw new Error('transport');
+        result = { final_execution_status: 'INCLUDED' };
+      } else if (unknown)
+        return Response.json({ id: q.id, error: { cause: { name: 'UNKNOWN_TRANSACTION' } } });
+      else
+        result = final
+          ? {
+              ...structuredClone(finalizedSettle),
+              transaction: { ...finalizedSettle.transaction, hash: q.params.tx_hash },
+              transaction_outcome: { ...finalizedSettle.transaction_outcome, id: q.params.tx_hash },
+              receipts_outcome: reason
+                ? [
+                    {
+                      id: 'receipt-1',
+                      block_hash: 'FINAL-BLOCK',
+                      outcome: {
+                        executor_id: failureExecutor,
+                        status: { Failure: reason },
+                        logs: [],
+                      },
+                    },
+                    {
+                      outcome: {
+                        executor_id: 'annon.near',
+                        status: { SuccessValue: '' },
+                        logs: [
+                          'EVENT_JSON:' +
+                            JSON.stringify({
+                              standard: 'annon',
+                              version: '2.0.0',
+                              event: 'funding_failed',
+                              data: [
+                                {
+                                  delivery_id: 0,
+                                  attempt: 1,
+                                  state: 'Pending',
+                                  reason: 'incomplete_deposit',
+                                },
+                              ],
+                            }),
+                        ],
+                      },
+                    },
+                  ]
+                : structuredClone(finalizedSettle.receipts_outcome),
+            }
+          : { final_execution_status: 'INCLUDED' };
+      return Response.json({ id: q.id, result });
+    }),
+  );
 });
-
-describe('keep', () => {
-  it('funds pending deliveries and pays pending slots, never steps in flight', async () => {
-    near([
-      delivery(0, 2, [2, 2]), // done
-      delivery(1, 0, [0, 0]), // to fund
-      delivery(2, 1, [0, 0]), // deposit in flight: wait
-      delivery(3, 2, [0, 1, 2]), // pay slot 0 only
+afterEach(() => vi.unstubAllGlobals());
+describe('durable settle keeper', () => {
+  it('pins count/pages to a finalized block and settles with 600/450 Tgas, never funding InFlight', async () => {
+    all = [d(0), d(1, 1), d(2, 2, [0, 1, 2])];
+    const r = await keep(opts());
+    expect(r.sent).toHaveLength(2);
+    expect(created.mock.calls.map(([tx]) => tx.actions[0].functionCall.methodName)).toEqual([
+      'settle',
+      'settle',
     ]);
-    const r = await keep(o);
-    expect(calls()).toEqual([
-      ['fund_delivery', { delivery_id: 1 }],
-      ['pay_slot', { delivery_id: 3, slot: 0 }],
-    ]);
-    expect(r.sent.every((s) => s.result.txHash)).toBe(true);
     expect(created.mock.calls.map(([tx]) => tx.actions[0].functionCall.gas)).toEqual([
-      150000000000000n,
-      80000000000000n,
+      600000000000000n,
+      450000000000000n,
     ]);
-  });
-
-  it('does not send the same call again while it is held', async () => {
-    near([delivery(0, 0, [0])]);
-    await keep(o);
-    await keep(o);
-    expect(calls()).toEqual([['fund_delivery', { delivery_id: 0 }]]);
-  });
-
-  it('scans every id, across pages and gaps, from the start each pass', async () => {
-    // 0..120 settled, a run of 60 refund leaves with no record (120..179), one pending at 180.
-    const all = [
-      ...Array.from({ length: 120 }, (_, i) => delivery(i, 2, [2])),
-      delivery(180, 0, [0]),
-    ];
-    near(all);
-    await keep(o);
-    expect(calls()).toEqual([['fund_delivery', { delivery_id: 180 }]]);
-    // A leaf materialized later at an old id (5) is still found.
-    created.mockClear();
-    near([...all.filter((d) => d.id !== 5), delivery(5, 0, [0])]);
-    await keep(o);
-    expect(calls()).toEqual([['fund_delivery', { delivery_id: 5 }]]);
-  });
-  it('isolates a malformed delivery and a signing failure, then retries pending slots after the normal hold', async () => {
-    near([{ ...delivery(0, 0, [0]), amount: 'bad' }, delivery(1, 0, [0]), delivery(2, 2, [0])]);
-    created.mockRejectedValueOnce(new Error('unavailable'));
-    const first = await keep(o);
-    expect(first.sent).toHaveLength(1);
-    expect(first.errors).toHaveLength(2);
-    const time = Date.now();
-    vi.setSystemTime(time + 60001);
-    await keep(o);
-    const n = created.mock.calls.length;
-    vi.setSystemTime(time + 120002);
-    await keep(o);
-    expect(created).toHaveBeenCalledTimes(n + 2);
-    vi.useRealTimers();
-  });
-
-  it('bounds each scan and revisits old ids across passes', async () => {
-    near([delivery(0, 0, [0]), delivery(100, 0, [0])]);
-    await keep({ ...o, maxPages: 1 });
-    expect(calls()).toEqual([['fund_delivery', { delivery_id: 0 }]]);
-    await keep({ ...o, maxPages: 1 });
-    expect(calls()).toHaveLength(1);
-    await keep({ ...o, maxPages: 1 });
-    expect(calls()[1]).toEqual(['fund_delivery', { delivery_id: 100 }]);
-  });
-  it('continues with the next page when one view fails', async () => {
-    near([delivery(100, 0, [0])]);
-    const original = globalThis.fetch;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url, init) => {
-        const q = JSON.parse(String(init?.body));
-        if (
-          q.params?.method_name === 'list_deliveries' &&
-          JSON.parse(Buffer.from(q.params.args_base64, 'base64').toString()).from === 0
-        )
-          throw new Error('failed page');
-        return original(url, init);
-      }),
+    const views = queries.filter((x) =>
+      ['open_delivery_count', 'list_open_deliveries'].includes(String(x.params.method_name)),
     );
-    const result = await keep(o);
-    expect(result.errors).toHaveLength(1);
-    expect(result.sent).toHaveLength(1);
+    expect(
+      views.every((x) => x.params.block_id === 'FINAL-BLOCK' && !('finality' in x.params)),
+    ).toBe(true);
   });
+  it('persists uncertain submissions across restart and never signs again on INCLUDED or InFlight', async () => {
+    const o = opts();
+    await keep(o);
+    await keep({ ...o });
+    expect(created).toHaveBeenCalledTimes(1);
+    final = true;
+    all = [d(0, 1)];
+    await keep(o);
+    await keep(o);
+    expect(created).toHaveBeenCalledTimes(1);
+  });
+  it('backs off finalized failure 1,2,4 minutes and does not reset on RPC outage/inclusion', async () => {
+    const o = opts();
+    let now = 100000;
+    o.now = () => now;
+    await keep(o);
+    final = true;
+    reason = 'transfer failed';
+    await keep(o);
+    now += 59999;
+    await keep(o);
+    expect(created).toHaveBeenCalledTimes(1);
+    now += 1;
+    await keep(o);
+    expect(created).toHaveBeenCalledTimes(2);
+    await keep(o);
+    now += 60000;
+    await keep(o);
+    expect(created).toHaveBeenCalledTimes(2);
+    now += 60000;
+    await keep(o);
+    expect(created).toHaveBeenCalledTimes(3);
+  });
+  it('enforces persistent gas reservations before signing and reports reserve low-water alerts', async () => {
+    const o = { ...opts(), hourlyBudget: 1n, reserveLowWater: 5n, alert: vi.fn() };
+    const r = await keep(o);
+    expect(created).not.toHaveBeenCalled();
+    expect(r.errors[0]?.error).toMatchObject({ code: 'budget_exceeded' });
+    expect(o.alert).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'reserve_low', reserve: '0' }),
+    );
+  });
+  it('opens one shared breaker for locked/paused dependencies', async () => {
+    const o = opts();
+    await keep(o);
+    final = true;
+    reason = 'sender is locked';
+    all = [d(), d(1)];
+    await keep(o);
+    expect(created).toHaveBeenCalledTimes(1);
+  });
+  it('materializes pluggable refund leaves with zero deposit and prepaid storage', async () => {
+    all = [];
+    const leaf = {
+      leaf: { delivery_id: 7, refund: { kind: 'near' as const, id: 'buyer.near' }, amount: '1' },
+      index: 0,
+      proof: Array(32).fill(`0x${'00'.repeat(32)}`),
+    };
+    const o = { ...opts(), refunds: { leaves: async () => [leaf] } };
+    const r = await keep(o);
+    expect(r.sent[0]?.method).toBe('materialize_refund');
+    expect(created.mock.calls[0]?.[0].actions[0].functionCall.deposit).toBe(0n);
+  });
+  it('rotates snapshot pages across restarts without a 10000 eligibility cap', async () => {
+    all = Array.from({ length: 10001 }, (_, i) => d(i, i === 10000 ? 0 : 1));
+    const o = { ...opts(), maxPages: 100 };
+    await keep(o);
+    expect(created).not.toHaveBeenCalled();
+    await keep({ ...o });
+    expect(created).not.toHaveBeenCalled();
+    await keep({ ...o });
+    expect(created).toHaveBeenCalledTimes(1);
+  }, 30000);
 });
 
-it.each(['success', 'outage', 'finished'] as const)(
-  'resets keeper backoff after %s',
-  async (kind) => {
-    const time = Date.now();
-    try {
-      near([delivery(0, 0, [0])]);
-      await keep(o);
-      vi.setSystemTime(time + 60001);
-      if (kind === 'outage') created.mockRejectedValueOnce(new Error('RPC down'));
-      if (kind === 'finished') near([delivery(0, 2, [2])]);
-      await keep(o);
-      near([delivery(0, 0, [0])]);
-      vi.setSystemTime(time + 120002);
-      const n = created.mock.calls.length;
-      await keep(o);
-      expect(created).toHaveBeenCalledTimes(n + 1);
-    } finally {
-      vi.useRealTimers();
-    }
+it('recovers a crash before the durable signed hash without allowing an older signer to send', async () => {
+  const o = opts();
+  const id = 'near:mainnet|annon.near|delivery:0|submission';
+  await o.store.compareAndSet(id, null, { id, revision: 0, stage: 'preparing' });
+  const active = 'near:mainnet|annon.near|active:keeper.near';
+  await o.store.compareAndSet(active, null, {
+    id: active,
+    revision: 0,
+    active: [{ id, deliveryId: 0 }],
+  });
+  await keep(o);
+  expect(created).toHaveBeenCalledTimes(1);
+});
+
+it('recovers never-broadcast signed bytes by resending the same transaction, but never during InFlight', async () => {
+  const o = opts();
+  unknown = true;
+  const id = 'near:mainnet|annon.near|delivery:0|submission';
+  await o.store.compareAndSet(id, null, {
+    id,
+    revision: 0,
+    stage: 'submitted',
+    tx: {
+      hash: 'SAME-HASH',
+      signer: o.sender.accountId,
+      signed: 'U0FNRS1CWVRFUw==',
+      method: 'settle',
+      args: { delivery_id: 0 },
+      phases: ['fund'],
+    },
+  });
+  const active = 'near:mainnet|annon.near|active:keeper.near';
+  await o.store.compareAndSet(active, null, {
+    id: active,
+    revision: 0,
+    active: [{ id, deliveryId: 0 }],
+  });
+  await keep(o);
+  expect(
+    queries.filter((q) => q.method === 'send_tx').map((q) => q.params.signed_tx_base64),
+  ).toEqual(['U0FNRS1CWVRFUw==']);
+  expect(created).not.toHaveBeenCalled();
+  all = [d(0, 1)];
+  await keep(o);
+  expect(queries.filter((q) => q.method === 'send_tx')).toHaveLength(1);
+});
+
+it('a signer that loses the durable hash CAS never broadcasts', async () => {
+  const { runKeeper } = await import('./keeper-runner.js');
+  const o = opts();
+  let finish: (tx: { txHash: string; signed: string }) => void = () => {};
+  let started: () => void = () => {};
+  const signing = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const first = {
+    sign: async () => {
+      started();
+      return new Promise<{ txHash: string; signed: string }>((resolve) => {
+        finish = resolve;
+      });
+    },
+    send: vi.fn(async () => ({ txHash: 'old' })),
+  };
+  const pass = runKeeper(o, first);
+  await signing;
+  const second = {
+    sign: vi.fn(async () => ({ txHash: 'new', signed: 'bmV3LWJ5dGVz' })),
+    send: vi.fn(async () => ({ txHash: 'new' })),
+  };
+  await runKeeper({ ...o, sender: { ...o.sender, accountId: 'other-keeper.near' } }, second);
+  finish({ txHash: 'old', signed: 'b2xkLWJ5dGVz' });
+  await pass;
+  expect(first.send).not.toHaveBeenCalled();
+  expect(second.send).toHaveBeenCalledTimes(1);
+});
+
+it('caps retry intervals at 30 minutes with bounded jitter', async () => {
+  const { retryDelay } = await import('./keeper-runner.js');
+  expect([1, 2, 3, 4, 5, 6, 7].map((n) => retryDelay(n, 0.5))).toEqual(
+    [1, 2, 4, 8, 16, 30, 30].map((n) => n * 60000),
+  );
+  expect(retryDelay(6, 0)).toBe(27 * 60000);
+  expect(retryDelay(6, 1)).toBe(33 * 60000);
+});
+
+it('admits only one shared breaker probe after the deadline', async () => {
+  const o = opts();
+  let now = 100000;
+  o.now = () => now;
+  await keep(o);
+  final = true;
+  reason = 'sender is locked';
+  all = [d(), d(1), d(2)];
+  await keep(o);
+  expect(created).toHaveBeenCalledTimes(1);
+  now += 60000;
+  await keep(o);
+  expect(created).toHaveBeenCalledTimes(2);
+});
+
+it('a real finalized result with block_hash never trips the breaker and verified progress closes it', async () => {
+  const o = opts();
+  await keep(o);
+  final = true;
+  all = [d(0, 2, [2]), d(1)];
+  await keep(o);
+  expect(created).toHaveBeenCalledTimes(2);
+  expect((await o.store.load('near:mainnet|annon.near|breaker'))?.tries ?? 0).toBe(0);
+});
+
+it('ignores lock text in failures from untrusted executors', async () => {
+  const o = opts();
+  await keep(o);
+  final = true;
+  reason = 'locked';
+  failureExecutor = 'attacker.near';
+  all = [d(), d(1)];
+  await keep(o);
+  expect(created).toHaveBeenCalledTimes(2);
+});
+
+it.each(['nonce', 'age'] as const)(
+  'retires UNKNOWN_TRANSACTION that cannot land by final %s and releases unresolved capacity',
+  async (why) => {
+    const o = { ...opts(), maxUnresolved: 1 };
+    await keep(o);
+    unknown = true;
+    if (why === 'nonce') keyNonce = 1;
+    else finalHeight = referenceHeight + 86403;
+    all = [d(), d(1)];
+    const r = await keep(o);
+    expect(r.sent).toHaveLength(1); // fresh second delivery, never the expired bytes
+    expect(created).toHaveBeenCalledTimes(2);
+    const job = await o.store.load('near:mainnet|annon.near|delivery:0|submission');
+    expect(job).toMatchObject({ tx: null, stage: 'ready', tries: 1, nextAt: 160000 });
+    expect(
+      queries.some(
+        (q) => q.params.request_type === 'view_access_key' && q.params.block_id === 'FINAL-BLOCK',
+      ),
+    ).toBe(true);
   },
 );
-it('does not defer the 10001st pending step behind a daily retry-map cap', async () => {
-  near(Array.from({ length: 10001 }, (_, i) => delivery(i, 0, [0])));
-  const r = await keep({ ...o, maxPages: 201 });
-  expect(r.errors).toEqual([]);
-  expect(r.sent).toHaveLength(10001);
-}, 30000);
+
+it('keeps jobs and gas reservations across an RPC endpoint change', async () => {
+  const o = opts();
+  await keep(o);
+  await keep({ ...o, nearRpc: 'https://other.rpc' });
+  expect(created).toHaveBeenCalledTimes(1);
+  expect(await o.budgetStore.load('near:mainnet|keeper.near|keeper-spend')).not.toBeNull();
+});
+
+it('reclaims an expired unknown transaction even after its reference block has been garbage-collected', async () => {
+  const o = { ...opts(), maxUnresolved: 1 };
+  await keep(o);
+  unknown = true;
+  referenceUnavailable = true;
+  finalHeight = referenceHeight + 86403;
+  all = [d(), d(1)];
+  const r = await keep(o);
+  const job = await o.store.load('near:mainnet|annon.near|delivery:0|submission');
+  expect(job).toMatchObject({ tx: null, nextAt: 160000 });
+  expect(r.sent).toHaveLength(0); // A new signed reference is unavailable too; nothing broadcasts.
+  const active = await o.store.load('near:mainnet|annon.near|active:keeper.near');
+  expect(active?.active).toEqual([]);
+  expect(created).toHaveBeenCalledTimes(2);
+});
+
+it('queries gas price at the finalized snapshot hash', async () => {
+  await keep(opts());
+  expect(queries.find((q) => q.method === 'gas_price')?.params).toEqual({
+    block_id: 'FINAL-BLOCK',
+  });
+});
+
+it('saves phase observations so later partial funding resets a stale deadline', async () => {
+  const o = opts();
+  await keep(o);
+  final = true;
+  reason = 'transfer failed';
+  await keep(o);
+  const id = 'near:mainnet|annon.near|delivery:0|fund';
+  expect((await o.store.load(id))?.observed).toEqual({ funded: '0', paid: [] });
+  all[0] = { ...d(), funded: '1' };
+  final = false;
+  await keep(o);
+  expect(created).toHaveBeenCalledTimes(2);
+});
+
+it('closes a half-open dependency breaker only after verified finalized progress', async () => {
+  const o = opts();
+  let now = 100000;
+  o.now = () => now;
+  await keep(o);
+  final = true;
+  reason = 'sender locked';
+  await keep(o);
+  expect((await o.store.load('near:mainnet|annon.near|breaker'))?.tries).toBe(1);
+  now += 60000;
+  final = false;
+  reason = '';
+  await keep(o);
+  final = true;
+  all = [d(0, 2, [2]), d(1)];
+  await keep(o);
+  expect((await o.store.load('near:mainnet|annon.near|breaker'))?.tries).toBe(0);
+  expect(created).toHaveBeenCalledTimes(3);
+});
+
+it('still charges the same gas budget for a new delivery after an RPC switch', async () => {
+  const o = { ...opts(), hourlyBudget: 120000000000000000000000n };
+  await keep(o);
+  final = true;
+  all = [d(0, 2, [2]), d(1)];
+  const result = await keep({ ...o, nearRpc: 'https://other.rpc' });
+  expect(created).toHaveBeenCalledTimes(1);
+  expect(result.errors.some((e) => (e.error as { code?: string }).code === 'budget_exceeded')).toBe(
+    true,
+  );
+});
+
+it.each([86400, 86401, 86402, 86403])(
+  'keeps unknown bytes until strictly beyond the validity period plus two blocks (age=%s)',
+  async (age) => {
+    const o = { ...opts(), maxUnresolved: 1 };
+    await keep(o);
+    unknown = true;
+    finalHeight = referenceHeight + age;
+    all = [d(), d(1)];
+    const r = await keep(o);
+    const job = await o.store.load('near:mainnet|annon.near|delivery:0|submission');
+    expect(job?.tx === null).toBe(age > 86402);
+    expect(r.sent).toHaveLength(1); // Still-valid bytes may be resent unchanged.
+    expect(created).toHaveBeenCalledTimes(age > 86402 ? 2 : 1);
+  },
+);

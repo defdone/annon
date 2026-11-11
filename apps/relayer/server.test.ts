@@ -508,3 +508,39 @@ describe('adapter to relayer boundary without a signing transport', () => {
     },
   );
 });
+
+it('requires separate durable keeper credentials and budgets when explicitly enabled', () => {
+  const base = { CONTRACT_ID: 'c.near', RELAYER_ACCOUNT: 'r.near', RELAYER_KEY: 'ed25519:fake' };
+  expect(fromEnv(base).keeperSeconds).toBe(0);
+  expect(() => fromEnv({ ...base, KEEPER_SECONDS: '30' })).toThrow('KEEPER_ACCOUNT');
+  const enabled = {
+    ...base,
+    KEEPER_SECONDS: '30',
+    KEEPER_ACCOUNT: 'k.near',
+    KEEPER_KEY: 'ed25519:fake-keeper',
+    KEEPER_STATE_DIR: '/tmp/keeper',
+    KEEPER_HOURLY_BUDGET: '100000',
+    KEEPER_DAILY_BUDGET: '200000',
+  };
+  expect(fromEnv(enabled).config.keeper?.sender.accountId).toBe('k.near');
+  expect(() => fromEnv({ ...enabled, KEEPER_ACCOUNT: 'r.near' })).toThrow(/separate/);
+});
+
+it.each(['account', 'key'] as const)(
+  'serve rejects a shared keeper %s before listening or signing',
+  (shared) => {
+    const c = config();
+    c.keeper = {
+      sender: {
+        accountId: shared === 'account' ? c.sender.accountId : 'keeper.near',
+        key: shared === 'key' ? c.sender.key : 'ed25519:fake-other',
+      },
+      stateDir: '/unused',
+      hourlyBudget: 1n,
+      dailyBudget: 1n,
+      gasPrice: 1n,
+      reserveLowWater: 0n,
+    };
+    expect(() => serve(c, 0, 10)).toThrow('separate account and key');
+  },
+);
