@@ -49,3 +49,20 @@ it('requires human-configured RPC anchors instead of supplying implicit endpoint
     ),
   ).rejects.toMatchObject({ code: 'invalid_config' });
 });
+
+it.each(['verify', 'status'] as const)(
+  'allows NEAR-only %s without a Base RPC',
+  async (command) => {
+    expect(
+      await loadConfig(
+        {
+          command,
+          contractId: 'annon.near',
+          nearRpc: 'https://near.example',
+          config: '/private/tmp/annon-sdk-nonexistent-config.json',
+        },
+        {},
+      ),
+    ).toMatchObject({ nearRpc: 'https://near.example', baseRpc: '' });
+  },
+);

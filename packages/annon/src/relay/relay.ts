@@ -45,6 +45,7 @@ export type RelayErrorCode =
   | 'not_sponsored'
   | 'limited'
   | 'duplicate'
+  | 'in_flight'
   | 'unavailable'
   | 'unknown_file'
   | 'already_registered'
@@ -341,7 +342,6 @@ const accounts = new Map<string, Account>();
 const held = new Map<string, number>();
 const submitted = new Map<string, RelayResult>();
 const keepCursors = new Map<string, number>();
-const keepRetries = new Map<string, { attempts: number; until: number }>();
 const counts = new Map<string, { n: number; until: number }>();
 /** When each recent write was sent, per payer and contract (see `enoughStorage`). */
 const writes = new Map<string, number[]>();
@@ -355,7 +355,6 @@ export const relayCounters = () => counts.size + held.size;
 export function resetRelayState() {
   held.clear();
   submitted.clear();
-  keepRetries.clear();
   keepCursors.clear();
   counts.clear();
   accounts.clear();
@@ -542,6 +541,8 @@ export async function relay(
       submitted.delete(k);
     }
   for (const [k, v] of counts) if (v.until <= now) counts.delete(k);
+  if ((held.get(operation) ?? 0) > now)
+    fail('in_flight', 'this operation is in flight; retry shortly');
   if (waiting >= MAX_WAITING) fail('unavailable', 'the relayer is busy; try again shortly');
   // Per contract: relayers for other contracts in the same process don't share operations.
   const id = `${o.nearRpc}|${o.contractId}|${identity(r, o.contractId)}`;
@@ -580,6 +581,7 @@ export async function relay(
       if (write) await enoughStorage(o, scope).catch(asRelayError);
       const { txHash, signed } = await sign(o, key, r.method, contractArgs(r));
       sent = true;
+      submitted.set(id, { txHash, uncertain: true });
       if (write) writes.get(scope)?.push(Date.now()) ?? writes.set(scope, [Date.now()]);
       return send(o, key, txHash, signed);
     });
@@ -630,7 +632,7 @@ async function sign(
   };
 }
 
-/** A keeper call is not sent again for this long: its own callback moves the step on. */
+/** Normal per-step retry hold. Inclusion is not execution success; never accumulate outage delays. */
 const KEEP_HOLD = 60_000;
 /** Deliveries per `list_deliveries` page (the contract's maximum). */
 const PAGE = 50;
@@ -698,19 +700,7 @@ export async function keep(o: {
         const id = `${o.nearRpc}|${o.contractId}|keep:${method}:${JSON.stringify(args)}`;
         const now = Date.now();
         if ((held.get(id) ?? 0) > now) continue;
-        if (keepRetries.size >= 10000 && !keepRetries.has(id)) {
-          for (const [k, v] of keepRetries) if (v.until < now - DAY) keepRetries.delete(k);
-          if (keepRetries.size >= 10000) {
-            errors.push({ deliveryId: d.id, error: new Error('keeper retry capacity') });
-            continue;
-          }
-        }
-        const retry = keepRetries.get(id);
-        if (retry && retry.until > now) continue;
-        const attempts = (retry?.attempts ?? 0) + 1;
-        const until = now + KEEP_HOLD * 2 ** Math.min(attempts - 1, 8);
-        held.set(id, until);
-        keepRetries.set(id, { attempts, until });
+        held.set(id, now + KEEP_HOLD);
         try {
           const result = await enqueue(async () => {
             const tx = await sign(

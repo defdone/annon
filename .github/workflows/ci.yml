@@ -25,6 +25,7 @@ jobs:
       - run: node specs/vectors/near-settlement.mjs && node specs/vectors/pay2.mjs && node specs/vectors/texts.mjs && node specs/vectors/base-headers.mjs && node specs/vectors/nonce.mjs > /dev/null && node specs/vectors/buyer-proof.mjs > /dev/null && git diff --exit-code specs/vectors
       - run: pnpm build
       - run: pnpm test
+      - run: ANNON_TEST_CONTAINER=1 pnpm --filter @defdone/annon-relayer exec vitest run -t "starts after the Docker prod-filter install"
 
   contract:
     runs-on: ubuntu-26.04

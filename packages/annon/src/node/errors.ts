@@ -1,3 +1,5 @@
+import { SellError } from '../api/annon.js';
+
 /** Only these adapter-owned messages cross the CLI/MCP boundary. Never print upstream errors. */
 export class AdapterError extends Error {
   constructor(
@@ -11,6 +13,7 @@ export class AdapterError extends Error {
 export const usage = () =>
   new AdapterError('invalid_arguments', 'Invalid arguments. Run annon --help.', 2);
 const actions: Record<string, string> = {
+  settlement_processing: 'The purchase is still settling. Check status and resume before opening.',
   storage_required:
     'Prepay storage with storageDeposit before register or reopen, then resume the saved operation.',
   unknown_file: 'The configured contract has no such file. Check the file ID and deployment.',
@@ -37,7 +40,19 @@ const actions: Record<string, string> = {
   not_authorized:
     'The host has not accepted this final grant. Check final purchase status and the resource URL.',
 };
-export function publicError(error: unknown): { code: string; message: string; exitCode: number } {
+export function publicError(error: unknown): {
+  code: string;
+  message: string;
+  exitCode: number;
+  fileId?: string;
+} {
+  if (error instanceof SellError)
+    return {
+      code: error.code && Object.hasOwn(actions, error.code) ? error.code : 'sell_incomplete',
+      message: `${error.code && Object.hasOwn(actions, error.code) ? actions[error.code] : 'Sell incomplete.'} Resume with the original plaintext and this fileId using sell --resume.`,
+      fileId: error.fileId,
+      exitCode: 1,
+    };
   if (error instanceof AdapterError)
     return { code: error.code, message: error.message, exitCode: error.exitCode };
   if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {

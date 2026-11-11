@@ -21,6 +21,8 @@ export interface Input {
   nearAccount?: string;
   nearPublicKey?: string;
   backupSecretFile?: string;
+  resume?: string;
+  origin?: string;
   price?: string;
   split?: string;
   base?: boolean;
@@ -55,8 +57,9 @@ const common = [
   'backup-secret-file',
 ];
 const perCommand: Record<Command, string[]> = {
-  sell: ['price', 'split', 'base', 'moderator', 'output'],
+  sell: ['resume', 'price', 'split', 'base', 'moderator', 'output'],
   buy: [
+    'origin',
     'route',
     'from-chain',
     'from-asset',
@@ -97,7 +100,18 @@ export function parseCli(argv: string[]): Input {
         v,
       ]),
     );
-    if (cmd === 'sell' && (!values.price || !values.split)) throw usage();
+    if (cmd === 'sell') {
+      if (values.resume) {
+        if (
+          !/^0x[0-9a-f]{64}$/.test(String(values.resume)) ||
+          values.price ||
+          values.split ||
+          values.base ||
+          values.moderator
+        )
+          throw usage();
+      } else if (!values.price || !values.split) throw usage();
+    }
     if (cmd === 'recover' && !values.recovery) throw usage();
     if (values.route && !['near', 'base', '1click'].includes(String(values.route))) throw usage();
     if (values.wallet && !['evm', 'solana', 'near'].includes(String(values.wallet))) throw usage();
@@ -107,8 +121,9 @@ export function parseCli(argv: string[]): Input {
   }
 }
 export const HELP = `annon <command> [options]
+sell <file> --resume <file-id> [--output <PAY2>]
 sell <file> --price <USDC> --split <kind:id:bps,...> [--base] [--moderator <account>] [--output <PAY2>]
-buy <url|offer.json> [--route near|base|1click] [--from-chain <chain>] [--from-asset <1Click asset>] [--refund-to <address>] [--recovery <kind:id>] [--max-price <USDC> or configured cap] [--url <expected resource for offer.json>] [--moderator <trusted account>]
+buy <url|offer.json> [--route near|base|1click] [--origin <configured name>] [--from-chain <chain>] [--from-asset <1Click asset>] [--refund-to <address>] [--recovery <kind:id>] [--max-price <USDC> or configured cap] [--url <expected resource for offer.json>] [--moderator <trusted account>]
 open <purchase-id|backup|PAY2> [--purchase <id|backup>] [--file <PAY2> | --url <url>] --output <file>
 recover --recovery <kind:id> [--purchase <id>]
 stop <file-id>

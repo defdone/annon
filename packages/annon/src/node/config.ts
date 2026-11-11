@@ -19,6 +19,8 @@ export interface Config {
   trustContract?: boolean;
   mpcKey?: string;
   moderators?: string[];
+  origins?: Record<string, { fromChain: string; fromAsset: string; refundTo?: string }>;
+  allowedResources?: string[];
 }
 export async function loadConfig(o: Input, env: Environment): Promise<Config> {
   try {
@@ -40,6 +42,28 @@ export async function loadConfig(o: Input, env: Environment): Promise<Config> {
         file.stateDir ??
         join(homedir(), '.local', 'share', 'annon'),
     };
+    const origins = env.ANNON_ORIGINS ? JSON.parse(env.ANNON_ORIGINS) : file.origins;
+    if (origins) {
+      if (typeof origins !== 'object' || Array.isArray(origins)) throw new Error('invalid origins');
+      for (const value of Object.values(origins) as NonNullable<Config['origins']>[string][]) {
+        if (
+          !value ||
+          typeof value.fromChain !== 'string' ||
+          !value.fromChain ||
+          typeof value.fromAsset !== 'string' ||
+          !value.fromAsset.startsWith('nep141:') ||
+          (value.refundTo !== undefined && (typeof value.refundTo !== 'string' || !value.refundTo))
+        )
+          throw new Error('invalid origin');
+      }
+      c.origins = origins;
+    }
+    const allowedResources = env.ANNON_ALLOWED_RESOURCES?.split(',') ?? file.allowedResources;
+    if (allowedResources) {
+      if (!Array.isArray(allowedResources)) throw new Error('invalid allowed resources');
+      for (const url of allowedResources) secureUrl(url);
+      c.allowedResources = allowedResources;
+    }
     const maxPrice = env.ANNON_MAX_PRICE ?? file.maxPrice;
     if (maxPrice !== undefined) c.maxPrice = maxPrice;
     c.trustContract =
@@ -57,7 +81,11 @@ export async function loadConfig(o: Input, env: Environment): Promise<Config> {
     if (relayer) c.relayer = relayer;
     account(c.contractId);
     network(c.network);
-    for (const endpoint of [c.nearRpc, c.baseRpc, ...(c.relayer ? [c.relayer] : [])]) {
+    for (const endpoint of [
+      c.nearRpc,
+      ...(c.baseRpc ? [c.baseRpc] : []),
+      ...(c.relayer ? [c.relayer] : []),
+    ]) {
       const url = secureUrl(endpoint);
       if (url.username || url.password || url.search || url.hash)
         throw new Error('endpoint credentials must not appear in prompts');
@@ -67,7 +95,7 @@ export async function loadConfig(o: Input, env: Environment): Promise<Config> {
   } catch {
     throw new AdapterError(
       'invalid_config',
-      'Set contractId, network, nearRpc and baseRpc in the config file, environment or flags. Endpoints must use HTTPS (HTTP only on localhost).',
+      'Set contractId, network and nearRpc (plus baseRpc for Base operations) in the config file, environment or flags. Endpoints must use HTTPS (HTTP only on localhost).',
       2,
     );
   }

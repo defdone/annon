@@ -166,3 +166,62 @@ describe('relay purchase arguments and authorization', () => {
     expect(created).toHaveBeenCalledTimes(1);
   });
 });
+
+it('returns a retryable pending state for a duplicate still waiting for its tx hash', async () => {
+  rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+  const r = await sign();
+  let release!: (v: unknown) => void;
+  let started!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  created.mockImplementationOnce(() => {
+    started();
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  });
+  const first = relay(r, { ...opts, sender });
+  await entered;
+  try {
+    await expect(relay(r, { ...opts, sender })).rejects.toMatchObject({ code: 'in_flight' });
+  } finally {
+    release({ transaction: { encode: () => new Uint8Array([1, 2, 3]) } });
+    await first;
+  }
+  expect(created).toHaveBeenCalledTimes(1);
+});
+
+it('returns the signed hash while the original POST is still awaiting send confirmation', async () => {
+  rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+  const original = globalThis.fetch;
+  let release!: (v: Response) => void;
+  let started!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url, init) => {
+      const q = JSON.parse(String(init?.body));
+      if (q.method === 'send_tx') {
+        started();
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      }
+      return original(url, init);
+    }),
+  );
+  const r = await sign();
+  const first = relay(r, { ...opts, sender });
+  await entered;
+  try {
+    const retry = await relay(r, { ...opts, sender });
+    expect(retry).toMatchObject({ txHash: expect.any(String), uncertain: true });
+    expect(created).toHaveBeenCalledTimes(1);
+  } finally {
+    release(Response.json({ result: { final_execution_status: 'INCLUDED' } }));
+    await first;
+  }
+});

@@ -35,3 +35,24 @@ Identity-authorized requests use `{method,args,auth:{kind,sig}}`; NEAR identitie
 operations as `{args,auth}`, `unlock` as `{args}` (the purchase message, logs and header) and
 `claim_key` flat (`{purchase_id,grant}`). Purchase recovery uses purchase IDs and grants; the call
 shapes are in [specs/near-settlement.md](../../specs/near-settlement.md) §10.
+
+
+An in-flight duplicate returns its transaction hash as soon as signing finishes. Before the hash
+is available it returns HTTP 202 `{pending:true,retryAfterMs:5000}`. Clients retry the same release
+request; a cached hash is always checked against the expected method/arguments via NEAR RPC.
+The cache is process-local; contract checks remain authoritative after a restart.
+
+Each keeper pass reads `delivery_count` once and up to 20 `list_deliveries` pages of 50 IDs.
+This costs `1 + min(20, ceil(delivery_count / 50))` contract view calls per pass (excluding
+transport retries). At the default 30-second interval, a full scan takes about
+`30 * ceil(ceil(delivery_count / 50) / 20)` seconds, plus RPC and sending time. IDs include
+settled gaps and reserved refund leaves: scan cost grows with historical IDs. Old IDs must be
+revisited because refund leaves can materialize there later. A larger SDK `maxPages` reduces
+scan latency at the cost of more views per pass. No daily 10,000-step retry cap exists.
+Each attempted step has a one-minute hold; successful passes and RPC/signing outages cannot
+accumulate exponential per-step delays. Expired holds are swept each pass. Steps observed in
+flight are never sent again until a contract callback makes them due.
+
+The isolated production-install test is opt-in: `ANNON_TEST_CONTAINER=1 pnpm --filter
+@defdone/annon-relayer test`. CI runs it explicitly. Ordinary `pnpm test` does not install
+packages or contact the registry for this check.

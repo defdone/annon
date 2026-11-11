@@ -126,6 +126,10 @@ describe('relayer HTTP', () => {
     expect(await status('bad_signature')).toBe(400);
     expect(await status('not_sponsored')).toBe(403);
     expect(await status('transport')).toBe(502);
+    expect(await handle(config(), 'POST', '/v1/relay', 'pending', body, as('in_flight'))).toEqual({
+      status: 202,
+      body: { pending: true, retryAfterMs: 5000 },
+    });
     const crash = async () => {
       throw new Error('boom');
     };
@@ -237,194 +241,212 @@ describe('the container start', () => {
   });
 });
 
-describe('isolated production container dependencies', () => {
-  it('starts after the Docker prod-filter install and has no development dependencies', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'annon-prod-install-'));
-    const root = join(import.meta.dirname, '../..');
-    try {
-      for (const folder of ['packages/annon', 'packages/annon-mcp', 'apps/relayer'])
-        await mkdir(join(dir, folder), { recursive: true });
-      for (const file of [
-        'package.json',
-        'pnpm-lock.yaml',
-        'pnpm-workspace.yaml',
-        'packages/annon/package.json',
-        'packages/annon-mcp/package.json',
-        'apps/relayer/package.json',
-        'apps/relayer/server.ts',
-        'apps/relayer/ts-hook.mjs',
-      ])
-        await cp(join(root, file), join(dir, file));
-      await cp(join(root, 'packages/annon/src'), join(dir, 'packages/annon/src'), {
-        recursive: true,
-      });
-      const install = spawnSync(
-        'pnpm',
-        [
-          'install',
-          '--frozen-lockfile',
-          '--prod',
-          '--filter',
-          '@defdone/annon',
-          '--filter',
-          '@defdone/annon-relayer',
-          '--store-dir',
-          join(dir, 'store'),
-        ],
-        {
-          cwd: dir,
-          encoding: 'utf8',
-          timeout: 120000,
-          env: { PATH: process.env.PATH, CI: 'true', npm_config_cache: join(dir, 'npm-cache') },
-        },
-      );
-      expect(install.status, install.stdout + install.stderr).toBe(0);
-      const app = join(dir, 'apps/relayer');
-      const noDev = spawnSync(
-        process.execPath,
-        [
-          '--input-type=module',
-          '-e',
-          "try { import.meta.resolve('vitest'); process.exit(1); } catch { process.exit(0); }",
-        ],
-        { cwd: app, encoding: 'utf8' },
-      );
-      expect(noDev.status).toBe(0);
-      const start = spawnSync(
-        process.execPath,
-        ['--no-warnings', '--import', './ts-hook.mjs', 'server.ts'],
-        { cwd: app, encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH } },
-      );
-      expect(start.stderr).toContain('CONTRACT_ID is not set');
-      expect(start.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
-      // Prove this harness detects a dev-only runtime import that the dev install permits.
-      await appendFile(join(app, 'server.ts'), "\nimport 'vitest';\n");
-      const broken = spawnSync(
-        process.execPath,
-        ['--no-warnings', '--import', './ts-hook.mjs', 'server.ts'],
-        {
-          cwd: app,
-          encoding: 'utf8',
-          timeout: 10000,
-          env: { PATH: process.env.PATH },
-        },
-      );
-      expect(broken.stderr).toContain('ERR_MODULE_NOT_FOUND');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  }, 150000);
-});
+describe.runIf(process.env.ANNON_TEST_CONTAINER === '1')(
+  'isolated production container dependencies',
+  () => {
+    it('starts after the Docker prod-filter install and has no development dependencies', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'annon-prod-install-'));
+      const root = join(import.meta.dirname, '../..');
+      try {
+        for (const folder of ['packages/annon', 'packages/annon-mcp', 'apps/relayer'])
+          await mkdir(join(dir, folder), { recursive: true });
+        for (const file of [
+          'package.json',
+          'pnpm-lock.yaml',
+          'pnpm-workspace.yaml',
+          'packages/annon/package.json',
+          'packages/annon-mcp/package.json',
+          'apps/relayer/package.json',
+          'apps/relayer/server.ts',
+          'apps/relayer/ts-hook.mjs',
+        ])
+          await cp(join(root, file), join(dir, file));
+        await cp(join(root, 'packages/annon/src'), join(dir, 'packages/annon/src'), {
+          recursive: true,
+        });
+        const install = spawnSync(
+          'pnpm',
+          [
+            'install',
+            '--frozen-lockfile',
+            '--prod',
+            '--filter',
+            '@defdone/annon',
+            '--filter',
+            '@defdone/annon-relayer',
+            '--store-dir',
+            join(dir, 'store'),
+          ],
+          {
+            cwd: dir,
+            encoding: 'utf8',
+            timeout: 120000,
+            env: { PATH: process.env.PATH, CI: 'true', npm_config_cache: join(dir, 'npm-cache') },
+          },
+        );
+        expect(install.status, install.stdout + install.stderr).toBe(0);
+        const app = join(dir, 'apps/relayer');
+        const noDev = spawnSync(
+          process.execPath,
+          [
+            '--input-type=module',
+            '-e',
+            "try { import.meta.resolve('vitest'); process.exit(1); } catch { process.exit(0); }",
+          ],
+          { cwd: app, encoding: 'utf8' },
+        );
+        expect(noDev.status).toBe(0);
+        const start = spawnSync(
+          process.execPath,
+          ['--no-warnings', '--import', './ts-hook.mjs', 'server.ts'],
+          { cwd: app, encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH } },
+        );
+        expect(start.stderr).toContain('CONTRACT_ID is not set');
+        expect(start.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
+        // Prove this harness detects a dev-only runtime import that the dev install permits.
+        await appendFile(join(app, 'server.ts'), "\nimport 'vitest';\n");
+        const broken = spawnSync(
+          process.execPath,
+          ['--no-warnings', '--import', './ts-hook.mjs', 'server.ts'],
+          {
+            cwd: app,
+            encoding: 'utf8',
+            timeout: 10000,
+            env: { PATH: process.env.PATH },
+          },
+        );
+        expect(broken.stderr).toContain('ERR_MODULE_NOT_FOUND');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }, 150000);
+  },
+);
 
 describe('adapter to relayer boundary without a signing transport', () => {
-  it('passes the real claim_key request through handle, canonicalRequest, checkRelay, contractArgs and txOutcome, retaining the hash on timeout', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'annon-relay-boundary-'));
-    const c = config({ contractId: terms.contract, usdc: purchase.asset });
-    const args = { purchase_id: `0x${'11'.repeat(32)}`, grant: 0 };
-    const answer = { big_y: 'bls12381g1:Y', big_c: 'bls12381g1:C' };
-    let wire: object | undefined;
-    let httpRequests = 0;
-    let lookups = 0;
-    const send = vi.fn(async (input: unknown) => {
-      const req = canonicalRequest(input);
-      await checkRelay(req, c);
-      wire = contractArgs(req);
-      return { txHash: 'H' };
-    });
-    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
-      if (String(url).endsWith('/v1/relay')) {
-        httpRequests++;
-        const response = await handle(c, 'POST', '/v1/relay', 'boundary', String(init?.body), send);
-        return Response.json(response.body, { status: response.status });
-      }
-      const q = JSON.parse(String(init?.body));
-      if (q.method === 'EXPERIMENTAL_tx_status') {
-        if (++lookups === 1) throw new Error('request timed out');
+  it.each(['outcome', 'lost-post-pending', 'legacy-duplicate'] as const)(
+    'passes claim_key through the relayer and handles %s without reposting a known hash',
+    async (mode) => {
+      const dir = await mkdtemp(join(tmpdir(), 'annon-relay-boundary-'));
+      const c = config({ contractId: terms.contract, usdc: purchase.asset });
+      const args = { purchase_id: `0x${'11'.repeat(32)}`, grant: 0 };
+      const answer = { big_y: 'bls12381g1:Y', big_c: 'bls12381g1:C' };
+      let wire: object | undefined;
+      let httpRequests = 0;
+      let lookups = 0;
+      const send = vi.fn(async (input: unknown) => {
+        const req = canonicalRequest(input);
+        await checkRelay(req, c);
+        wire = contractArgs(req);
+        return { txHash: 'H' };
+      });
+      const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+        if (String(url).endsWith('/v1/relay')) {
+          httpRequests++;
+          if (mode !== 'outcome' && httpRequests === 1) throw new Error('POST timed out');
+          if (mode === 'legacy-duplicate' && httpRequests === 2)
+            return Response.json({ error: 'duplicate' }, { status: 409 });
+          if (mode === 'lost-post-pending' && httpRequests === 2)
+            return Response.json({ pending: true, retryAfterMs: 5000 }, { status: 202 });
+          const response = await handle(
+            c,
+            'POST',
+            '/v1/relay',
+            'boundary',
+            String(init?.body),
+            send,
+          );
+          return Response.json(response.body, { status: response.status });
+        }
+        const q = JSON.parse(String(init?.body));
+        if (q.method === 'EXPERIMENTAL_tx_status') {
+          if (++lookups === 1) throw new Error('request timed out');
+          return Response.json({
+            id: q.id,
+            result: {
+              transaction: {
+                hash: 'H',
+                signer_id: c.sender.accountId,
+                receiver_id: c.contractId,
+                actions: [
+                  {
+                    FunctionCall: {
+                      method_name: 'claim_key',
+                      args: Buffer.from(JSON.stringify(wire)).toString('base64'),
+                    },
+                  },
+                ],
+              },
+              status: { SuccessValue: Buffer.from(JSON.stringify(answer)).toString('base64') },
+              receipts_outcome: [],
+            },
+          });
+        }
+        const method = q.params.method_name;
+        const value =
+          method === 'get_file'
+            ? {
+                terms,
+                terms_hash: termsHash(terms),
+                header_hash: null,
+                sales_stopped_at: null,
+                taken_down: null,
+              }
+            : method === 'get_purchase'
+              ? {
+                  ...args,
+                  file_id: terms.file_id,
+                  terms_hash: termsHash(terms),
+                  buyer_key: purchase.buyer_key,
+                  recovery: purchase.recovery,
+                  route: 'base-usdc',
+                  delivery: null,
+                  accepted_at: 1,
+                  grants: 1,
+                }
+              : { ...args, buyer_key: purchase.buyer_key };
         return Response.json({
           id: q.id,
-          result: {
-            transaction: {
-              hash: 'H',
-              signer_id: c.sender.accountId,
-              receiver_id: c.contractId,
-              actions: [
-                {
-                  FunctionCall: {
-                    method_name: 'claim_key',
-                    args: Buffer.from(JSON.stringify(wire)).toString('base64'),
-                  },
-                },
-              ],
-            },
-            status: { SuccessValue: Buffer.from(JSON.stringify(answer)).toString('base64') },
-            receipts_outcome: [],
-          },
+          result: { result: [...Buffer.from(JSON.stringify(value))] },
         });
-      }
-      const method = q.params.method_name;
-      const value =
-        method === 'get_file'
-          ? {
-              terms,
-              terms_hash: termsHash(terms),
-              header_hash: null,
-              sales_stopped_at: null,
-              taken_down: null,
-            }
-          : method === 'get_purchase'
-            ? {
-                ...args,
-                file_id: terms.file_id,
-                terms_hash: termsHash(terms),
-                buyer_key: purchase.buyer_key,
-                recovery: purchase.recovery,
-                route: 'base-usdc',
-                delivery: null,
-                accepted_at: 1,
-                grants: 1,
-              }
-            : { ...args, buyer_key: purchase.buyer_key };
-      return Response.json({
-        id: q.id,
-        result: { result: [...Buffer.from(JSON.stringify(value))] },
       });
-    });
-    vi.stubGlobal('fetch', fetcher);
-    const wait = vi.fn(async () => {});
-    const adapter = createAdapter(
-      { ANNON_BACKUP_SECRET: 'ab'.repeat(32) },
-      {
-        fetch: fetcher,
-        wait,
-        wallet: async () => ({ identity: terms.seller, authorize: vi.fn() }),
-        sdk(options) {
-          const sdk = new Annon(options);
-          vi.spyOn(sdk, 'stop').mockImplementation(async () => {
-            expect(await options.send?.('claim_key', args)).toEqual(answer);
-          });
-          return sdk;
+      vi.stubGlobal('fetch', fetcher);
+      const wait = vi.fn(async () => {});
+      const adapter = createAdapter(
+        { ANNON_BACKUP_SECRET: 'ab'.repeat(32) },
+        {
+          fetch: fetcher,
+          wait,
+          wallet: async () => ({ identity: terms.seller, authorize: vi.fn() }),
+          sdk(options) {
+            const sdk = new Annon(options);
+            vi.spyOn(sdk, 'stop').mockImplementation(async () => {
+              expect(await options.send?.('claim_key', args)).toEqual(answer);
+            });
+            return sdk;
+          },
         },
-      },
-    );
-    try {
-      await adapter({
-        command: 'stop',
-        target: terms.file_id,
-        contractId: terms.contract,
-        nearRpc: c.nearRpc,
-        baseRpc: c.baseRpc,
-        relayer: 'https://relay.example',
-        stateDir: dir,
-        config: join(dir, 'none'),
-        trustContract: true,
-      });
-      expect(wire).toEqual(args);
-      expect(httpRequests).toBe(1);
-      expect(lookups).toBe(2);
-      expect(wait).toHaveBeenCalledWith(1000);
-    } finally {
-      vi.unstubAllGlobals();
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
+      );
+      try {
+        await adapter({
+          command: 'stop',
+          target: terms.file_id,
+          contractId: terms.contract,
+          nearRpc: c.nearRpc,
+          baseRpc: c.baseRpc,
+          relayer: 'https://relay.example',
+          stateDir: dir,
+          config: join(dir, 'none'),
+          trustContract: true,
+        });
+        expect(wire).toEqual(args);
+        expect(httpRequests).toBe(mode === 'outcome' ? 1 : 3);
+        expect(lookups).toBe(2);
+        expect(wait).toHaveBeenCalledWith(1000);
+      } finally {
+        vi.unstubAllGlobals();
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

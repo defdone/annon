@@ -30,6 +30,9 @@ export interface Deposit {
   chain: Origin['chain'];
   memo?: string;
   qrData: string;
+  /** Deposit must be confirmed by this earlier cutoff; delivery has a ten-minute buffer. */
+  depositBefore: string;
+  purchaseExpiresAt: string;
 }
 export interface OneClickQuote {
   request: QuoteRequest;
@@ -103,7 +106,9 @@ export class OneClick {
     if (p.route !== 'near-usdc' || p.asset !== NEAR_USDC)
       throw new TypeError('1Click requires the NEAR USDC route');
     const now = (this.options.now ?? (() => Math.floor(Date.now() / 1000)))();
-    if (BigInt(p.expires_at) <= BigInt(now)) throw new Error('purchase expired');
+    const depositCutoff = Number(p.expires_at) - 600;
+    if (!Number.isSafeInteger(depositCutoff) || depositCutoff <= now)
+      throw new Error('purchase expired or insufficient delivery window');
     if (!origin.asset.startsWith('nep141:') || !origin.refundTo || /\s/.test(origin.refundTo))
       throw new TypeError('invalid origin/refund');
     const refundType = origin.refundType ?? (origin.chain === 'near' ? 'INTENTS' : 'ORIGIN_CHAIN');
@@ -123,7 +128,7 @@ export class OneClick {
       refundType,
       recipient: p.contract,
       recipientType: 'DESTINATION_CHAIN',
-      deadline: new Date(Number(p.expires_at) * 1000).toISOString(),
+      deadline: new Date(depositCutoff * 1000).toISOString(),
       customRecipientMsg: message,
     };
     const response = await this.request('/quote', request, options.signal);
@@ -138,12 +143,18 @@ export class OneClick {
     if (!echo || Object.entries(request).some(([key, value]) => echo[key] !== value))
       throw new Error('1Click quoteRequest echo mismatch');
     const deadline = typeof q.deadline === 'string' ? Date.parse(q.deadline) : NaN;
+    // The service's address-inactivity deadline is request.deadline + 72h in recorded
+    // quotes. It is not the buyer's cutoff. Never extend the echoed request deadline.
+    if (!Number.isFinite(deadline) || deadline < depositCutoff * 1000)
+      throw new Error('1Click deposit address deadline expires before the deposit cutoff');
     if (
-      !Number.isFinite(deadline) ||
-      deadline <= now * 1000 ||
-      deadline > Number(p.expires_at) * 1000
+      q.timeEstimate !== undefined &&
+      (typeof q.timeEstimate !== 'number' ||
+        !Number.isFinite(q.timeEstimate) ||
+        q.timeEstimate < 0 ||
+        q.timeEstimate > 600)
     )
-      throw new Error('1Click quote deadline exceeds purchase expiry or has expired');
+      throw new Error('1Click delivery estimate exceeds purchase delivery window');
     if (typeof q.amountIn !== 'string' || uint(q.amountIn, 128) === 0n)
       throw new Error('invalid quote input amount');
     if (typeof q.depositAddress !== 'string' || !q.depositAddress || q.depositAddress.length > 256)
@@ -155,6 +166,8 @@ export class OneClick {
       amount: q.amountIn,
       asset: origin.asset,
       chain: origin.chain,
+      depositBefore: request.deadline,
+      purchaseExpiresAt: new Date(Number(p.expires_at) * 1000).toISOString(),
       ...(memo === undefined ? {} : { memo }),
     };
     return { request, response, deposit: { ...data, qrData: JSON.stringify(data) } };

@@ -24,8 +24,9 @@ export interface RecoveryRecord extends Versioned {
 export interface SellRecord extends Versioned {
   kind: 'sell';
   terms: import('../settle-near/terms.js').Terms;
-  fileKey: string;
-  sellerSecret: string;
+  published?: boolean;
+  fileKey: string | null;
+  sellerSecret: string | null;
   deadline: number;
   name: string;
   mime: string;
@@ -36,7 +37,7 @@ export interface SellerKeyRecord extends Versioned {
   kind: 'seller-key';
   file_id: string;
   seller: import('../settle-near/identity.js').Identity;
-  buyerSecret: string;
+  buyerSecret: string | null;
   deadline: number;
 }
 type PrivateRecord = PurchaseRecord | RecoveryRecord | SellRecord | SellerKeyRecord;
@@ -51,7 +52,7 @@ function validate(r: PrivateRecord) {
     )
       throw new TypeError('invalid seller key record');
     bytes(r.file_id, 32);
-    bytes(r.buyerSecret, 32);
+    if (r.buyerSecret !== null) bytes(r.buyerSecret, 32);
     identityJson(r.seller);
     return;
   }
@@ -64,8 +65,13 @@ function validate(r: PrivateRecord) {
       r.deadline < 0
     )
       throw new TypeError('invalid sell record');
-    bytes(r.fileKey, 32);
-    bytes(r.sellerSecret, 32);
+    if (r.published === true) {
+      if (r.fileKey !== null || r.sellerSecret !== null || r.ckdSecret !== null)
+        throw new TypeError('published sell retains secrets');
+    } else {
+      bytes(r.fileKey as string, 32);
+      bytes(r.sellerSecret as string, 32);
+    }
     if (r.ckdSecret !== null) bytes(r.ckdSecret, 48);
     return;
   }
@@ -133,6 +139,7 @@ export function validatePurchaseRecord(r: PurchaseRecord): void {
       ) ||
     hex(keyFromSecret(bytes(r.buyerSecret, 32)).publicKeyBytes) !== r.purchase.buyer_key ||
     identityJson(r.recovery) !== identityJson(r.purchase.recovery) ||
+    (r.paymentState !== undefined && !['expired', 'canceled'].includes(r.paymentState)) ||
     !Array.isArray(r.attempts) ||
     !r.terms ||
     r.terms.network !== r.purchase.network ||
@@ -268,6 +275,14 @@ export const encryptedSellStore = (
 
 export const exportSellerKey = (record: SellerKeyRecord, secret: Uint8Array) =>
   encrypt(record, secret);
+export const importSellerKey = async (
+  file: string,
+  secret: Uint8Array,
+): Promise<SellerKeyRecord> => {
+  const r = await decrypt(file, secret);
+  if (!('kind' in r) || r.kind !== 'seller-key') throw new TypeError('not a seller-key record');
+  return r;
+};
 export const encryptedSellerKeyStore = (
   raw: Store<EncryptedRecord>,
   secret: Uint8Array,

@@ -7,8 +7,12 @@ import { fileAppId, hashPoint } from '../keys/near-ckd.js';
 import { getFile } from '../near/rpc.js';
 import {
   type EncryptedRecord,
+  encryptedSellerKeyStore,
+  encryptedSellStore,
   importPurchase,
   importRecovery,
+  importSell,
+  importSellerKey,
   newBackupSecret,
 } from '../pay/backup.js';
 import type { typedData } from '../pay/eip3009.js';
@@ -249,6 +253,9 @@ describe('high-level one-model API', () => {
     expect(must(h.calls[0]).method).toBe('register');
     expect(sold.terms.pay2_version).toBe(2);
     expect(h.file).toEqual(sold.file);
+    expect(
+      await importSell(must(h.backups.get(`sell:${sold.terms.file_id}`)), h.backupSecret),
+    ).toMatchObject({ published: true, fileKey: null, sellerSecret: null, ckdSecret: null });
     const bought = await h.sdk.buy({
       fileId: sold.terms.file_id,
       header: h.header,
@@ -275,6 +282,10 @@ describe('high-level one-model API', () => {
     expect(await importPurchase(must(h.backups.get(bought.record.id)), h.backupSecret)).toEqual(
       bought.record,
     );
+    await expect(h.sdk.open({ record: bought.record, file: h.file })).rejects.toMatchObject({
+      code: 'settlement_processing',
+    });
+    expect(h.calls.some((c) => c.method === 'claim_key')).toBe(false);
     const p = bought.record.purchase;
     h.purchases.set(bought.record.id, {
       purchase_id: bought.record.id,
@@ -681,7 +692,7 @@ describe('high-level one-model API', () => {
       },
       publish: h.publish,
     };
-    await expect(h.sdk.sell(options)).rejects.toThrow('lost register answer');
+    await expect(h.sdk.sell(options)).rejects.toMatchObject({ fileId });
     expect(h.backups.has(`sell:${fileId}`)).toBe(true);
     h.send.mockImplementation(async (method, args) => {
       if (method === 'reopen_seller') {
@@ -702,12 +713,36 @@ describe('high-level one-model API', () => {
     await expect(
       resumed.resumeSell({ fileId, data: body, seller: wallet, publish }),
     ).rejects.toThrow('host unavailable');
-    const sold = await resumed.resumeSell({ fileId, data: body, seller: wallet, publish });
-    expect(sold.terms.file_id).toBe(fileId);
-    expect(h.calls.filter((c) => c.method === 'register')).toHaveLength(1);
+    const pending = await importSell(must(h.backups.get(`sell:${fileId}`)), h.backupSecret);
+    expect(pending.fileKey).not.toBeNull();
+    expect(pending.ckdSecret).not.toBeNull();
     await expect(
       resumed.resumeSell({ fileId, data: new Uint8Array([9]), seller: wallet, publish }),
     ).rejects.toThrow(/cipher/);
+    const sold = await resumed.resumeSell({ fileId, data: body, seller: wallet, publish });
+    expect(sold.terms.file_id).toBe(fileId);
+    const completed = await importSell(must(h.backups.get(`sell:${fileId}`)), h.backupSecret);
+    expect(completed).toMatchObject({
+      published: true,
+      fileKey: null,
+      sellerSecret: null,
+      ckdSecret: null,
+    });
+    expect(await encryptedSellStore(h.raw, h.backupSecret).load(`annon/sell/${fileId}`)).toEqual(
+      completed,
+    );
+    const sellerKey = await importSellerKey(
+      must(h.backups.get(`seller-key:${fileId}`)),
+      h.backupSecret,
+    );
+    expect(sellerKey.buyerSecret).toBeNull();
+    expect(
+      await encryptedSellerKeyStore(h.raw, h.backupSecret).load(`annon/seller-key/${fileId}`),
+    ).toEqual(sellerKey);
+    expect(h.calls.filter((c) => c.method === 'register')).toHaveLength(1);
+    await expect(
+      resumed.resumeSell({ fileId, data: new Uint8Array([9]), seller: wallet, publish }),
+    ).rejects.toThrow(/published/);
   });
   it('reads CKD keys from the configured MPC domain, with explicit overrides pinned to it', async () => {
     const h = harness();
@@ -828,10 +863,19 @@ describe('high-level one-model API', () => {
       },
       publish: h.publish,
     };
-    const sold = await h.sdk.sell(options);
+    await expect(
+      h.sdk.sell({
+        ...options,
+        publish: async () => {
+          throw new Error('host unavailable');
+        },
+      }),
+    ).rejects.toThrow();
+    const sold = await h.sdk.resumeSell({ fileId, data: body, seller: wallet, publish: h.publish });
     expect(sold.terms.near.token).toBe('usdc.test.near');
-    expect(
-      (await h.sdk.resumeSell({ fileId, data: body, seller: wallet, publish: h.publish })).file,
-    ).toEqual(sold.file);
+    expect(sold.file).toEqual(h.file);
+    await expect(
+      h.sdk.resumeSell({ fileId, data: body, seller: wallet, publish: h.publish }),
+    ).rejects.toThrow(/published/);
   });
 });

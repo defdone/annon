@@ -49,6 +49,7 @@ const STATUS: Record<RelayErrorCode, number> = {
   bad_header: 400,
   limited: 429,
   duplicate: 409,
+  in_flight: 202,
   unavailable: 503,
   transport: 502,
 };
@@ -131,6 +132,8 @@ export async function handle(
     // Back to the window it was charged to; a newer day keeps its own count.
     if (hits.get('day') === day && day.n > 0) day.n--;
     if (e instanceof RelayError) {
+      if (e.code === 'in_flight')
+        return { status: 202, body: { pending: true, retryAfterMs: 5000 } };
       return { status: STATUS[e.code], body: { error: e.code, message: e.message } };
     }
     return { status: 500, body: { error: 'internal', message: 'unexpected error' } };

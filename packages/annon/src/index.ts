@@ -3,6 +3,7 @@ export {
   type AnnonOptions,
   type Bought,
   type BuyOptions,
+  SellError,
   type SellOptions,
 } from './api/annon.js';
 export {
