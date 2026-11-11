@@ -196,6 +196,7 @@ export async function startBrowserSession(o: {
               ? 'explorer.exe'
               : 'xdg-open',
           [target],
+          { env: browserOpenerEnv(process.env) },
           () => {},
         );
       })
@@ -229,4 +230,23 @@ export async function startBrowserSession(o: {
         };
       }),
   };
+}
+
+/** Only desktop routing and executable lookup reach the browser opener. */
+export function browserOpenerEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    [
+      'PATH',
+      'HOME',
+      'DISPLAY',
+      'BROWSER',
+      'XDG_CURRENT_DESKTOP',
+      'DESKTOP_SESSION',
+      'LANG',
+      'WAYLAND_DISPLAY',
+      'XDG_RUNTIME_DIR',
+      'DBUS_SESSION_BUS_ADDRESS',
+      'SystemRoot',
+    ].flatMap((key) => (env[key] === undefined ? [] : [[key, env[key]]])),
+  );
 }

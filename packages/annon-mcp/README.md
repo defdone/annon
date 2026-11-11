@@ -10,7 +10,12 @@ Use the [CLI configuration and secret sources](../annon/CLI.md). Supply the same
 environment variables to the server process. Deployment IDs, RPCs, relayer, wallet/key-file
 selection, state/backup locations, moderator trust and contract trust come only from server
 env/config or prior human CLI trust. They are rejected as tool arguments. Configure a decimal
-USDC `maxPrice` / `ANNON_MAX_PRICE` before using `annon_buy`; a tool cannot override this cap.
+USDC `maxPrice` in the pinned config before using `annon_buy`; a tool cannot override this cap.
+MCP always applies agent policy. `ANNON_STATE_DIR` is ignored; configure `stateDir` in the
+operator config. Config `maxPrice` is required and `ANNON_MAX_PRICE` can only lower it.
+`ANNON_ALLOWED_RESOURCES`, when present, intersects config `allowedResources`; it cannot add
+URLs. This applies to every agent-mode trigger. The launcher flag `ANNON_AGENT=true` pins the
+config to `~/.config/annon/config.json`; the other triggers use the operator-selected config.
 Set `ANNON_MODERATORS` (comma-separated) or config `moderators` for buyer moderator trust.
 
 Tools use camelCase versions of CLI flags, with `target` as the positional operand:
@@ -28,10 +33,9 @@ Tools use camelCase versions of CLI flags, with `target` as the positional opera
 `origin` names an entry in human config `origins` or JSON `ANNON_ORIGINS`; its `fromChain`,
 `fromAsset` and optional `refundTo` cannot be supplied by a tool. Refunds use human configuration
 or the matching wallet address. Tools cannot choose arbitrary source assets or redirect refunds.
-For an offer file, `url` must match both the offer and human config `allowedResources`
-(or comma-separated `ANNON_ALLOWED_RESOURCES`). Two agent-controlled matching strings establish
-consistency only; the allowlist supplies independent authorization. A direct URL target is itself
-the selected resource and must match its advertised offer.
+Agent purchases refuse local offer files. `target` must be a human-allowlisted resource URL.
+The adapter fetches its offer from that URL and checks that the advertised resource matches it.
+The offer header must share the resource origin. An optional `url` cannot authorize an offer file.
 URLs accept HTTPS, and plain HTTP only for `localhost`, `127.0.0.1` or `[::1]`,
 for example `http://localhost:8790/file`. The same rule applies to `annon_verify`.
 `annon_sell` resumes with `{ target: "original.pdf", resume: "0xFILE_ID", output: "new.pay2" }`;
@@ -39,6 +43,22 @@ price/split are required for new listings and forbidden during resume. Failed sa
 `error.fileId`. Published jobs and current backups retain public metadata, clearing file/CKD/one-time
 secrets; see the CLI documentation for recovery requirements and external-backup limits.
 `annon_open` accepts `purchase`, `file`, `url`. See tool schemas for the complete list.
+
+Agent mode requires a human-set config `workDir`. Only an explicit launcher setting
+`ANNON_AGENT=true` permits `ANNON_WORK_DIR` to supply or override it. It has no tool argument.
+`annon_open.output`, `annon_open.file`, `annon_sell.target` and `annon_sell.output` must resolve
+inside this directory. Local `annon_verify.target` files, non-ID `annon_open.target` inputs and
+non-ID `annon_open.purchase` backups follow the same rule. Verify URLs remain remote, and open
+purchase IDs remain identifiers. Relative paths start there; existing inputs and output parents use
+`realpath`. Symlink escapes, dangling symlinks, paths outside the directory and any `..` segment
+are refused with fixed code `path_not_allowed`. The default sell output is checked too; output
+parents must already exist. Returned paths are canonical. Existing outputs are never overwritten.
+
+MCP is the policy boundary, with configuration, environment, credentials and directory ownership
+controlled by the operator. These checks do not contain a shell agent running as the same OS
+user: it can edit that user's config, change files or invoke another client. Use separate OS
+permissions when those capabilities must be restricted.
+
 `annon_status` and `annon_open` can resume saved paid Base purchases by submitting unlock
 before downloading. Status is therefore not annotated read-only. Expired/canceled Base payments are marked in the
 local encrypted record and current backup; the purchase and recovery material remain available. Batch recovery reports

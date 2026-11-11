@@ -2,6 +2,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { secureUrl } from '../download/download.js';
+import { sameResource } from '../download/proof.js';
 import { fileStore } from '../pay/store-node.js';
 import { account, network } from '../settle-near/codec.js';
 import { agentPolicy, configPath, type SignerConfig, validateSigner } from './agent.js';
@@ -18,6 +19,7 @@ export interface Config {
   baseRpc: string;
   network: string;
   stateDir: string;
+  workDir?: string;
   relayer?: string;
   maxPrice?: string;
   trustContract?: boolean;
@@ -26,8 +28,13 @@ export interface Config {
   origins?: Record<string, { fromChain: string; fromAsset: string; refundTo?: string }>;
   allowedResources?: string[];
 }
-export async function loadConfig(o: Input, env: Environment, login = false): Promise<Config> {
-  const pinnedAgent = await agentPolicy(o, env);
+export async function loadConfig(
+  o: Input,
+  env: Environment,
+  login = false,
+  forcedAgent = false,
+): Promise<Config> {
+  const pinnedAgent = await agentPolicy(o, env, forcedAgent);
   try {
     let file: Partial<Config> = {};
     const path = configPath(o, env);
@@ -36,6 +43,16 @@ export async function loadConfig(o: Input, env: Environment, login = false): Pro
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+    const agent = pinnedAgent || file.agent === true;
+    if (
+      agent &&
+      (typeof file.maxPrice !== 'string' || !/^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/.test(file.maxPrice))
+    )
+      throw new AdapterError(
+        'max_price_required',
+        'Agent mode requires maxPrice in the pinned config.',
+        2,
+      );
     const c: Config = {
       contractId: o.contractId ?? env.ANNON_CONTRACT_ID ?? file.contractId ?? '',
       nearRpc:
@@ -51,10 +68,22 @@ export async function loadConfig(o: Input, env: Environment, login = false): Pro
       network: o.network ?? env.ANNON_NETWORK ?? file.network ?? 'near:mainnet',
       stateDir:
         o.stateDir ??
-        (env.ANNON_AGENT === 'true' ? undefined : env.ANNON_STATE_DIR) ??
+        (agent ? undefined : env.ANNON_STATE_DIR) ??
         file.stateDir ??
         join(homedir(), '.local', 'share', 'annon'),
     };
+    const workDir = (env.ANNON_AGENT === 'true' ? env.ANNON_WORK_DIR : undefined) ?? file.workDir;
+    if (agent && (typeof workDir !== 'string' || !workDir.trim()))
+      throw new AdapterError(
+        'work_dir_required',
+        'Agent mode requires an operator-configured workDir.',
+        2,
+      );
+    if (workDir !== undefined) {
+      if (typeof workDir !== 'string' || !workDir.trim())
+        throw new Error('invalid working directory');
+      c.workDir = workDir;
+    }
     if (file.signer) c.signer = validateSigner(file.signer);
     if (file.dailyBudget !== undefined) {
       if (
@@ -87,13 +116,31 @@ export async function loadConfig(o: Input, env: Environment, login = false): Pro
       }
       c.origins = origins;
     }
-    const allowedResources = env.ANNON_ALLOWED_RESOURCES?.split(',') ?? file.allowedResources;
-    if (allowedResources) {
-      if (!Array.isArray(allowedResources)) throw new Error('invalid allowed resources');
-      for (const url of allowedResources) secureUrl(url);
-      c.allowedResources = allowedResources;
+    const envResources = env.ANNON_ALLOWED_RESOURCES?.split(',');
+    for (const list of [file.allowedResources, envResources]) {
+      if (list !== undefined) {
+        if (!Array.isArray(list)) throw new Error('invalid allowed resources');
+        for (const url of list) secureUrl(url);
+      }
     }
-    const maxPrice = env.ANNON_MAX_PRICE ?? file.maxPrice;
+    const allowedResources = agent
+      ? (file.allowedResources ?? []).filter(
+          (url) => !envResources || envResources.some((other) => sameResource(url, other)),
+        )
+      : (envResources ?? file.allowedResources);
+    if (allowedResources !== undefined) c.allowedResources = allowedResources;
+    const envMax = env.ANNON_MAX_PRICE;
+    const units = (value: string) => {
+      if (!/^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/.test(value)) throw new Error('invalid price cap');
+      const [whole = '', fraction = ''] = value.split('.');
+      return BigInt(whole) * 1000000n + BigInt(fraction.padEnd(6, '0'));
+    };
+    const maxPrice =
+      agent && envMax !== undefined && file.maxPrice !== undefined
+        ? units(envMax) < units(file.maxPrice)
+          ? envMax
+          : file.maxPrice
+        : (envMax ?? file.maxPrice);
     if (maxPrice !== undefined) c.maxPrice = maxPrice;
     c.trustContract =
       env.ANNON_TRUST_CONTRACT === undefined

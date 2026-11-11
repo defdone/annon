@@ -8,6 +8,7 @@ import {
   getPurchase,
   RPC_TIMEOUT_MS,
   type RpcReply,
+  readOutcome,
   rpcReply,
   view,
 } from '../near/rpc.js';
@@ -63,6 +64,7 @@ export class RelayError extends Error {
   // A plain field, not a parameter property: the relayer runs this file with Node's type
   // stripping, which has no parameter properties.
   readonly code: RelayErrorCode;
+  retryAt?: number;
   constructor(code: RelayErrorCode, message: string = code) {
     super(message);
     this.code = code;
@@ -78,6 +80,11 @@ export interface RelayPolicy {
   sellerAllowed?: (seller: string) => boolean | Promise<boolean>;
   registrationsPerSeller?: number;
   reopensPerWalletFile?: number;
+  /** Daily limit per (purchase, grant); the setting name is retained for compatibility. */
+  claimsPerPurchase?: number;
+  holdMs?: number;
+  maxWaiting?: number;
+  maxChecking?: number;
 }
 export interface CheckOptions {
   nearRpc: string;
@@ -126,6 +133,7 @@ export function canonicalRequest(input: unknown, assets?: SettlementAssets): Rel
           (!Number.isInteger(r.args.grant) || r.args.grant < 0 || r.args.grant > 0xffffffff)
         )
           throw new Error('invalid grant');
+        r.args.grant = r.args.grant ?? 0;
         break;
       case 'unlock':
         exactKeys(a, ['purchase', 'logs', 'header']);
@@ -218,7 +226,8 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
     if (r.method === 'register') {
       if (
         r.args.terms.contract !== o.contractId ||
-        BigInt(r.args.terms.near.price) < o.policy.minPrice
+        BigInt(r.args.terms.near.price) < o.policy.minPrice ||
+        (r.args.terms.base !== null && BigInt(r.args.terms.base.price) < o.policy.minPrice)
       )
         fail('not_sponsored');
       if (file) fail('already_registered');
@@ -271,6 +280,7 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
     if (r.method !== 'unlock') return;
     const a = r.args;
     const purchase = parsePurchaseMessage(a.purchase, { baseUsdc: o.usdc });
+    if (BigInt(purchase.price) < o.policy.minPrice) fail('not_sponsored');
     const id = purchaseId(purchase, { baseUsdc: o.usdc });
     if (
       purchase.route !== 'base-usdc' ||
@@ -343,11 +353,19 @@ const MAX_WAITING = 32;
 const accounts = new Map<string, Account>();
 const held = new Map<string, number>();
 const submitted = new Map<string, RelayResult>();
+interface CachedClaim {
+  result: RelayResult;
+  signer: string;
+  nextAt: number;
+  refresh?: Promise<void>;
+}
+const claims = new Map<string, CachedClaim>();
 const counts = new Map<string, { n: number; until: number }>();
 /** When each recent write was sent, per payer and contract (see `enoughStorage`). */
 const writes = new Map<string, number[]>();
 const queues = new Map<string, Promise<unknown>>();
 let waiting = 0;
+let checking = 0;
 
 /** How many operations and limit counters are kept; for tests. */
 export const relayCounters = () => counts.size + held.size;
@@ -356,6 +374,7 @@ export const relayCounters = () => counts.size + held.size;
 export function resetRelayState() {
   held.clear();
   submitted.clear();
+  claims.clear();
   counts.clear();
   accounts.clear();
   writes.clear();
@@ -470,8 +489,8 @@ function enqueue<T>(job: () => Promise<T>, scope = 'relay'): Promise<T> {
 
 /**
  * What makes two requests the same operation. Only a party that could make the request succeed
- * can hold it: wallet signatures are checked or recovered before anything is held (`stop_sales`
- * by the address that signed, since the seller is known only from the chain), and an unlock
+ * can hold it: wallet signatures are checked against their authoritative identities before
+ * anything is held, and an unlock
  * includes the buyer's key, which only the buyer knows before it is sent.
  */
 const identity = (r: RelayRequest, _contract: string) => {
@@ -492,9 +511,11 @@ const signedByItsWallet = (r: RelayRequest, contract: string, assets?: Settlemen
 const quota = (r: RelayRequest, p: RelayPolicy): [string, number] | null =>
   r.method === 'register'
     ? [`register:${identityJson(r.args.terms.seller)}`, p.registrationsPerSeller ?? 20]
-    : r.method === 'reopen'
-      ? [`reopen:${r.args.purchase_id}`, p.reopensPerWalletFile ?? 10]
-      : null;
+    : r.method === 'claim_key'
+      ? [`claim:${r.args.purchase_id}:${r.args.grant ?? 0}`, p.claimsPerPurchase ?? 3]
+      : r.method === 'reopen'
+        ? [`reopen:${r.args.purchase_id}`, p.reopensPerWalletFile ?? 10]
+        : null;
 
 export interface RelayResult {
   txHash: string;
@@ -511,7 +532,10 @@ export interface RelayResult {
 }
 
 /** Read an already admitted operation without charging admission limits or sending anything. */
-export function relayStatus(input: unknown, o: CheckOptions): RelayResult | 'pending' | null {
+export async function relayStatus(
+  input: unknown,
+  o: CheckOptions,
+): Promise<RelayResult | 'pending' | null> {
   try {
     const assets = { baseUsdc: o.usdc, ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}) };
     const r = canonicalRequest(input, assets);
@@ -519,6 +543,51 @@ export function relayStatus(input: unknown, o: CheckOptions): RelayResult | 'pen
     // Cheap miss first: this runs before the IP limiter, so unknown requests never reach a signature check.
     if ((held.get(operation) ?? 0) <= Date.now()) return null;
     signedByItsWallet(r, o.contractId, assets);
+    const cached = claims.get(operation);
+    if (
+      r.method === 'claim_key' &&
+      cached &&
+      cached.result === submitted.get(operation) &&
+      cached.nextAt <= Date.now()
+    ) {
+      // Coalesce polls; an old lookup must never retire a replacement admitted meanwhile.
+      cached.refresh ??= (async () => {
+        const reply = await lookUp(o.nearRpc, cached.result.txHash, cached.signer);
+        let retry = reply?.error?.cause?.name === 'UNKNOWN_TRANSACTION';
+        let succeeded = false;
+        if (
+          reply &&
+          !reply.error &&
+          (reply.result as { final_execution_status?: unknown })?.final_execution_status === 'FINAL'
+        ) {
+          try {
+            const outcome = readOutcome(reply.result, o.contractId, {
+              txHash: cached.result.txHash,
+              signer: cached.signer,
+              method: 'claim_key',
+              args: contractArgs(r),
+            });
+            retry = outcome.state !== 'released';
+            succeeded = !retry;
+          } catch {
+            /* Unbound or malformed outcomes cannot justify a new send. */
+          }
+        }
+        if (claims.get(operation) !== cached || submitted.get(operation) !== cached.result) return;
+        if (retry) {
+          claims.delete(operation);
+          submitted.delete(operation);
+          held.delete(operation);
+        } else
+          cached.nextAt = succeeded
+            ? Number.POSITIVE_INFINITY
+            : Date.now() + (o.policy.holdMs ?? HOLD);
+      })().finally(() => {
+        delete cached.refresh;
+      });
+      await cached.refresh;
+    }
+    if ((held.get(operation) ?? 0) <= Date.now()) return null;
     return submitted.get(operation) ?? 'pending';
   } catch (e) {
     return asRelayError(e);
@@ -527,16 +596,16 @@ export function relayStatus(input: unknown, o: CheckOptions): RelayResult | 'pen
 
 /**
  * Checks the request and sends it with the sender's key, no deposit (storage comes from the
- * sender's prepaid balance on the contract). The checks run again right before signing, one
- * request at a time. The operation's hold and limits are taken on admission and given back only
+ * sender's prepaid balance on the contract). Chain checks run before the signing queue; deadline
+ * freshness and shared prepaid storage are checked inside it. Holds and limits are taken after
+ * validation and given back only
  * if the request fails before its transaction is sent. Returns the transaction hash once it is in
  * a block (or `uncertain`); the caller reads the outcome itself through its own NEAR RPC
  * (`txOutcome` with the method and args it asked for).
  *
- * The relayer doesn't track what happened to a transaction: no RPC answer proves one didn't land.
- * That an operation runs once is the contract's job (a file is registered once, a payment unlocks
- * once, a one-time key is reopened once, sales stop once); the relayer only avoids sending the
- * same operation twice in a row.
+ * The contract enforces one-time operations. Claims retain their hash through the quota window;
+ * after the recent hold, a bound FINAL outcome other than released, or an unknown transaction,
+ * permits a charged retry. Released, non-final and inconclusive lookups keep the cached hash.
  */
 export async function relay(
   input: unknown,
@@ -552,18 +621,36 @@ export async function relay(
     ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
   });
   const operation = `${o.nearRpc}|${o.contractId}|${identity(r, o.contractId)}`;
-  const previous = submitted.get(operation);
-  if (previous && (held.get(operation) ?? 0) > Date.now()) return previous;
+  const previous = await relayStatus(r, o);
+  if (previous === 'pending')
+    return fail('in_flight', 'this operation is in flight; retry shortly');
+  if (previous) return previous;
+  // Reject cheap duplicates and overload before starting any chain reads.
+  if ((held.get(operation) ?? 0) > Date.now())
+    fail('in_flight', 'this operation is in flight; retry shortly');
+  if (
+    waiting >= (o.policy.maxWaiting ?? MAX_WAITING) ||
+    checking >= (o.policy.maxChecking ?? MAX_WAITING)
+  )
+    fail('unavailable', 'the relayer is busy; try again shortly');
+  checking++;
+  try {
+    await checkRelay(r, o);
+  } finally {
+    checking--;
+  }
   const now = Date.now();
   for (const [k, v] of held)
     if (v <= now) {
       held.delete(k);
       submitted.delete(k);
+      claims.delete(k);
     }
   for (const [k, v] of counts) if (v.until <= now) counts.delete(k);
   if ((held.get(operation) ?? 0) > now)
     fail('in_flight', 'this operation is in flight; retry shortly');
-  if (waiting >= MAX_WAITING) fail('unavailable', 'the relayer is busy; try again shortly');
+  if (waiting >= (o.policy.maxWaiting ?? MAX_WAITING))
+    fail('unavailable', 'the relayer is busy; try again shortly');
   // Per contract: relayers for other contracts in the same process don't share operations.
   const id = `${o.nearRpc}|${o.contractId}|${identity(r, o.contractId)}`;
   if ((held.get(id) ?? 0) > now) fail('duplicate', 'this operation was just sent or is on its way');
@@ -576,7 +663,11 @@ export async function relay(
     // Charged now: concurrent requests can't all pass a check made before any of them is sent.
     const c = counts.get(q[0]);
     charged = c && c.until > now ? c : { n: 0, until: now + DAY };
-    if (charged.n >= q[1]) fail('limited', 'the daily limit for this is reached');
+    if (charged.n >= q[1]) {
+      const error = new RelayError('limited', 'the daily limit for this is reached');
+      error.retryAt = charged.until;
+      throw error;
+    }
     charged.n++;
     counts.set(q[0], charged);
   }
@@ -584,35 +675,53 @@ export async function relay(
   held.set(id, Number.POSITIVE_INFINITY);
   const refund = () => {
     held.delete(id);
+    claims.delete(id);
     if (q && charged && counts.get(q[0]) === charged) {
       charged.n--;
       if (charged.n <= 0) counts.delete(q[0]);
     }
   };
+  const holdUntil = () =>
+    r.method === 'claim_key' && charged ? charged.until : Date.now() + (o.policy.holdMs ?? HOLD);
   let sent = false;
   waiting++;
   try {
     const out = await enqueue(async () => {
-      await checkRelay(r, o);
+      // Chain-state validation is outside the nonce queue. The contract checks current state.
+      if ('deadline' in r.args && r.args.deadline < (o.now ?? Math.floor(Date.now() / 1000)))
+        fail('bad_deadline');
       const key = senderKey(o);
       // Storage is the payer's balance on the contract, whichever of its keys signs.
       const scope = `${o.nearRpc}|${o.contractId}|${o.sender.accountId}`;
-      const write = r.method !== 'stop_sales';
+      const write = ['register', 'unlock', 'reopen', 'reopen_seller'].includes(r.method);
       if (write) await enoughStorage(o, scope).catch(asRelayError);
       const { txHash, signed } = await sign(o, key, r.method, contractArgs(r));
       sent = true;
       submitted.set(id, { txHash, uncertain: true });
       if (write) writes.get(scope)?.push(Date.now()) ?? writes.set(scope, [Date.now()]);
-      return send(o, key, txHash, signed);
+      const result = await send(o, key, txHash, signed);
+      if (result.rejected) {
+        sent = false;
+        submitted.delete(id);
+        if (write) writes.get(scope)?.pop();
+        fail('unavailable', 'the transaction was refused before execution; try later');
+      }
+      return result;
     }, senderKey(o));
-    held.set(id, Date.now() + HOLD);
+    held.set(id, holdUntil());
     submitted.set(id, out);
+    if (r.method === 'claim_key')
+      claims.set(id, {
+        result: out,
+        signer: o.sender.accountId,
+        nextAt: Date.now() + (o.policy.holdMs ?? HOLD),
+      });
     return out;
   } catch (e) {
     // Given back only when nothing was sent; once a transaction may be on its way, the hold and
     // limits stay, whatever its outcome.
     if (sent) {
-      held.set(id, Date.now() + HOLD);
+      held.set(id, holdUntil());
       throw e;
     }
     refund();
@@ -667,7 +776,7 @@ export async function keep(o: KeepOptions): Promise<KeepResult> {
 
 /**
  * Sends signed bytes; after a lost or unclear answer, looks the transaction up and sends the same
- * bytes again (same hash). Keepers retire only definite validation refusals.
+ * bytes again (same hash). Only definite validation refusals are reported as not sent.
  */
 async function send(
   o: { nearRpc: string; sender: Sender },
@@ -680,6 +789,7 @@ async function send(
   let reason = 'no clear answer from NEAR';
   // After NEAR said it has the transaction (a PENDING timeout), the relayer only looks it up.
   let look = false;
+  let ambiguous = false;
   try {
     for (let attempt = 0; attempt <= RESENDS; attempt++) {
       const reply = look
@@ -715,8 +825,13 @@ async function send(
         'ActionsValidation',
         'TransactionSizeExceeded',
       ]);
-      if (keeper && variant !== undefined && definite.has(variant)) {
+      if (variant !== undefined && definite.has(variant)) {
         accounts.delete(key);
+        if (ambiguous) {
+          const status = await lookUp(o.nearRpc, txHash, o.sender.accountId);
+          if (status && !status.error && inBlock(status.result)) return { txHash };
+          return unclear('an earlier submission may have landed before this validation refusal');
+        }
         // Only the variant name is public; RPC data may echo arbitrary transaction fields.
         return {
           txHash,
@@ -724,6 +839,7 @@ async function send(
           reason: variant && /^[A-Za-z]+$/.test(variant) ? variant : 'InvalidTxError',
         };
       }
+      ambiguous = true;
       // The chain is past the nonces given out here: later operations read it afresh, whether or
       // not this one landed.
       if (variant === 'InvalidNonce') accounts.delete(key);

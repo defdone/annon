@@ -186,3 +186,44 @@ mismatch. The low-level `openAnswer` requires this key explicitly; it has no mai
 Recovery isolates failures per purchase in batch mode and returns safe `errors` in CLI/MCP.
 An expired pending reopen without a final grant gets a new backed-up key, nonce and deadline;
 the preceding revision remains in an encrypted revision backup.
+
+Agent policy applies when the pinned config has `agent: true`, the launcher sets
+`ANNON_AGENT=true`, or the MCP adapter forces it. Agent config must contain a decimal USDC
+`maxPrice`, even when the launcher supplies an environment cap. Per-call `--contract-id`,
+`--near-rpc`, `--base-rpc`, `--relayer`, `--network`, `--trust-contract`, `--moderator`,
+`--max-price`, `--state-dir` and alternate config paths are refused. Init and login are refused
+once agent policy is active. Buy targets must be allowlisted URLs; local offer files are refused.
+Offer header URLs must share the advertised resource origin in every mode.
+
+In every agent mode, `ANNON_STATE_DIR` is ignored; the config owns `stateDir` and its budget
+ledger. Config `maxPrice` is required. If `ANNON_MAX_PRICE` is present, the effective cap is the
+smaller of environment and config. The effective resource allowlist is config `allowedResources`
+intersected with `ANNON_ALLOWED_RESOURCES` when present; environment alone authorizes no URL.
+These environment settings can only tighten policy, regardless of the agent-mode trigger.
+
+Agent mode also requires a human-set `workDir`. Relative `sell.target`/`output` and
+`open.file`/`output` paths start there. Local `verify` targets, non-ID `open` targets and
+non-ID `open --purchase` backup paths also start there. Verify URLs and purchase IDs retain
+their existing meanings. Canonical paths must stay inside it, including symlink
+targets and parents of new outputs; parent traversal (`..`) is refused with `path_not_allowed`.
+The sell default output is checked too. `ANNON_WORK_DIR` is accepted only when the launcher
+explicitly sets `ANNON_AGENT=true`. That flag also pins the config to
+`~/.config/annon/config.json`; a different `ANNON_CONFIG` is an error.
+
+MCP is the policy boundary: tools cannot replace the operator config, environment or credentials.
+A shell agent running as the same OS user is not contained by these checks; it can edit that
+user's files or run another client. Configure process and OS permissions for that threat model.
+Browser opener processes receive only executable lookup and desktop routing variables, including
+`BROWSER`, desktop session identifiers and `LANG`, excluding signing and backup credentials.
+
+Relayer HTTP 429 and 503 responses with short `Retry-After` delays are retried at most three
+times. Delays above 60 seconds return `relayer_rate_limited` or `relayer_unavailable` immediately.
+HTTP 425 always keeps `payment_not_safe` guidance: agents, JSON and status return immediately;
+human open retries at 10, 20, 30, 40 and 60 seconds, with `Retry-After` as a minimum. A hint above
+60 seconds returns immediately for later resumption. Keep the saved purchase and never pay again.
+Before a Base payment through a configured relayer, the client checks its advertised contract,
+unlock support, disabled state and minimum sponsored price.
+
+A final unlock CKD answer can supply the first open using exactly the same final-grant and MPC
+pairing verification as `claim_key`. An optional configured MPC pin remains enforced, but is not
+required for this optimization. Missing or invalid answers fall back to verified `claim_key`.

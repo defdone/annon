@@ -29,6 +29,7 @@ import { type Config, loadConfig, type TrustPrompt, trustContract } from './conf
 import { AdapterError, publicError, usage } from './errors.js';
 import { newOutput, writeBackup } from './io.js';
 import { type Keychain, osKeychain } from './keychain.js';
+import { confinePaths } from './paths.js';
 import {
   humanPaymentTerms,
   quotedSource,
@@ -158,6 +159,7 @@ async function offer(
   secureUrl(url);
   const header = pr.extensions?.annon?.info.header;
   if (typeof header !== 'string') throw new Error('header missing');
+  if (secureUrl(header).origin !== new URL(url).origin) throw new Error('header origin mismatch');
   return { pr, url, header: await headerAt(header, fetcher), fileId: found.fileId };
 }
 async function resourceHeader(url: string, c: Config, fetcher: typeof fetch) {
@@ -285,7 +287,7 @@ async function originFor(
 }
 
 /**
- * Wait for a relayer 429: seconds or an HTTP date, 5 s when absent or unreadable. Null when the
+ * Wait after a relayer admission refusal: seconds or an HTTP date, 5 s when absent or unreadable. Null when the
  * relayer asks for more than a minute (an hourly IP budget): that wait is the caller's decision.
  */
 export function retryAfterMs(header: string | null, now = Date.now()): number | null {
@@ -302,7 +304,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
   const fetcher = d.fetch ?? globalThis.fetch;
   const wait = d.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   return async (o: Input): Promise<Record<string, unknown>> => {
-    const c = await loadConfig(o, env);
+    const c = await loadConfig(o, env, false, d.agent);
     await trustContract(
       c,
       o.trustContract === true || c.trustContract === true,
@@ -429,18 +431,33 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
             body: JSON.stringify(method === 'claim_key' ? { method, args } : { method, ...args }),
             signal: AbortSignal.timeout(60000),
           });
-          if (r.status === 429) {
+          if ([429, 503].includes(r.status)) {
             const delay = retryAfterMs(r.headers.get('Retry-After'));
-            if (delay === null) throw new Error('relayer refused: rate limited');
-            throw Object.assign(new Error('relayer rate limited; retry'), { retryAfterMs: delay });
+            await r.body?.cancel();
+            const code = r.status === 429 ? 'relayer_rate_limited' : 'relayer_unavailable';
+            const error = new AdapterError(
+              code,
+              'Relayer admission is delayed; retry the saved operation later.',
+              4,
+            );
+            if (delay === null) throw error;
+            throw Object.assign(error, { retryAfterMs: delay });
           }
           if (![200, 202].includes(r.status)) {
             const body = (await r.json().catch(() => null)) as { error?: unknown } | null;
             if (r.status === 409 && body?.error === 'duplicate')
               throw new Error('relayer in flight; retry');
-            if (body?.error === 'payment_not_safe') {
-              const safe = publicError({ code: body.error });
-              throw new AdapterError(safe.code, safe.message, safe.exitCode);
+            if (r.status === 425 || body?.error === 'payment_not_safe') {
+              const safe = publicError({ code: 'payment_not_safe' });
+              const hint = r.headers.get('Retry-After');
+              throw Object.assign(new AdapterError(safe.code, safe.message, safe.exitCode), {
+                safetyDelayMs: hint
+                  ? Math.max(
+                      0,
+                      /^\d+$/.test(hint) ? Number(hint) * 1000 : Date.parse(hint) - Date.now(),
+                    )
+                  : 0,
+              });
             }
             throw new Error('relayer refused');
           }
@@ -470,14 +487,20 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           );
         throw new Error(`transaction ${result.state}`);
       };
-      // Timeouts repeat only idempotent releases. A 429 explicitly refused admission.
+      // Timeouts repeat only idempotent releases; explicit admission refusals have their own cap.
       let timeouts = 0;
       let pending = 0;
+      let admissions = 0;
       let safetyWaits = 0;
       for (;;) {
         try {
           return await call();
         } catch (error) {
+          if (error instanceof AdapterError && 'retryAfterMs' in error) {
+            if (admissions++ >= 3) throw error;
+            await wait((error as AdapterError & { retryAfterMs: number }).retryAfterMs);
+            continue;
+          }
           if (
             method === 'unlock' &&
             error instanceof AdapterError &&
@@ -485,29 +508,24 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           ) {
             if (o.command === 'status') throw new AdapterError(error.code, error.message, 4);
             if (o.command !== 'open' || d.agent || o.json) throw error;
-            const delay = [10000, 20000, 30000, 40000, 60000][safetyWaits++];
-            if (delay === undefined) throw error;
+            const planned = [10000, 20000, 30000, 40000, 60000][safetyWaits++];
+            const minimum = (error as AdapterError & { safetyDelayMs?: number }).safetyDelayMs ?? 0;
+            if (planned === undefined || minimum > 60000) throw error;
+            const delay = Math.max(planned, Number.isFinite(minimum) ? minimum : 0);
             d.notify?.(`Base settlement pending; retrying unlock in ${delay / 1000} seconds.`);
             await wait(delay);
             continue;
           }
           const inFlight = /in flight/i.test(error instanceof Error ? error.message : '');
-          const limited = /relayer rate limited/i.test(error instanceof Error ? error.message : '');
           const timeout = /timeout|timed out/i.test(error instanceof Error ? error.message : '');
           if (
-            (!limited && !['unlock', 'reopen', 'claim_key'].includes(method)) ||
-            (!inFlight && !limited && !timeout) ||
-            (inFlight || limited ? pending++ >= 36 : timeouts++ >= 2)
+            !['unlock', 'reopen', 'claim_key'].includes(method) ||
+            (!inFlight && !timeout) ||
+            (inFlight ? pending++ >= 36 : timeouts++ >= 2)
           )
             throw error;
           if (!o.json) d.notify?.('Key release pending; retrying the saved request.');
-          await wait(
-            limited
-              ? (error as Error & { retryAfterMs: number }).retryAfterMs
-              : inFlight
-                ? 5000
-                : 1000 * 2 ** (timeouts - 1),
-          );
+          await wait(inFlight ? 5000 : 1000 * 2 ** (timeouts - 1));
         }
       }
     };
@@ -613,6 +631,12 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     }
     if (o.command === 'buy') {
       if (!o.target) throw usage();
+      if (d.agent && !/^https?:/.test(o.target))
+        return fail(
+          'resource_not_allowed',
+          'Agent purchases require an allowlisted URL, never an offer file.',
+          2,
+        );
       const cap = o.maxPrice ?? c.maxPrice;
       if (!cap)
         return fail(
@@ -671,6 +695,32 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       const price = route === 'base' ? f.terms.base?.price : f.terms.near.price;
       if (!price || BigInt(price) > maxPrice)
         return fail('price_above_max', 'The registered price exceeds maxPrice.');
+      if (route === 'base' && c.relayer) {
+        const reply = await response(new URL('/v1/capabilities', c.relayer).href, fetcher);
+        const cap = (await reply.json()) as {
+          contract?: unknown;
+          minPrice?: unknown;
+          disabled?: unknown;
+          methods?: unknown;
+        };
+        if (
+          !reply.ok ||
+          cap.contract !== c.contractId ||
+          typeof cap.minPrice !== 'string' ||
+          !/^[0-9]+$/.test(cap.minPrice) ||
+          !Array.isArray(cap.methods) ||
+          !cap.methods.includes('unlock')
+        )
+          return fail(
+            'relayer_unavailable',
+            'Relayer sponsorship policy is unavailable; check configuration before paying.',
+          );
+        if (cap.disabled === true || BigInt(price) < BigInt(cap.minPrice))
+          return fail(
+            'not_sponsored',
+            'The relayer does not sponsor this Base price; do not pay through this route.',
+          );
+      }
       const paymentTerms = {
         file: found.fileId,
         resource: found.url,
@@ -925,7 +975,8 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
       );
     const agent = await agentPolicy(o, env, d.agent);
     if (o.command === 'init') return initAgent(o, env, d.keychain ?? osKeychain);
-    const c = await loadConfig(o, env, o.command === 'login');
+    const c = await loadConfig(o, env, o.command === 'login', d.agent);
+    if (agent || c.agent) o = await confinePaths(o, c.workDir as string);
     if (c.signer) assertSignerInput(o);
     if ((agent || c.agent) && o.command === 'login')
       throw new AdapterError('agent_policy', 'Agent mode refuses interactive login.', 2);

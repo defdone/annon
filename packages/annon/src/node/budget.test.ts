@@ -47,3 +47,25 @@ it('keeps daily/hourly reservations across restarts, concurrency and UTC rollove
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+it('reconciles a retained burn once under contention and never refunds a later UTC window', async () => {
+  const { reconcileSpend } = await import('./budget.js');
+  const store = memoryStore<BudgetRecord>();
+  const at = 0;
+  const release = await reserveSpend(
+    store,
+    'keeper',
+    100n,
+    { daily: 200n, hourly: 200n },
+    at,
+    'tx-1',
+  );
+  await Promise.all([
+    release(20n),
+    reconcileSpend(store, 'keeper', { id: 'tx-1', at, amount: '100' }, 20n),
+  ]);
+  expect(await store.load('keeper')).toMatchObject({ daily: '20', hourly: '20' });
+  await reserveSpend(store, 'keeper', 50n, { daily: 200n, hourly: 200n }, 86400000, 'tx-2');
+  await reconcileSpend(store, 'keeper', { id: 'tx-1', at, amount: '100' }, 20n);
+  expect(await store.load('keeper')).toMatchObject({ daily: '50', hourly: '50' });
+});

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -103,9 +103,20 @@ it.each([
     json: true,
     agent: false,
   },
+  ...[25, 3600].map((retryAfter) => ({
+    command: 'open' as const,
+    transport: 'relayer' as const,
+    refusals: 2,
+    code: 'payment_not_safe' as const,
+    json: false,
+    agent: false,
+    retryAfter,
+  })),
 ] as const)(
   'resumes paid Base $command via $transport with $refusals $code replies (JSON $json, agent $agent)',
-  async ({ command, transport, refusals, code, json, agent }) => {
+  async (testCase) => {
+    const { command, transport, refusals, code, json, agent } = testCase;
+    const minimumWait = ('retryAfter' in testCase ? testCase.retryAfter : 5) * 1000;
     const dir = await mkdtemp(join(tmpdir(), 'annon-base-host-'));
     const signer = privateKeyToAccount(`0x${'42'.repeat(32)}`);
     const identity = { kind: 'evm' as const, id: signer.address.toLowerCase() };
@@ -196,7 +207,10 @@ it.each([
         if (relayCalls <= refusals)
           return code === 'in_flight'
             ? Response.json({ pending: true }, { status: 202 })
-            : Response.json({ error: code, message: 'PRIVATE_UPSTREAM' }, { status: 425 });
+            : Response.json(
+                { error: code, message: 'PRIVATE_UPSTREAM' },
+                { status: 425, headers: { 'Retry-After': String(minimumWait / 1000) } },
+              );
         accepted = true;
         order.push('unlock');
         return Response.json({ txHash: 'stub-transaction', signer: 'stub.near' });
@@ -261,6 +275,20 @@ it.each([
     });
     const wait = vi.fn(async (_ms: number) => {});
     const notify = vi.fn();
+    if (agent)
+      await writeFile(
+        join(dir, 'none'),
+        JSON.stringify({
+          maxPrice: '1',
+          stateDir: dir,
+          workDir: dir,
+          contractId: terms.contract,
+          nearRpc: host.nearRpc,
+          baseRpc: host.baseRpc,
+          relayer: 'https://relay.example',
+          trustContract: true,
+        }),
+      );
     const adapter = createAdapter(
       {
         ANNON_BACKUP_SECRET: hex(backupSecret).slice(2),
@@ -294,19 +322,25 @@ it.each([
       const input = {
         command,
         json,
-        relayer: 'https://relay.example',
+        ...(agent
+          ? {}
+          : {
+              relayer: 'https://relay.example',
+              contractId: terms.contract,
+              nearRpc: host.nearRpc,
+              baseRpc: host.baseRpc,
+              trustContract: true,
+            }),
         target: id,
-        contractId: terms.contract,
-        nearRpc: host.nearRpc,
-        baseRpc: host.baseRpc,
         ...(agent ? {} : { stateDir: dir }),
         config: join(dir, 'none'),
-        trustContract: true,
         url: host.url,
         output: join(dir, 'out'),
       };
       const immediate =
-        code === 'payment_not_safe' && refusals > 0 && (command !== 'open' || json || agent);
+        code === 'payment_not_safe' &&
+        refusals > 0 &&
+        (command !== 'open' || json || agent || minimumWait > 60000);
       if (immediate || refusals === 100) {
         const printed: string[] = [];
         const exit = await runCli(
@@ -342,7 +376,11 @@ it.each([
         route: 'base',
       });
       expect(wait.mock.calls).toEqual(
-        refusals === 0 ? [] : code === 'in_flight' ? [[5000], [5000]] : [[10000], [20000]],
+        refusals === 0
+          ? []
+          : code === 'in_flight'
+            ? [[5000], [5000]]
+            : [[Math.max(10000, minimumWait)], [Math.max(20000, minimumWait)]],
       );
       expect(notify).toHaveBeenCalledTimes(json ? 0 : refusals);
       expect(accepted).toBe(true);
@@ -373,3 +411,62 @@ describe('retryAfterMs', () => {
     expect(retryAfterMs('Wed, 11 Nov 2026 13:00:00 GMT', now)).toBeNull();
   });
 });
+
+it.each([429, 503])(
+  'bounds short Retry-After retries and returns a clear code for HTTP %s',
+  async (status) => {
+    const dir = await mkdtemp(join(tmpdir(), 'annon-admission-'));
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      Response.json({ error: 'private' }, { status, headers: { 'Retry-After': '1' } }),
+    );
+    const wait = vi.fn(async (_ms: number) => {});
+    const adapter = createAdapter(
+      { ANNON_BACKUP_SECRET: 'ab'.repeat(32) },
+      {
+        fetch: fetcher,
+        wait,
+        wallet: async () => ({ identity: initialTerms.seller, authorize: vi.fn() }),
+        sdk(options) {
+          const sdk = new Annon(options);
+          vi.spyOn(sdk, 'stop').mockImplementation(async () => {
+            await options.send?.('claim_key', { purchase_id: initialTerms.file_id });
+          });
+          return sdk;
+        },
+      },
+    );
+    const input = {
+      command: 'stop' as const,
+      target: initialTerms.file_id,
+      contractId: initialTerms.contract,
+      nearRpc: 'https://near.example',
+      relayer: 'https://relay.example',
+      stateDir: dir,
+      config: join(dir, 'none'),
+      trustContract: true,
+    };
+    const code =
+      status === 425
+        ? 'payment_not_safe'
+        : status === 429
+          ? 'relayer_rate_limited'
+          : 'relayer_unavailable';
+    try {
+      await expect(adapter(input)).rejects.toMatchObject({ code });
+      expect(fetcher).toHaveBeenCalledTimes(4);
+      expect(wait).toHaveBeenCalledTimes(3);
+      expect(wait).toHaveBeenCalledWith(1000);
+      fetcher
+        .mockClear()
+        .mockImplementation(async () =>
+          Response.json({}, { status, headers: { 'Retry-After': '3600' } }),
+        );
+      wait.mockClear();
+      await expect(adapter(input)).rejects.toMatchObject({ code });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(wait).not.toHaveBeenCalled();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);

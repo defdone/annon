@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -133,6 +133,11 @@ async function harness(
   let options: AnnonOptions;
   let saved: PurchaseRecord | undefined;
   const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+    if (String(url) === 'https://files.example/file' && !init?.headers)
+      return Response.json(offer, {
+        status: 402,
+        headers: { 'PAYMENT-REQUIRED': Buffer.from(JSON.stringify(offer)).toString('base64') },
+      });
     if (String(url).endsWith('/header')) return new Response(header);
     if (String(url).endsWith('/quote'))
       return Response.json({
@@ -283,7 +288,7 @@ async function harness(
       return sdk;
     },
   });
-  const defaults = {
+  const deployment = {
     contractId: terms.contract,
     nearRpc: 'https://rpc.example',
     baseRpc: 'https://base.example',
@@ -292,6 +297,20 @@ async function harness(
     wallet: 'evm' as const,
     url: 'https://files.example/file',
   };
+  await writeFile(
+    env.ANNON_CONFIG,
+    JSON.stringify({
+      ...deployment,
+      dailyBudget: '10',
+      maxPrice: '0.2',
+      stateDir: dir,
+      workDir: dir,
+      allowedResources: [env.ANNON_ALLOWED_RESOURCES],
+    }),
+  );
+  const defaults: Partial<Input> & { config: string; url: string; wallet: 'evm' } = agent
+    ? { config: env.ANNON_CONFIG, wallet: 'evm' as const, url: deployment.url }
+    : deployment;
   return {
     dir,
     adapter,
@@ -387,7 +406,7 @@ it.each(['near', 'base', '1click'] as const)(
           return JSON.parse(must(printed[0])).result as Record<string, unknown>;
         };
         const bought = await call('buy', {
-          target: h.offerFile,
+          target: h.defaults.url,
           url: h.defaults.url,
           route,
           ...(route === '1click' ? { origin: 'base-usdc' } : {}),
@@ -461,7 +480,7 @@ it.each([false, true])(
     const bought = await h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click',
       origin: 'base-usdc',
     });
@@ -515,7 +534,7 @@ it.each([
   const bought = await h.adapter({
     ...h.defaults,
     command: 'buy',
-    target: h.offerFile,
+    target: h.defaults.url,
     route: 'base',
   });
   if (failure === 'wrong secret') h.env.ANNON_BACKUP_SECRET = 'cd'.repeat(32);
@@ -575,7 +594,7 @@ it.each(['wrong secret', 'missing record', 'corrupt record'])(
     const bought = await h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: 'base',
     });
     // The replacement secret protects a fresh recovery grant; the original purchase secret is unavailable.
@@ -630,7 +649,11 @@ it.each(['wrong secret', 'missing record', 'corrupt record'])(
       file: h.localFile,
       output,
     });
-    expect(result).toMatchObject({ bytes: h.data.length, purchaseId: bought.purchaseId, output });
+    expect(result).toMatchObject({
+      bytes: h.data.length,
+      purchaseId: bought.purchaseId,
+      output: await realpath(output),
+    });
     expect(result).not.toHaveProperty('payment');
     expect(await readFile(output)).toEqual(Buffer.from(h.data));
     expect(lookedUpAfterWrite).toBe(true);
@@ -642,7 +665,7 @@ it('drops invalid encrypted source metadata in status and open without losing th
   const bought = await h.adapter({
     ...h.defaults,
     command: 'buy',
-    target: h.offerFile,
+    target: h.defaults.url,
     route: '1click',
     origin: 'base-usdc',
   });
@@ -689,9 +712,9 @@ it.each(['near', 'base', '1click'] as const)(
               throw new Error('private backup failure');
             };
         });
-        await writeFile(h.defaults.config, JSON.stringify({ dailyBudget: '0.2' }));
+        await patchConfig(h.defaults.config, { dailyBudget: '0.2' });
         const args = {
-          target: h.offerFile,
+          target: h.defaults.url,
           url: h.defaults.url,
           route,
           ...(route === '1click' ? { origin: 'base-usdc' } : {}),
@@ -710,7 +733,7 @@ it.each(['near', 'base', '1click'] as const)(
             const printed: string[] = [];
             expect(
               await runCli(
-                ['buy', h.offerFile, '--json'],
+                ['buy', h.defaults.url, '--json'],
                 (o) => h.adapter({ ...h.defaults, ...o, ...args }),
                 (s) => printed.push(s),
               ),
@@ -781,7 +804,7 @@ it.each(['refundTo', 'fromChain', 'fromAsset'] as const)(
       h.adapter({
         ...h.defaults,
         command: 'buy',
-        target: h.offerFile,
+        target: h.defaults.url,
         [field]: 'attacker',
       }),
     ).rejects.toMatchObject({ code: 'origin_not_allowed' });
@@ -852,7 +875,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
         Buffer.from(await readFile(h.localFile)),
       );
       const bought = await call('annon_buy', {
-        target: h.offerFile,
+        target: h.defaults.url,
         route: '1click',
         origin: 'base-usdc',
       });
@@ -908,7 +931,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     try {
       const result = await connection.client.callTool({
         name: 'annon_buy',
-        arguments: { target: h.offerFile, url: h.defaults.url, route: 'base' },
+        arguments: { target: h.defaults.url, url: h.defaults.url, route: 'base' },
       });
       expect(result.isError).not.toBe(true);
       expect(JSON.stringify(result)).not.toContain('SIGNED_PAYMENT_PAYLOAD');
@@ -918,7 +941,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       const invalid = await connection.client.callTool({
         name: 'annon_buy',
         arguments: {
-          target: h.offerFile,
+          target: h.defaults.url,
           route: 'invalid',
           privateKey: 'SECRET_VALUE',
         },
@@ -946,7 +969,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
           try {
             const response = await connection.client.callTool({
               name: 'annon_buy',
-              arguments: { target: h.offerFile, url: h.defaults.url, route: 'base' },
+              arguments: { target: h.defaults.url, url: h.defaults.url, route: 'base' },
             });
             expect(response.isError).toBe(true);
             result = response.structuredContent;
@@ -956,7 +979,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
         } else {
           const output: string[] = [];
           const exit = await runCli(
-            ['buy', h.offerFile, '--route', 'base', '--json'],
+            ['buy', h.defaults.url, '--route', 'base', '--json'],
             (o) => h.adapter({ ...h.defaults, ...o }),
             (s) => output.push(s),
           );
@@ -977,16 +1000,15 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     const bought = await h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: 'base',
     });
     h.fetcher.mockClear();
     h.fetcher.mockImplementation(async () =>
       Response.json({ error: 'payment_not_safe', message: 'PRIVATE_UPSTREAM' }, { status: 425 }),
     );
-    const connection = await connect((o) =>
-      h.adapter({ ...h.defaults, relayer: 'https://relay.example', ...o }),
-    );
+    await patchConfig(h.defaults.config, { relayer: 'https://relay.example' });
+    const connection = await connect((o) => h.adapter({ ...h.defaults, ...o }));
     try {
       const result = await connection.client.callTool({
         name: 'annon_open',
@@ -1083,13 +1105,13 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       await connection.close();
     }
     const h = await harness();
+    await patchConfig(h.defaults.config, { trustContract: false });
     await expect(
       h.adapter({
         ...h.defaults,
-        trustContract: false,
         json: true,
         command: 'buy',
-        target: h.offerFile,
+        target: h.defaults.url,
       }),
     ).rejects.toMatchObject({ code: 'trust_required' });
     expect(h.calls).toEqual([]);
@@ -1150,7 +1172,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
   });
   it('resends the saved Base authorization with a grant-proved download after a lost reply', async () => {
     const h = await harness();
-    await h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile, route: 'base' });
+    await h.adapter({ ...h.defaults, command: 'buy', target: h.defaults.url, route: 'base' });
     const payload = Buffer.from(
       JSON.stringify({ resource: { url: 'https://files.example/file' } }),
     ).toString('base64');
@@ -1189,7 +1211,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     const h = await harness();
     const out = vi.fn();
     const exit = await runCli(
-      ['buy', h.offerFile, '--route', 'base', '--wallet', 'evm', '--json'],
+      ['buy', h.defaults.url, '--route', 'base', '--wallet', 'evm', '--json'],
       (o) => h.adapter({ ...h.defaults, ...o }),
       out,
     );
@@ -1242,6 +1264,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
   });
   it('requires a human-configured price cap and independently checks an offer-file resource URL', async () => {
     const h = await harness();
+    await patchConfig(h.defaults.config, { maxPrice: undefined });
     const noCap = createAdapter(
       {
         ANNON_CONFIG: h.env.ANNON_CONFIG,
@@ -1251,8 +1274,9 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       { wallet: vi.fn() },
     );
     await expect(
-      noCap({ ...h.defaults, command: 'buy', target: h.offerFile }),
+      noCap({ ...h.defaults, command: 'buy', target: h.defaults.url }),
     ).rejects.toMatchObject({ code: 'max_price_required' });
+    await patchConfig(h.defaults.config, { maxPrice: '0.2' });
     await expect(
       h.adapter({
         ...h.defaults,
@@ -1266,8 +1290,8 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
   it('rejects a larger CLI cap before any wallet or payment work', async () => {
     const h = await harness();
     await expect(
-      h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile, maxPrice: '9' }),
-    ).rejects.toMatchObject({ code: 'price_above_max' });
+      h.adapter({ ...h.defaults, command: 'buy', target: h.defaults.url, maxPrice: '9' }),
+    ).rejects.toMatchObject({ code: 'agent_policy' });
     expect(h.calls).toEqual([]);
   });
   it('uses only configured origin names and the wallet refund address', async () => {
@@ -1275,7 +1299,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     await h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click',
       origin: 'base-usdc',
     });
@@ -1287,7 +1311,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       h.adapter({
         ...h.defaults,
         command: 'buy',
-        target: h.offerFile,
+        target: h.defaults.url,
         route: '1click',
         origin: 'attacker',
       }),
@@ -1312,9 +1336,9 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
 
   it('requires a human-allowed URL for an MCP offer file even when agent URL and offer agree', async () => {
     const h = await harness();
-    h.env.ANNON_ALLOWED_RESOURCES = 'https://human.example/file';
+    await patchConfig(h.defaults.config, { allowedResources: ['https://human.example/file'] });
     await expect(
-      h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile }),
+      h.adapter({ ...h.defaults, command: 'buy', target: h.defaults.url }),
     ).rejects.toMatchObject({ code: 'resource_not_allowed' });
     expect(h.calls).toEqual([]);
   });
@@ -1379,11 +1403,11 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
 
 it('charges the agent daily budget before buy and preserves it across adapter restarts', async () => {
   const h = await harness();
-  await writeFile(h.defaults.config, JSON.stringify({ dailyBudget: '0.3' }));
+  await patchConfig(h.defaults.config, { dailyBudget: '0.3' });
   const input = {
     ...h.defaults,
     command: 'buy' as const,
-    target: h.offerFile,
+    target: h.defaults.url,
     route: '1click' as const,
     origin: 'base-usdc',
   };
@@ -1394,12 +1418,12 @@ it('charges the agent daily budget before buy and preserves it across adapter re
 
 it('refuses an agent payment without a persisted budget before invoking buy', async () => {
   const h = await harness();
-  await writeFile(h.defaults.config, '{}');
+  await patchConfig(h.defaults.config, { dailyBudget: undefined });
   await expect(
     h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click',
       origin: 'base-usdc',
     }),
@@ -1411,7 +1435,7 @@ it('shows exact human payment terms and refuses payment until confirmed', async 
   const prompt = vi.fn(async (_message: string) => false);
   const h = await harness(false, prompt);
   await expect(
-    h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile, route: 'base' }),
+    h.adapter({ ...h.defaults, command: 'buy', target: h.defaults.url, route: 'base' }),
   ).rejects.toMatchObject({ code: 'confirmation_required' });
   expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(0);
   expect(prompt).toHaveBeenCalledTimes(1);
@@ -1434,7 +1458,7 @@ it('human JSON mode never prompts or silently pays using a local key', async () 
   const prompt = vi.fn(async (_message: string) => true);
   const h = await harness(false, prompt);
   await expect(
-    h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile, route: 'base', json: true }),
+    h.adapter({ ...h.defaults, command: 'buy', target: h.defaults.url, route: 'base', json: true }),
   ).rejects.toMatchObject({ code: 'confirmation_required' });
   expect(prompt).not.toHaveBeenCalled();
   expect(h.notify).toHaveBeenCalledTimes(1);
@@ -1460,7 +1484,7 @@ it('returns a quote refusal through both CLI and MCP with a decimal minimum and 
   const out = vi.fn();
   expect(
     await runCli(
-      ['buy', h.offerFile, '--route', '1click', '--origin', 'base-usdc', '--json'],
+      ['buy', h.defaults.url, '--route', '1click', '--origin', 'base-usdc', '--json'],
       execute,
       out,
     ),
@@ -1475,7 +1499,7 @@ it('returns a quote refusal through both CLI and MCP with a decimal minimum and 
   try {
     const result = await c.client.callTool({
       name: 'annon_buy',
-      arguments: { target: h.offerFile, route: '1click', origin: 'base-usdc' },
+      arguments: { target: h.defaults.url, route: '1click', origin: 'base-usdc' },
     });
     expect(result.structuredContent).toEqual({ ok: false, error: expected });
     expect(JSON.stringify([result, out.mock.calls])).not.toContain('SECRET_VALUE');
@@ -1494,7 +1518,7 @@ it.each([false, true])(
       h.adapter({
         ...h.defaults,
         command: 'buy',
-        target: h.offerFile,
+        target: h.defaults.url,
         route: '1click',
         origin: 'base-usdc',
         json: true,
@@ -1512,7 +1536,7 @@ it.each([400, 500, 429, 0])(
   'refunds the agent budget before any deposit instructions are returned (status=%s)',
   async (status) => {
     const h = await harness();
-    await writeFile(h.defaults.config, JSON.stringify({ dailyBudget: '0.2' }));
+    await patchConfig(h.defaults.config, { dailyBudget: '0.2' });
     const original = must(h.fetcher.getMockImplementation());
     h.fetcher.mockImplementation(async (url, init) => {
       if (!String(url).endsWith('/quote')) return original(url, init);
@@ -1525,7 +1549,7 @@ it.each([400, 500, 429, 0])(
     const input = {
       ...h.defaults,
       command: 'buy' as const,
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click' as const,
       origin: 'base-usdc',
     };
@@ -1549,11 +1573,12 @@ it.each(['near:testnet', 'near:sandbox'])(
         h.listing.terms.network = network;
         h.listing.terms.near.token = h.contractConfig.nearUsdc;
         must(h.listing.terms.base).usdc = h.contractConfig.usdc;
+        if (agent) await patchConfig(h.defaults.config, { network });
         const input = {
           ...h.defaults,
-          network,
+          ...(agent ? {} : { network }),
           command: 'buy' as const,
-          target: h.offerFile,
+          target: h.defaults.url,
           route,
           ...(route === '1click' ? { origin: 'base-usdc' } : {}),
         };
@@ -1584,7 +1609,7 @@ it.each(['near', 'base'] as const)(
       h.adapter({
         ...h.defaults,
         command: 'buy',
-        target: h.offerFile,
+        target: h.defaults.url,
         route: route === 'near' ? '1click' : 'base',
         origin: 'base-usdc',
       }),
@@ -1612,7 +1637,7 @@ it.each(['invalid', '0'])(
       h.adapter({
         ...h.defaults,
         command: 'buy',
-        target: h.offerFile,
+        target: h.defaults.url,
         route: '1click',
         origin: 'base-usdc',
       }),
@@ -1656,7 +1681,7 @@ it.each(['solana', 'sol'])(
     const result = await h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click',
       fromChain: chain,
     });
@@ -1718,7 +1743,7 @@ it.each([
   await h.adapter({
     ...h.defaults,
     command: 'buy',
-    target: h.offerFile,
+    target: h.defaults.url,
     route: '1click',
     fromChain: chain,
   });
@@ -1743,7 +1768,7 @@ it.each(['missing', 'ambiguous'])(
       h.adapter({
         ...h.defaults,
         command: 'buy',
-        target: h.offerFile,
+        target: h.defaults.url,
         route: '1click',
         fromChain: 'solana',
         refundTo: 'test-refund',
@@ -1771,7 +1796,7 @@ it.each([true, false])(
     const operation = h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click',
       fromChain: 'solana',
       refundTo: 'test-refund',
@@ -1795,7 +1820,7 @@ it('keeps explicit unknown chain assets working and includes their quoted source
   const output: string[] = [];
   expect(
     await runCli(
-      ['buy', h.offerFile, '--route', '1click', '--origin', 'custom', '--json'],
+      ['buy', h.defaults.url, '--route', '1click', '--origin', 'custom', '--json'],
       (o) => h.adapter({ ...h.defaults, ...o }),
       (text) => output.push(text),
     ),
@@ -1818,7 +1843,7 @@ it('keeps human JSON 1Click mode non-interactive and does not create a quote wit
     h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click',
       fromChain: 'solana',
       refundTo: 'test-refund',
@@ -1842,7 +1867,7 @@ it('passes the exact quote into browser approval terms without a terminal prompt
   const result = await h.adapter({
     ...h.defaults,
     command: 'buy',
-    target: h.offerFile,
+    target: h.defaults.url,
     route: '1click',
     fromChain: 'solana',
     refundTo: 'test-refund',
@@ -1868,7 +1893,7 @@ it.each(['\u001b[2J', '\n', '\r', '\t', '\0', '\u202e', '/', ' ', 'x'.repeat(129
     const result = await h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click',
       fromChain: 'solana',
       refundTo: 'test-refund',
@@ -1894,7 +1919,7 @@ it.each([
     h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click',
       fromChain: 'solana',
       refundTo: 'test-refund',
@@ -1918,7 +1943,7 @@ it('preserves Sui separators in safe token identifiers', async () => {
   const result = await h.adapter({
     ...h.defaults,
     command: 'buy',
-    target: h.offerFile,
+    target: h.defaults.url,
     route: '1click',
     fromChain: 'sui',
     refundTo: 'test-refund',
@@ -1937,7 +1962,7 @@ it.each(['aurora', 'sui', 'hypercore', 'aptos'])(
       h.adapter({
         ...h.defaults,
         command: 'buy',
-        target: h.offerFile,
+        target: h.defaults.url,
         route: '1click',
         fromChain: chain,
         fromAsset: 'nep141:custom',
@@ -1946,7 +1971,7 @@ it.each(['aurora', 'sui', 'hypercore', 'aptos'])(
     const result = await h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click',
       fromChain: chain,
       fromAsset: 'nep141:custom',
@@ -1962,7 +1987,7 @@ it('refuses a human purchase without a prompt before creating a quote or purchas
     h.adapter({
       ...h.defaults,
       command: 'buy',
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click',
       fromChain: 'solana',
       refundTo: 'test-refund',
@@ -1993,7 +2018,7 @@ it.each(['proof', 'cutoff', 'storage', 'review'])(
         throw new Error('unexpected external read');
       }),
     );
-    await writeFile(h.defaults.config, JSON.stringify({ dailyBudget: '0.2' }));
+    await patchConfig(h.defaults.config, { dailyBudget: '0.2' });
     const fetcher = must(h.fetcher.getMockImplementation());
     h.fetcher.mockImplementation(async (url, init) => {
       const response = await fetcher(url, init);
@@ -2011,7 +2036,7 @@ it.each(['proof', 'cutoff', 'storage', 'review'])(
     const input = {
       ...h.defaults,
       command: 'buy' as const,
-      target: h.offerFile,
+      target: h.defaults.url,
       route: '1click' as const,
       origin: 'base-usdc',
     };
@@ -2019,7 +2044,7 @@ it.each(['proof', 'cutoff', 'storage', 'review'])(
     try {
       expect(
         await runCli(
-          ['buy', h.offerFile, '--route', '1click', '--origin', 'base-usdc', '--json'],
+          ['buy', h.defaults.url, '--route', '1click', '--origin', 'base-usdc', '--json'],
           () => h.adapter(input),
           (text) => output.push(text),
         ),
@@ -2060,7 +2085,7 @@ it('returns quote_expired through CLI and MCP with a fixed actionable message', 
   try {
     const result = await connection.client.callTool({
       name: 'annon_buy',
-      arguments: { target: 'offer.json' },
+      arguments: { target: 'https://files.example/file' },
     });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toEqual(expected);
@@ -2068,3 +2093,157 @@ it('returns quote_expired through CLI and MCP with a fixed actionable message', 
     await connection.close();
   }
 });
+
+async function patchConfig(path: string, patch: Record<string, unknown>) {
+  await writeFile(path, JSON.stringify({ ...JSON.parse(await readFile(path, 'utf8')), ...patch }));
+}
+
+it('refuses an agent offer file even when its resource URL is allowlisted', async () => {
+  const h = await harness();
+  await expect(
+    h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile, url: h.defaults.url }),
+  ).rejects.toMatchObject({ code: 'resource_not_allowed' });
+  expect(h.fetcher).not.toHaveBeenCalled();
+  expect(h.calls).toEqual([]);
+  const execute = vi.fn(async () => ({}));
+  const connection = await connect(execute);
+  try {
+    const result = await connection.client.callTool({
+      name: 'annon_buy',
+      arguments: { target: h.offerFile, url: h.defaults.url },
+    });
+    expect(result.isError).toBe(true);
+    expect(execute).not.toHaveBeenCalled();
+  } finally {
+    await connection.close();
+  }
+});
+it('rejects an offer header on a different origin before fetching it', async () => {
+  const h = await harness();
+  const offer = JSON.parse(await readFile(h.offerFile, 'utf8'));
+  offer.extensions.annon.info.header = 'https://other.example/header';
+  h.fetcher.mockImplementation(async () =>
+    Response.json(offer, {
+      status: 402,
+      headers: { 'PAYMENT-REQUIRED': Buffer.from(JSON.stringify(offer)).toString('base64') },
+    }),
+  );
+  await expect(
+    h.adapter({ ...h.defaults, command: 'buy', target: h.defaults.url }),
+  ).rejects.toThrow('header origin mismatch');
+  expect(h.fetcher).toHaveBeenCalledTimes(1);
+  expect(h.calls).toEqual([]);
+});
+
+it.each([
+  'sell.target',
+  'sell.output',
+  'open.file',
+  'open.output',
+  'verify.target',
+  'open.target',
+  'open.purchase',
+] as const)('confines %s against absolute, traversal and symlink escapes', async (field) => {
+  const h = await harness();
+  const outside = await mkdtemp(join(tmpdir(), 'annon-outside-'));
+  directories.push(outside);
+  await writeFile(join(outside, 'file.txt'), 'outside');
+  await symlink(outside, join(h.dir, 'escape'));
+  await symlink(join(outside, 'file.txt'), join(h.dir, 'escape-file'));
+  await symlink(join(outside, 'missing.txt'), join(h.dir, 'dangling'));
+  const [command, option] = field.split('.') as [
+    'sell' | 'open' | 'verify',
+    'target' | 'file' | 'output' | 'purchase',
+  ];
+  for (const bad of [
+    join(outside, option === 'output' ? 'new.txt' : 'file.txt'),
+    `../${h.dir.split('/').at(-1)}/file.txt`,
+    `escape/${option === 'output' ? 'new.txt' : 'file.txt'}`,
+    'escape-file',
+    'dangling',
+  ]) {
+    const input = {
+      ...h.defaults,
+      command,
+      target: command === 'sell' ? h.plaintext : terms.file_id,
+      output: join(h.dir, 'out.txt'),
+      ...(command === 'sell'
+        ? { price: '0.2', split: 'near:buyer.testnet:10000' }
+        : { file: h.localFile }),
+      [option]: bad,
+    };
+    await expect(h.adapter(input)).rejects.toMatchObject({ code: 'path_not_allowed' });
+  }
+  expect(h.calls).toEqual([]);
+});
+it('resolves relative sell paths in the operator workDir, including the default output', async () => {
+  const h = await harness();
+  await mkdir(join(h.dir, 'nested'));
+  await writeFile(join(h.dir, 'nested', 'input.txt'), 'inside');
+  const result = await h.adapter({
+    ...h.defaults,
+    command: 'sell',
+    target: 'nested/input.txt',
+    price: '0.2',
+    split: 'near:buyer.testnet:10000',
+  });
+  expect(await readFile(String(result.file))).toEqual(Buffer.from(h.file));
+});
+it('checks the relayer sponsorship floor before a Base payment or budget reservation', async () => {
+  const h = await harness();
+  await patchConfig(h.defaults.config, { relayer: 'https://relay.example' });
+  const original = must(h.fetcher.getMockImplementation());
+  h.fetcher.mockImplementation(async (url, init) =>
+    String(url).endsWith('/v1/capabilities')
+      ? Response.json({
+          contract: terms.contract,
+          minPrice: '200001',
+          disabled: false,
+          methods: ['unlock'],
+        })
+      : original(url, init),
+  );
+  await expect(
+    h.adapter({ ...h.defaults, command: 'buy', target: h.defaults.url, route: 'base' }),
+  ).rejects.toMatchObject({ code: 'not_sponsored' });
+  expect(h.calls).toEqual([]);
+  expect(await fileStore<BudgetRecord>(join(h.dir, 'budgets')).load('agent:USDC')).toBeNull();
+});
+
+it('resolves a local verify target from workDir and leaves URL targets remote', async () => {
+  const h = await harness();
+  expect(await h.adapter({ ...h.defaults, command: 'verify', target: 'file.pay2' })).toMatchObject({
+    verified: true,
+  });
+  h.fetcher.mockImplementation(async (url) => {
+    expect(String(url)).toBe(h.defaults.url);
+    return new Response(h.header);
+  });
+  expect(
+    await h.adapter({ ...h.defaults, command: 'verify', target: h.defaults.url }),
+  ).toMatchObject({ verified: true });
+});
+it.each(['backup', 'pay2-id', 'pay2-backup'] as const)(
+  'opens relative %s inputs from workDir',
+  async (kind) => {
+    const h = await harness();
+    const bought = await h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.defaults.url,
+      route: 'base',
+    });
+    await writeFile(join(h.dir, 'relative-backup.json'), await readFile(String(bought.backup)));
+    const out = await h.adapter({
+      ...h.defaults,
+      command: 'open',
+      target: kind === 'backup' ? 'relative-backup.json' : 'file.pay2',
+      ...(kind === 'backup'
+        ? { file: 'file.pay2' }
+        : { purchase: kind === 'pay2-id' ? String(bought.purchaseId) : 'relative-backup.json' }),
+      output: 'opened.txt',
+    });
+    expect(out.bytes).toBe(h.data.length);
+    expect(await readFile(join(h.dir, 'opened.txt'))).toEqual(Buffer.from(h.data));
+  },
+);

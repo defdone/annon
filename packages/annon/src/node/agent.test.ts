@@ -205,6 +205,9 @@ it('pins agent config and ledger, rejects init/login and disables prompts even w
       config,
       JSON.stringify({
         agent: true,
+        maxPrice: '1',
+        stateDir,
+        workDir: stateDir,
         dailyBudget: '1',
         contractId: 'annon.near',
         nearRpc: 'https://rpc.example',

@@ -811,3 +811,50 @@ it('does not consume a half-open breaker probe while balance is low', async () =
   await keep(o);
   expect(created).toHaveBeenCalledTimes(1);
 });
+
+it('skips delivery reads during snapshot job and phase backoff and caches reserve reads for a minute', async () => {
+  const o = opts();
+  const id = 'near:mainnet|annon.near|delivery:0|fund';
+  await o.store.compareAndSet(id, null, { id, revision: 0, nextAt: 200000 });
+  await keep(o);
+  await keep({ ...o });
+  expect(queries.filter((q) => q.params.method_name === 'get_delivery')).toHaveLength(0);
+  expect(queries.filter((q) => q.params.method_name === 'receiver_reserve')).toHaveLength(1);
+  o.now = () => 160000;
+  await keep(o);
+  expect(queries.filter((q) => q.params.method_name === 'receiver_reserve')).toHaveLength(2);
+  expect(created).not.toHaveBeenCalled();
+});
+it('reconciles a FINAL reservation to tokens burnt once across restarts', async () => {
+  const o = opts();
+  const scope = 'near:mainnet|keeper.near|keeper-spend';
+  await keep(o);
+  const reserved = BigInt((await o.budgetStore.load(scope))?.daily ?? '0');
+  expect(reserved).toBeGreaterThan(0n);
+  await keep({ ...o });
+  expect(BigInt((await o.budgetStore.load(scope))?.daily ?? '0')).toBe(reserved);
+  final = true;
+  all = [];
+  await keep({ ...o });
+  const actual =
+    BigInt(finalizedSettle.transaction_outcome.outcome.tokens_burnt) +
+    finalizedSettle.receipts_outcome.reduce((sum, r) => sum + BigInt(r.outcome.tokens_burnt), 0n);
+  expect(BigInt((await o.budgetStore.load(scope))?.daily ?? '0')).toBe(actual);
+  await keep({ ...o });
+  expect(BigInt((await o.budgetStore.load(scope))?.daily ?? '0')).toBe(actual);
+});
+
+it('reports snapshot InFlight incidents during backoff without extra delivery reads or repeated alerts', async () => {
+  const o = { ...opts(), alert: vi.fn() };
+  all = [d(0, 2, [1, 0])];
+  const id = 'near:mainnet|annon.near|delivery:0|submission';
+  await o.store.compareAndSet(id, null, { id, revision: 0, nextAt: 200000 });
+  for (let i = 0; i < 2; i++)
+    expect((await keep(o)).incidents).toContainEqual({
+      classification: 'in_flight',
+      deliveryId: 0,
+    });
+  expect(o.alert).toHaveBeenCalledExactlyOnceWith({ type: 'in_flight', deliveryId: 0 });
+  expect(queries.filter((q) => q.params.method_name === 'get_delivery')).toHaveLength(0);
+  expect(created).not.toHaveBeenCalled();
+});
