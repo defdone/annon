@@ -21,7 +21,7 @@ Create a public configuration file and name it with `--config /path/config.json`
 }
 ```
 
-Contract ID and NEAR RPC must be supplied by human configuration or CLI flags; there are no implicit RPC endpoints. Base RPC is required only for Base purchases, Base listing creation and resuming Base unlock. NEAR-only verify/status and purchases need no Base RPC. No deployment is implicitly trusted. The first interactive command asks whether you trust
+Contract ID and NEAR RPC must be supplied by human configuration or CLI flags for contract operations. Browser login alone uses a public RPC default for ownership verification. Base RPC is required only for Base purchases, Base listing creation and resuming Base unlock. NEAR-only verify/status and purchases need no Base RPC. No deployment is implicitly trusted. The first interactive command asks whether you trust
 the configured contract to release file keys. `--trust-contract` records explicit trust
 without a prompt. Trust is keyed by network, NEAR RPC and contract; changing any requires
 new trust. An offer cannot select a different contract. MCP shares the trust store. For a server, human configuration may set `trustContract: true` or `ANNON_TRUST_CONTRACT=true`; tool calls cannot grant trust.
@@ -36,8 +36,9 @@ storage interface before selling or recovering. The SDK exports `storageDeposit(
 
 ## Keys and saved purchases
 
-Select `--wallet evm|solana|near` or `ANNON_WALLET`. There is no key discovery or wallet
-creation. Key values are accepted only from environment variables or explicitly named files:
+Use `annon login` for per-action browser wallet approval, or `annon init --agent` for key references, remote signing and a persisted daily budget. See [README.md](README.md) for login, `--no-open`, `--signer`, keychain creation and the HTTP signer contract. The legacy explicit local-key sources below remain available. No key discovery occurs.
+
+Select `--wallet evm|solana|near` or `ANNON_WALLET`. Local key values are accepted from environment variables or explicitly named files:
 
 | Wallet | Environment | Named file flag / environment |
 | --- | --- | --- |

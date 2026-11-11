@@ -1,9 +1,27 @@
 import { parseArgs } from 'node:util';
 import { publicError, usage } from './errors.js';
 
-export type Command = 'sell' | 'buy' | 'open' | 'recover' | 'stop' | 'verify' | 'status';
+export type Command =
+  | 'sell'
+  | 'buy'
+  | 'open'
+  | 'recover'
+  | 'stop'
+  | 'verify'
+  | 'status'
+  | 'login'
+  | 'init';
 export interface Input {
   command: Command;
+  agent?: boolean;
+  noOpen?: boolean;
+  signer?: string;
+  credentialEnv?: string;
+  credentialKeychain?: string;
+  keyEnv?: string;
+  keychainEntry?: string;
+  newKey?: boolean;
+  dailyBudget?: string;
   target?: string;
   json?: boolean;
   config?: string;
@@ -39,6 +57,7 @@ export interface Input {
   output?: string;
 }
 const common = [
+  'no-open',
   'json',
   'config',
   'contract-id',
@@ -57,6 +76,18 @@ const common = [
   'backup-secret-file',
 ];
 const perCommand: Record<Command, string[]> = {
+  login: [],
+  init: [
+    'signer',
+    'credential-env',
+    'credential-keychain',
+    'agent',
+    'recovery',
+    'key-env',
+    'keychain-entry',
+    'new-key',
+    'daily-budget',
+  ],
   sell: ['resume', 'price', 'split', 'base', 'moderator', 'output'],
   buy: [
     'origin',
@@ -78,7 +109,7 @@ const perCommand: Record<Command, string[]> = {
 export function parseCli(argv: string[]): Input {
   try {
     const keys = [...new Set([...common, ...Object.values(perCommand).flat()])];
-    const booleans = ['json', 'trust-contract', 'base'];
+    const booleans = ['json', 'trust-contract', 'base', 'agent', 'no-open', 'new-key'];
     const parsed = parseArgs({
       args: argv,
       allowPositionals: true,
@@ -90,7 +121,10 @@ export function parseCli(argv: string[]): Input {
     const [command, target, ...extra] = parsed.positionals;
     if (!command || !(command in perCommand) || extra.length) throw usage();
     const cmd = command as Command;
-    if ((cmd === 'recover' && target !== undefined) || (cmd !== 'recover' && !target))
+    if (
+      (['recover', 'login', 'init'].includes(cmd) && target !== undefined) ||
+      (!['recover', 'login', 'init'].includes(cmd) && !target)
+    )
       throw usage();
     const allowed = [...common, ...perCommand[cmd]];
     if (Object.keys(parsed.values).some((k) => !allowed.includes(k))) throw usage();
@@ -112,6 +146,7 @@ export function parseCli(argv: string[]): Input {
           throw usage();
       } else if (!values.price || !values.split) throw usage();
     }
+    if (cmd === 'init' && values.agent !== true) throw usage();
     if (cmd === 'recover' && !values.recovery) throw usage();
     if (values.route && !['near', 'base', '1click'].includes(String(values.route))) throw usage();
     if (values.wallet && !['evm', 'solana', 'near'].includes(String(values.wallet))) throw usage();
@@ -121,6 +156,8 @@ export function parseCli(argv: string[]): Input {
   }
 }
 export const HELP = `annon <command> [options]
+login [--wallet evm|near] [--no-open]
+init --agent --daily-budget <USDC> [--key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> --credential-env <name>]
 sell <file> --resume <file-id> [--output <PAY2>]
 sell <file> --price <USDC> --split <kind:id:bps,...> [--base] [--moderator <account>] [--output <PAY2>]
 buy <url|offer.json> [--route near|base|1click] [--origin <configured name>] [--from-chain <chain>] [--from-asset <1Click asset>] [--refund-to <address>] [--recovery <kind:id>] [--max-price <USDC> or configured cap] [--url <expected resource for offer.json>] [--moderator <trusted account>]

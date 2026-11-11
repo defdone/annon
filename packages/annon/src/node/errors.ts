@@ -1,4 +1,6 @@
 import { SellError } from '../api/annon.js';
+import { TransactionUncertain } from '../wallet/uncertain.js';
+import { BudgetError } from './budget.js';
 
 /** Only these adapter-owned messages cross the CLI/MCP boundary. Never print upstream errors. */
 export class AdapterError extends Error {
@@ -45,7 +47,19 @@ export function publicError(error: unknown): {
   message: string;
   exitCode: number;
   fileId?: string;
+  purchaseId?: string;
+  txHash?: string;
 } {
+  if (error instanceof TransactionUncertain)
+    return {
+      code: error.code,
+      message: error.message,
+      txHash: error.txHash,
+      ...(error.purchaseId ? { purchaseId: error.purchaseId } : {}),
+      exitCode: 4,
+    };
+  if (error instanceof BudgetError)
+    return { code: error.code, message: error.message, exitCode: 1 };
   if (error instanceof SellError)
     return {
       code: error.code && Object.hasOwn(actions, error.code) ? error.code : 'sell_incomplete',

@@ -50,6 +50,7 @@ export interface PaymentAttempt {
 
 export interface PurchaseRecord extends Versioned {
   schemaVersion: 2;
+  nearSubmission?: { state: 'uncertain'; txHash: string };
   paymentState?: 'expired' | 'canceled';
   purchase: Purchase;
   message: string;

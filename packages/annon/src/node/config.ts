@@ -1,14 +1,18 @@
 import { mkdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { secureUrl } from '../download/download.js';
 import { fileStore } from '../pay/store-node.js';
 import { account, network } from '../settle-near/codec.js';
+import { agentPolicy, configPath, type SignerConfig, validateSigner } from './agent.js';
 import type { Input } from './cli.js';
 import { AdapterError } from './errors.js';
 import type { Environment } from './wallets.js';
 
 export interface Config {
+  signer?: SignerConfig;
+  dailyBudget?: string;
+  agent?: boolean;
   contractId: string;
   nearRpc: string;
   baseRpc: string;
@@ -22,10 +26,11 @@ export interface Config {
   origins?: Record<string, { fromChain: string; fromAsset: string; refundTo?: string }>;
   allowedResources?: string[];
 }
-export async function loadConfig(o: Input, env: Environment): Promise<Config> {
+export async function loadConfig(o: Input, env: Environment, login = false): Promise<Config> {
+  const pinnedAgent = await agentPolicy(o, env);
   try {
     let file: Partial<Config> = {};
-    const path = o.config ?? env.ANNON_CONFIG ?? join(homedir(), '.config', 'annon', 'config.json');
+    const path = configPath(o, env);
     try {
       file = JSON.parse(await readFile(path, 'utf8')) as Partial<Config>;
     } catch (error) {
@@ -33,15 +38,39 @@ export async function loadConfig(o: Input, env: Environment): Promise<Config> {
     }
     const c: Config = {
       contractId: o.contractId ?? env.ANNON_CONTRACT_ID ?? file.contractId ?? '',
-      nearRpc: o.nearRpc ?? env.ANNON_NEAR_RPC ?? file.nearRpc ?? '',
+      nearRpc:
+        o.nearRpc ??
+        env.ANNON_NEAR_RPC ??
+        file.nearRpc ??
+        (login
+          ? (o.network ?? env.ANNON_NETWORK ?? file.network ?? 'near:mainnet') === 'near:testnet'
+            ? 'https://rpc.testnet.fastnear.com'
+            : 'https://rpc.mainnet.fastnear.com'
+          : ''),
       baseRpc: o.baseRpc ?? env.ANNON_BASE_RPC ?? file.baseRpc ?? '',
       network: o.network ?? env.ANNON_NETWORK ?? file.network ?? 'near:mainnet',
       stateDir:
         o.stateDir ??
-        env.ANNON_STATE_DIR ??
+        (env.ANNON_AGENT === 'true' ? undefined : env.ANNON_STATE_DIR) ??
         file.stateDir ??
         join(homedir(), '.local', 'share', 'annon'),
     };
+    if (file.signer) c.signer = validateSigner(file.signer);
+    if (file.dailyBudget !== undefined) {
+      if (
+        typeof file.dailyBudget !== 'string' ||
+        !/^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/.test(file.dailyBudget)
+      )
+        throw new Error('invalid daily budget');
+      c.dailyBudget = file.dailyBudget;
+    }
+    c.agent = pinnedAgent || file.agent === true;
+    if (file.agent === true && resolve(path) !== resolve(configPath({}, env)))
+      throw new AdapterError(
+        'agent_policy',
+        'Agent configs must be pinned by the launcher environment.',
+        2,
+      );
     const origins = env.ANNON_ORIGINS ? JSON.parse(env.ANNON_ORIGINS) : file.origins;
     if (origins) {
       if (typeof origins !== 'object' || Array.isArray(origins)) throw new Error('invalid origins');
@@ -79,7 +108,7 @@ export async function loadConfig(o: Input, env: Environment): Promise<Config> {
     if (mpcKey) c.mpcKey = mpcKey;
     const relayer = o.relayer ?? env.ANNON_RELAYER ?? file.relayer;
     if (relayer) c.relayer = relayer;
-    account(c.contractId);
+    if (!login || c.contractId) account(c.contractId);
     network(c.network);
     for (const endpoint of [
       c.nearRpc,
@@ -92,7 +121,8 @@ export async function loadConfig(o: Input, env: Environment): Promise<Config> {
     }
     if (!c.stateDir || typeof c.stateDir !== 'string') throw new Error('missing state directory');
     return c;
-  } catch {
+  } catch (error) {
+    if (error instanceof AdapterError) throw error;
     throw new AdapterError(
       'invalid_config',
       'Set contractId, network and nearRpc (plus baseRpc for Base operations) in the config file, environment or flags. Endpoints must use HTTPS (HTTP only on localhost).',

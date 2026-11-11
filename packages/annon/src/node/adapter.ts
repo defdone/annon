@@ -18,12 +18,18 @@ import { type PurchaseRecord, purchaseKey } from '../pay/purchase.js';
 import { fileStore } from '../pay/store-node.js';
 import { discover, type PaymentRequired, readPaymentRequired } from '../pay/x402.js';
 import { bytes, hex } from '../settle-near/codec.js';
-import { identityJson } from '../settle-near/identity.js';
+import { identityJson, parseIdentity } from '../settle-near/identity.js';
 import type { NearWallet } from '../wallet/wallet.js';
+import { agentPolicy, configPath, initAgent, savePublicConfig } from './agent.js';
+import { type BrowserSession, startBrowserSession } from './browser-login.js';
+import { type BudgetRecord, reserveSpend } from './budget.js';
 import type { Input } from './cli.js';
 import { type Config, loadConfig, type TrustPrompt, trustContract } from './config.js';
 import { AdapterError, publicError, usage } from './errors.js';
 import { newOutput, writeBackup } from './io.js';
+import { type Keychain, osKeychain } from './keychain.js';
+import { assertSignerInput, configuredWallet } from './signer-wallet.js';
+import { type SigningResult, signingRequest, verifySigningResult } from './signing.js';
 import {
   type Environment,
   identity,
@@ -35,6 +41,10 @@ import {
 export interface Dependencies {
   /** Server-owned policy; never taken from tool arguments. */
   agent?: boolean;
+  keychain?: Keychain;
+  browser?: typeof startBrowserSession;
+  paymentTerms?: (terms: unknown) => void;
+  browserApprovals?: boolean;
   sdk?: (
     options: AnnonOptions,
   ) => Pick<
@@ -233,7 +243,7 @@ export function retryAfterMs(header: string | null, now = Date.now()): number | 
   return delay > 60_000 ? null : Math.max(0, delay);
 }
 
-export function createAdapter(env: Environment = process.env, d: Dependencies = {}) {
+function createCoreAdapter(env: Environment = process.env, d: Dependencies = {}) {
   const fetcher = d.fetch ?? globalThis.fetch;
   const wait = d.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   return async (o: Input): Promise<Record<string, unknown>> => {
@@ -241,7 +251,7 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
     await trustContract(
       c,
       o.trustContract === true || c.trustContract === true,
-      o.json ? undefined : d.prompt,
+      o.json || d.agent ? undefined : d.prompt,
     );
     const readListing = async (fileId: string) => {
       const f = await (d.file ?? getFile)(c.nearRpc, c.contractId, fileId);
@@ -535,6 +545,42 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
         }))
       )
         throw new Error('resource conflict');
+      const price = route === 'base' ? f.terms.base?.price : f.terms.near.price;
+      if (!price || BigInt(price) > maxPrice)
+        return fail('price_above_max', 'The registered price exceeds maxPrice.');
+      const paymentTerms = {
+        file: found.fileId,
+        resource: found.url,
+        network: route === 'base' ? 'eip155:8453' : c.network,
+        route,
+        price,
+        recipients: f.terms.near.recipients,
+        remainder: f.terms.near.remainder,
+        baseRecipient: f.terms.base?.pay_to,
+        token: route === 'base' ? f.terms.base?.usdc : f.terms.near.token,
+      };
+      d.paymentTerms?.(paymentTerms);
+      if (d.agent) {
+        if (c.dailyBudget === undefined)
+          return fail('budget_required', 'Configure a daily agent budget before buying.', 2);
+        const budgetDir = join(c.stateDir, 'budgets');
+        await mkdir(budgetDir, { recursive: true, mode: 0o700 });
+        await reserveSpend(fileStore<BudgetRecord>(budgetDir), 'agent:USDC', BigInt(price), {
+          daily: c.dailyBudget === '0' ? 0n : BigInt(amount(c.dailyBudget)),
+        });
+      } else if (!d.browserApprovals) {
+        d.notify?.(JSON.stringify(paymentTerms));
+        if (
+          !(await (o.json ? undefined : d.prompt)?.(
+            `Approve these payment terms: ${JSON.stringify(paymentTerms)}? Type yes: `,
+          ))
+        )
+          return fail(
+            'confirmation_required',
+            'Review and confirm the exact payment terms before paying.',
+            3,
+          );
+      }
       const bought = await sdk.buy({
         fileId: found.fileId,
         header: found.header,
@@ -558,7 +604,12 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
         purchaseId: bought.record.id,
         fileId: found.fileId,
         route: bought.route,
-        state: bought.instructions ? 'deposit_required' : 'submitted',
+        state: bought.uncertain
+          ? 'uncertain'
+          : bought.instructions
+            ? 'deposit_required'
+            : 'submitted',
+        ...(bought.uncertain ? { txHash: bought.uncertain.txHash } : {}),
         backup: backupPath(c, bought.record.id),
         ...(bought.instructions ? { instructions: bought.instructions } : {}),
         next: 'Fund the deposit if instructed, then check status and open this purchase.',
@@ -679,5 +730,98 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
       output: o.output,
       bytes: opened.data.length,
     };
+  };
+}
+
+/** CLI session lifetime includes every wallet action and is always closed on exit. */
+export function createAdapter(env: Environment = process.env, d: Dependencies = {}) {
+  return async (o: Input): Promise<Record<string, unknown>> => {
+    if (o.command !== 'init' && (o.signer || o.credentialEnv || o.credentialKeychain))
+      throw new AdapterError(
+        'signer_init_only',
+        'Signer and credential references can only be set by init.',
+        2,
+      );
+    const agent = await agentPolicy(o, env, d.agent);
+    if (o.command === 'init') return initAgent(o, env, d.keychain ?? osKeychain);
+    const c = await loadConfig(o, env, o.command === 'login');
+    if (c.signer) assertSignerInput(o);
+    if ((agent || c.agent) && o.command === 'login')
+      throw new AdapterError('agent_policy', 'Agent mode refuses interactive login.', 2);
+    let session: BrowserSession | undefined;
+    let terms: unknown = null;
+    const browser = async () => {
+      if (!session) {
+        session = await (d.browser ?? startBrowserSession)({ noOpen: o.noOpen === true });
+        const port = new URL(session.url).port;
+        d.notify?.(
+          `Annon pairing code ${session.pairingCode}${o.noOpen ? `\n${session.url}` : ''}\nFor SSH: forward this port with ssh -L ${port}:127.0.0.1:${port} host. Use --no-open for a manual pairing URL.`,
+        );
+      }
+      return session;
+    };
+    try {
+      if (o.command === 'login') {
+        const s = await browser();
+        const kind = o.wallet ?? 'evm';
+        if (kind === 'solana') throw new Error('browser Solana login is not supported');
+        const challenge = `Annon login: ${crypto.randomUUID()} on ${c.network}`;
+        const q = signingRequest(
+          kind === 'evm' ? 'evm.personalSign' : 'near.nep413',
+          kind === 'evm' ? 'eip155:8453' : c.network,
+          '',
+          kind === 'evm'
+            ? { message: challenge }
+            : {
+                message: challenge,
+                recipient: c.contractId || 'annon-cli',
+                nonce: [...crypto.getRandomValues(new Uint8Array(32))],
+                callbackUrl: new URL('/callback', s.url).href,
+              },
+        );
+        let identity: ReturnType<typeof parseIdentity> | undefined;
+        await s.request<SigningResult>(q, async (r) => {
+          const selected = parseIdentity({ kind, id: kind === 'evm' ? r.account : r.accountId });
+          await verifySigningResult({ ...q, account: selected.id }, r, c.nearRpc);
+          identity = selected;
+        });
+        if (!identity) throw new Error('login failed');
+        await savePublicConfig(configPath(o, env), {
+          signer: { mode: 'browser', identity },
+          agent: false,
+          network: c.network,
+          nearRpc: c.nearRpc,
+          ...(c.contractId ? { contractId: c.contractId } : {}),
+          ...(c.baseRpc ? { baseRpc: c.baseRpc } : {}),
+        });
+        return { identity, network: c.network, mode: 'browser' };
+      }
+      const signer = c.signer;
+      return await createCoreAdapter(env, {
+        ...d,
+        agent: agent || c.agent === true,
+        browserApprovals: signer?.mode === 'browser',
+        paymentTerms: (value) => {
+          terms = value;
+          d.paymentTerms?.(value);
+        },
+        ...(signer && !d.wallet
+          ? {
+              wallet: (input, environment) =>
+                configuredWallet(
+                  signer,
+                  c,
+                  input as Input,
+                  environment,
+                  d.keychain ?? osKeychain,
+                  browser,
+                  () => terms,
+                ),
+            }
+          : {}),
+      })(o);
+    } finally {
+      await session?.close();
+    }
   };
 }

@@ -6,3 +6,9 @@ packages:
 saveExact: true
 # Don't resolve packages published less than 14 days ago (in minutes).
 minimumReleaseAge: 20160
+
+# Wallet Selector uses secp256k1's JS fallback; esbuild uses its optional platform binary.
+# Neither dependency needs an install-time native build in this workspace.
+allowBuilds:
+  secp256k1: false
+  esbuild: false

@@ -1,0 +1,64 @@
+{
+  "final_execution_status": "FINAL",
+  "status": {
+    "SuccessValue": ""
+  },
+  "transaction": {
+    "signer_id": "keeper.near",
+    "public_key": "ed25519:11111111111111111111111111111111",
+    "nonce": 1,
+    "receiver_id": "annon.near",
+    "actions": [
+      {
+        "FunctionCall": {
+          "method_name": "settle",
+          "args": "eyJkZWxpdmVyeV9pZCI6MH0=",
+          "gas": 600000000000000,
+          "deposit": "0"
+        }
+      }
+    ],
+    "signature": "ed25519:1111111111111111111111111111111111111111111111111111111111111111",
+    "hash": "11111111111111111111111111111111"
+  },
+  "transaction_outcome": {
+    "proof": [],
+    "block_hash": "11111111111111111111111111111111",
+    "id": "11111111111111111111111111111111",
+    "outcome": {
+      "logs": [],
+      "receipt_ids": ["22222222222222222222222222222222"],
+      "gas_burnt": 242802056744,
+      "tokens_burnt": "24280205674400000000",
+      "executor_id": "keeper.near",
+      "status": {
+        "SuccessReceiptId": "22222222222222222222222222222222"
+      },
+      "metadata": {
+        "version": 1,
+        "gas_profile": []
+      }
+    }
+  },
+  "receipts_outcome": [
+    {
+      "proof": [],
+      "block_hash": "11111111111111111111111111111111",
+      "id": "22222222222222222222222222222222",
+      "outcome": {
+        "logs": [],
+        "receipt_ids": [],
+        "gas_burnt": 242802056744,
+        "tokens_burnt": "24280205674400000000",
+        "executor_id": "annon.near",
+        "status": {
+          "SuccessValue": ""
+        },
+        "metadata": {
+          "version": 1,
+          "gas_profile": []
+        }
+      }
+    }
+  ]
+}

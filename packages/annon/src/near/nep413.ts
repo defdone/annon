@@ -9,6 +9,8 @@ export interface NearMessage {
   message: string;
   recipient: string;
   nonce: Uint8Array;
+  callbackUrl?: string;
+  state?: string;
 }
 export interface NearSignedMessage {
   accountId: string;
@@ -18,11 +20,20 @@ export interface NearSignedMessage {
 export interface RecoveryProofContext {
   contractId: string;
   nearRpc: string;
+  callbackUrl?: string;
 }
-/** u32 tag (2^31+413), Borsh message, fixed nonce, recipient, absent callbackUrl. */
+/** u32 tag (2^31+413), Borsh message, fixed nonce, recipient, Option<string> callbackUrl. */
 export function nep413Hash(p: NearMessage): Uint8Array {
   if (p.nonce.length !== 32) throw new TypeError('NEP-413 nonce must be 32 bytes');
-  return sha256(concat(le(2147484061, 4), str(p.message), p.nonce, str(p.recipient), le(0, 1)));
+  return sha256(
+    concat(
+      le(2147484061, 4),
+      str(p.message),
+      p.nonce,
+      str(p.recipient),
+      p.callbackUrl === undefined ? le(0, 1) : concat(le(1, 1), str(p.callbackUrl)),
+    ),
+  );
 }
 export async function proveNearControl(
   accountId: string,
@@ -33,12 +44,22 @@ export async function proveNearControl(
   account(accountId);
   account(context.contractId);
   const payload = {
+    ...(context.callbackUrl === undefined ? {} : { callbackUrl: context.callbackUrl }),
     message: text,
     recipient: context.contractId,
     nonce: crypto.getRandomValues(new Uint8Array(32)),
   };
-  const hash = nep413Hash(payload);
   const result = await signMessage({ ...payload, nonce: payload.nonce.slice() });
+  await verifyNearMessage(accountId, payload, result, context.nearRpc);
+}
+/** Verify exact NEP-413 payload and finalized full-access membership. */
+export async function verifyNearMessage(
+  accountId: string,
+  payload: NearMessage,
+  result: NearSignedMessage | undefined,
+  nearRpc: string,
+): Promise<void> {
+  const hash = nep413Hash(payload);
   if (!result || result.accountId !== accountId || !result.publicKey.startsWith('ed25519:'))
     throw new Error('NEP-413 proof belongs to another account or key type');
   const key = base58.decode(result.publicKey.slice(8));
@@ -49,6 +70,6 @@ export async function proveNearControl(
     !ed25519.verify(signature, hash, key, { zip215: false })
   )
     throw new Error('invalid NEP-413 recovery signature');
-  if (!(await isFullAccessKey(context.nearRpc, accountId, result.publicKey)))
+  if (!(await isFullAccessKey(nearRpc, accountId, result.publicKey)))
     throw new Error('NEP-413 recovery requires a full-access key');
 }

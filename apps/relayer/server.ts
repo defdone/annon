@@ -1,6 +1,7 @@
 /**
- * The public Annon relayer: an HTTP front for `relay` (packages/annon/src/relay). It keeps no
- * database; each request is checked and sent, and one log line records it on stdout.
+ * The public Annon relayer: an HTTP front for `relay` (packages/annon/src/relay). Relay admission
+ * is in memory; the optional dedicated keeper persists jobs and budgets. Requests are checked
+ * and sent, and one log line records each response on stdout.
  *
  *   POST /v1/relay          a RelayRequest as JSON → 200 { txHash, signer }, or 202 { txHash, signer,
  *                           uncertain: true, reason } when NEAR's answer was lost or unclear (read the
@@ -10,7 +11,17 @@
  *
  * The caller reads the transaction's outcome through its own NEAR RPC: a relayer can't fake one.
  */
+import { mkdir } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { join } from 'node:path';
+import { getConfig } from '../../packages/annon/src/near/rpc.ts';
+import type { BudgetRecord } from '../../packages/annon/src/node/budget.ts';
+import { fileStore } from '../../packages/annon/src/pay/store-node.ts';
+import type {
+  KeeperRecord,
+  KeepOptions,
+  RefundSource,
+} from '../../packages/annon/src/relay/keeper-runner.ts';
 import {
   type CheckOptions,
   keep,
@@ -24,6 +35,15 @@ import { identityJson, parseIdentity } from '../../packages/annon/src/settle-nea
 
 export interface Config extends Omit<CheckOptions, 'now'> {
   sender: Sender;
+  keeper?: {
+    sender: Sender;
+    stateDir: string;
+    hourlyBudget: bigint;
+    dailyBudget: bigint;
+    gasPrice: bigint;
+    reserveLowWater: bigint;
+    refunds?: RefundSource;
+  };
   /** Kill switch: answer 503 and send nothing. */
   disabled: boolean;
   /** New admission attempts per IP per hour, and transactions per day for everyone. */
@@ -188,23 +208,56 @@ const CORS = {
 
 /** The HTTP server; nothing a client sends can make the request handler throw. */
 export function serve(c: Config, port: number, keeperSeconds = 0) {
-  if (keeperSeconds > 0) keeper(c, keeperSeconds);
-  return createServer((req: IncomingMessage, res: ServerResponse) => {
+  if (
+    c.keeper &&
+    (c.keeper.sender.accountId === c.sender.accountId || c.keeper.sender.key === c.sender.key)
+  )
+    throw new Error('keeper requires a separate account and key');
+  if (keeperSeconds > 0 && !c.keeper) throw new Error('separate keeper configuration required');
+  const stopKeeper = keeperSeconds > 0 ? keeper(c, keeperSeconds) : () => {};
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     void respond(c, req, res).catch(() => {
       // An aborted upload or a socket gone: nothing to answer.
       if (!res.headersSent && res.writable) res.writeHead(400, CORS).end();
     });
-  }).listen(port, () =>
+  });
+  server.once('close', stopKeeper);
+  return server.listen(port, () =>
     console.log(`annon relayer on :${port} for ${c.contractId} as ${c.sender.accountId}`),
   );
 }
 
 /** Keeper passes every `seconds`, one at a time, each over every delivery. */
 function keeper(c: Config, seconds: number) {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const pass = async () => {
+    if (stopped) return;
     if (!c.disabled) {
       try {
-        const result = await keep(c);
+        const k = c.keeper;
+        if (!k) throw new Error('separate keeper configuration required');
+        const jobs = join(k.stateDir, 'jobs'),
+          budgets = join(k.stateDir, 'budgets');
+        await mkdir(jobs, { recursive: true, mode: 0o700 });
+        await mkdir(budgets, { recursive: true, mode: 0o700 });
+        const options: KeepOptions = {
+          network: (await getConfig(c.nearRpc, c.contractId)).network,
+          nearRpc: c.nearRpc,
+          contractId: c.contractId,
+          sender: k.sender,
+          store: fileStore<KeeperRecord>(jobs),
+          budgetStore: fileStore<BudgetRecord>(budgets),
+          hourlyBudget: k.hourlyBudget,
+          dailyBudget: k.dailyBudget,
+          gasPrice: k.gasPrice,
+          reserveLowWater: k.reserveLowWater,
+          ...(k.refunds ? { refunds: k.refunds } : {}),
+          alert: (alert) => console.log(JSON.stringify({ keeper: 'alert', ...alert })),
+        };
+        const result = await keep(options);
+        for (const incident of result.incidents)
+          console.log(JSON.stringify({ keeper: 'incident', ...incident }));
         for (const { from, deliveryId } of result.errors)
           console.log(JSON.stringify({ keeper: 'error', from, deliveryId }));
         for (const s of result.sent)
@@ -226,9 +279,13 @@ function keeper(c: Config, seconds: number) {
         );
       }
     }
-    setTimeout(pass, seconds * 1000).unref();
+    if (!stopped) timer = setTimeout(pass, seconds * 1000).unref();
   };
   void pass();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
 }
 
 async function respond(c: Config, req: IncomingMessage, res: ServerResponse) {
@@ -294,6 +351,29 @@ export function fromEnv(e: Record<string, string | undefined>): {
         parseIdentity({ kind: s.slice(0, separator), id: s.slice(separator + 1) }),
       );
     });
+  const keeperSeconds = count('KEEPER_SECONDS', '0');
+  const yocto = (name: string, fallback?: string) => {
+    const value = env(name, fallback);
+    if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error(`${name} must be yoctoNEAR`);
+    return BigInt(value);
+  };
+  const keeperConfig =
+    keeperSeconds > 0
+      ? {
+          sender: { accountId: env('KEEPER_ACCOUNT'), key: env('KEEPER_KEY') },
+          stateDir: env('KEEPER_STATE_DIR'),
+          hourlyBudget: yocto('KEEPER_HOURLY_BUDGET'),
+          dailyBudget: yocto('KEEPER_DAILY_BUDGET'),
+          gasPrice: yocto('KEEPER_GAS_PRICE', '100000000'),
+          reserveLowWater: yocto('KEEPER_RESERVE_LOW_WATER', '40960000000000000000000'),
+        }
+      : undefined;
+  if (
+    keeperConfig &&
+    (keeperConfig.sender.accountId === env('RELAYER_ACCOUNT') ||
+      keeperConfig.sender.key === env('RELAYER_KEY'))
+  )
+    throw new Error('keeper requires a separate account and key');
   return {
     config: {
       nearRpc: env('NEAR_RPC', 'https://rpc.mainnet.fastnear.com'),
@@ -306,13 +386,14 @@ export function fromEnv(e: Record<string, string | undefined>): {
         maxDeadlineSeconds: count('MAX_DEADLINE_SECONDS', '600'),
         ...(sellers?.length ? { sellerAllowed: (s: string) => sellers.includes(s) } : {}),
       },
+      ...(keeperConfig ? { keeper: keeperConfig } : {}),
       disabled: env('DISABLED', '0') === '1',
       perIpHour: count('PER_IP_HOUR', '60'),
       perDay: count('PER_DAY', '500'),
       ...(e.IP_HEADER?.trim() ? { ipHeader: e.IP_HEADER.trim().toLowerCase() } : {}),
     },
     port: count('PORT', '8080'),
-    keeperSeconds: count('KEEPER_SECONDS', '30'),
+    keeperSeconds,
   };
 }
 

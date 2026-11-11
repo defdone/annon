@@ -80,3 +80,31 @@ describe('explicit wallet sources', () => {
     expect(error).not.toHaveBeenCalled();
   });
 });
+
+it('uses only an explicitly named near-cli-rs keychain entry through an injected reader', async () => {
+  const { KeyPair } = await import('near-api-js');
+  const key = KeyPair.fromRandom('ed25519');
+  const read = vi.fn(async () =>
+    JSON.stringify({
+      account_id: 'bot.near',
+      public_key: key.getPublicKey().toString(),
+      private_key: key.toString(),
+    }),
+  );
+  const keychain = { read, create: vi.fn() };
+  await loadWallet(
+    {
+      wallet: 'near',
+      nearAccount: 'bot.near',
+      nearPublicKey: key.getPublicKey().toString(),
+      network: 'near:testnet',
+    },
+    {},
+    'https://rpc',
+    keychain,
+  );
+  expect(read).toHaveBeenCalledWith(`near-testnet-bot.near/bot.near:${key.getPublicKey()}`);
+  read.mockClear();
+  await expect(loadWallet({ wallet: 'near' }, {}, 'https://rpc', keychain)).rejects.toThrow();
+  expect(read).not.toHaveBeenCalled();
+});

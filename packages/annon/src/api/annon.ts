@@ -59,6 +59,7 @@ import {
   purchaseId,
 } from '../settle-near/purchase.js';
 import { type Terms, termsHash } from '../settle-near/terms.js';
+import { TransactionUncertain } from '../wallet/uncertain.js';
 import type { EvmWallet, IdentityWallet, NearWallet } from '../wallet/wallet.js';
 
 export interface AnnonOptions {
@@ -111,6 +112,7 @@ export interface Bought {
   route: Purchase['route'];
   record: PurchaseRecord;
   instructions?: Deposit;
+  uncertain?: { purchaseId: string; txHash: string };
   payment?: string;
 }
 const asNear = (w: IdentityWallet): NearWallet => {
@@ -604,7 +606,19 @@ export class Annon {
     if (!(await this.store.compareAndSet(purchaseKey(id), null, record)))
       throw new PayError('store_conflict');
     if (o.payer?.identity.kind === 'near') {
-      await asNear(o.payer).transferPurchase(message, assets);
+      try {
+        await asNear(o.payer).transferPurchase(message, assets);
+      } catch (error) {
+        if (!(error instanceof TransactionUncertain)) throw error;
+        const next: PurchaseRecord = {
+          ...record,
+          revision: record.revision + 1,
+          nearSubmission: { state: 'uncertain', txHash: error.txHash },
+        };
+        if (!(await this.store.compareAndSet(purchaseKey(id), record, next)))
+          throw new TransactionUncertain(error.txHash, id);
+        return { route, record: next, uncertain: { purchaseId: id, txHash: error.txHash } };
+      }
       return { route, record };
     }
     if (!o.origin) throw new TypeError('a 1Click origin is required for cross-chain payment');
