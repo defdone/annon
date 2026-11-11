@@ -101,10 +101,11 @@ export async function view(
   contractId: string,
   method: string,
   args: object,
+  blockId?: string | number,
 ): Promise<unknown> {
   const r = await rpc(url, 'query', {
     request_type: 'call_function',
-    finality: 'final',
+    ...(blockId === undefined ? { finality: 'final' } : { block_id: blockId }),
     account_id: contractId,
     method_name: method,
     args_base64: toBase64(JSON.stringify(args)),

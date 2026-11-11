@@ -87,6 +87,32 @@ export async function deliveryCount(url: string, contract: string): Promise<numb
   integer(n as number);
   return n as number;
 }
+/** Unordered positions, capped at 50. Pin every page and count to ONE finalized block ID;
+ * removal swaps the last entry into the hole. Moving-block forward scans can skip entries.
+ * New deliveries after the snapshot are discovered on the next sweep. */
+export async function listOpenDeliveries(
+  url: string,
+  contract: string,
+  from = 0,
+  limit = 50,
+  blockId?: string | number,
+): Promise<DeliveryInfo[]> {
+  integer(from);
+  integer(limit, 50);
+  const ds = await view(url, contract, 'list_open_deliveries', { from, limit }, blockId);
+  if (!Array.isArray(ds) || ds.length > limit) throw new TypeError('invalid deliveries');
+  return ds.map(delivery);
+}
+/** Count includes Pending and InFlight records. Use the same block ID as every sweep page. */
+export async function openDeliveryCount(
+  url: string,
+  contract: string,
+  blockId?: string | number,
+): Promise<number> {
+  const n = await view(url, contract, 'open_delivery_count', {}, blockId);
+  integer(n as number);
+  return n as number;
+}
 export async function refundRoot(url: string, contract: string): Promise<RefundRoot> {
   const r = (await view(url, contract, 'refund_root', {})) as RefundRoot;
   bytes(r.root, 32);
@@ -106,6 +132,20 @@ export function fundDelivery(
     gas: 150000000000000n,
   });
 }
+/** Permissionless deposit, bookkeeping and isolated payout dispatch; no deposit attached. */
+export function settle(
+  wallet: Pick<NearWallet, 'call'>,
+  contract: string,
+  deliveryId: number,
+): Promise<unknown> {
+  integer(deliveryId);
+  return wallet.call({
+    receiverId: account(contract),
+    method: 'settle',
+    args: { delivery_id: deliveryId },
+    gas: 600000000000000n,
+  });
+}
 export function paySlot(
   wallet: Pick<NearWallet, 'call'>,
   contract: string,
@@ -121,6 +161,7 @@ export function paySlot(
     gas: 80000000000000n,
   });
 }
+/** Attach storage funding, or pass zero to spend the caller's prepaid contract balance. */
 export function materializeRefund(
   wallet: Pick<NearWallet, 'call'>,
   contract: string,
@@ -133,7 +174,7 @@ export function materializeRefund(
   parseIdentity(args.leaf.refund);
   if (args.proof.length !== 32) throw new TypeError('refund proof must have 32 siblings');
   for (const sibling of args.proof) bytes(sibling, 32);
-  if (deposit <= 0n) throw new TypeError('materialize_refund needs a storage deposit');
+  if (deposit < 0n) throw new TypeError('invalid storage deposit');
   return wallet.call({
     receiverId: account(contract),
     method: 'materialize_refund',

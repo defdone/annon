@@ -804,9 +804,12 @@ export {
   fundDelivery,
   getDelivery,
   listDeliveries,
+  listOpenDeliveries,
   type MaterializeRefundArgs,
   materializeRefund,
+  openDeliveryCount,
   paySlot,
   type RefundRoot,
   refundRoot,
+  settle,
 } from './keeper.js';

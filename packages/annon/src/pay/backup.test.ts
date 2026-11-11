@@ -58,7 +58,11 @@ describe('user-held encrypted purchase backup', () => {
     const file = await exportPurchase(record, key);
     await expect(importPurchase(file, newBackupSecret())).rejects.toThrow();
     const edited = JSON.parse(file);
-    edited.ciphertext = `0x00${edited.ciphertext.slice(4)}`;
+    // Always change a bit; replacing a random byte with 00 leaves it unchanged 1/256 times.
+    const firstByte = (Number.parseInt(edited.ciphertext.slice(2, 4), 16) ^ 1)
+      .toString(16)
+      .padStart(2, '0');
+    edited.ciphertext = `0x${firstByte}${edited.ciphertext.slice(4)}`;
     await expect(importPurchase(JSON.stringify(edited), key)).rejects.toThrow();
     await expect(exportPurchase(record, new Uint8Array(65))).rejects.toThrow();
     await expect(
