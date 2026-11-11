@@ -258,8 +258,15 @@ function keeper(c: Config, seconds: number) {
         const result = await keep(options);
         for (const incident of result.incidents)
           console.log(JSON.stringify({ keeper: 'incident', ...incident }));
-        for (const { from, deliveryId } of result.errors)
-          console.log(JSON.stringify({ keeper: 'error', from, deliveryId }));
+        // The message only: keeper errors carry RPC and validation text, never key material.
+        for (const { deliveryId, error } of result.errors)
+          console.log(
+            JSON.stringify({
+              keeper: 'error',
+              deliveryId,
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          );
         for (const s of result.sent)
           console.log(
             JSON.stringify({
