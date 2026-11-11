@@ -59,6 +59,8 @@ let all = [d()];
 let final = false;
 let reason = '';
 let failSend = false;
+let sendRejection: unknown;
+let accountAmount = '10000000000000000000000000';
 let unknown = false;
 let keyNonce = 0;
 let referenceHeight = 99999;
@@ -91,6 +93,8 @@ beforeEach(() => {
   final = false;
   reason = '';
   failSend = false;
+  sendRejection = undefined;
+  accountAmount = '10000000000000000000000000';
   unknown = false;
   keyNonce = 0;
   referenceHeight = 99999;
@@ -114,7 +118,34 @@ beforeEach(() => {
           },
         };
       else if (q.method === 'EXPERIMENTAL_protocol_config')
-        result = { transaction_validity_period: 86400 };
+        result = {
+          transaction_validity_period: 86400,
+          runtime_config: {
+            storage_amount_per_byte: '10000000000000000000',
+            min_gas_purchase_price: '1000000000',
+            transaction_costs: {
+              action_receipt_creation_config: {
+                send_sir: 108059500000,
+                send_not_sir: 108059500000,
+                execution: 108059500000,
+              },
+              action_creation_config: {
+                function_call_cost: {
+                  send_sir: 200000000000,
+                  send_not_sir: 200000000000,
+                  execution: 780000000000,
+                },
+                function_call_cost_per_byte: {
+                  send_sir: 2235934,
+                  send_not_sir: 47683715,
+                  execution: 2235934,
+                },
+              },
+            },
+          },
+        };
+      else if (q.method === 'query' && q.params.request_type === 'view_account')
+        result = { amount: accountAmount, locked: '0', storage_usage: 1000 };
       else if (q.method === 'query' && q.params.request_type === 'view_access_key')
         result = { nonce: keyNonce, permission: 'FullAccess' };
       else if (q.method === 'gas_price') result = { gas_price: '100000000' };
@@ -131,6 +162,7 @@ beforeEach(() => {
         result = { result: [...Buffer.from(JSON.stringify(value))] };
       } else if (q.method === 'send_tx') {
         if (failSend) throw new Error('transport');
+        if (sendRejection) return Response.json({ id: q.id, error: sendRejection });
         result = { final_execution_status: 'INCLUDED' };
       } else if (unknown)
         return Response.json({ id: q.id, error: { cause: { name: 'UNKNOWN_TRANSACTION' } } });
@@ -513,3 +545,269 @@ it.each([86400, 86401, 86402, 86403])(
     expect(created).toHaveBeenCalledTimes(age > 86402 ? 2 : 1);
   },
 );
+
+it('skips signing, budget reservation and tx persistence on low liquid balance, alerts only on transitions across restart', async () => {
+  const o = { ...opts(), alert: vi.fn() };
+  accountAmount = '449700000000000000000000';
+  await keep(o);
+  await keep({ ...o });
+  expect(created).not.toHaveBeenCalled();
+  expect(await o.budgetStore.load('near:mainnet|keeper.near|keeper-spend')).toBeNull();
+  expect((await o.store.load('near:mainnet|annon.near|delivery:0|submission'))?.tx).toBeUndefined();
+  expect(o.alert).toHaveBeenCalledTimes(1);
+  expect(o.alert).toHaveBeenCalledWith({
+    type: 'low_balance',
+    balance: '439700000000000000000000',
+    needed: '600919026549026500000000',
+  });
+  expect(queries.find((q) => q.params.request_type === 'view_account')?.params).toEqual({
+    request_type: 'view_account',
+    block_id: 'FINAL-BLOCK',
+    account_id: 'keeper.near',
+  });
+  accountAmount = '10000000000000000000000000';
+  await keep(o);
+  expect(created).toHaveBeenCalledTimes(1);
+  all = [d(1)];
+  accountAmount = '449700000000000000000000';
+  await keep(o);
+  expect(o.alert).toHaveBeenCalledTimes(2);
+});
+it('honors a configured keeper liquid balance low water even when the transaction is affordable', async () => {
+  const o = { ...opts(), balanceLowWater: 20n * 10n ** 24n, alert: vi.fn() };
+  await keep(o);
+  expect(created).not.toHaveBeenCalled();
+  expect(o.alert).toHaveBeenCalledWith(
+    expect.objectContaining({ type: 'low_balance', needed: o.balanceLowWater.toString() }),
+  );
+});
+it.each([
+  { data: { TxExecutionError: { InvalidTxError: { NotEnoughAllowance: {} } } } },
+  {
+    data: {
+      TxExecutionError: { InvalidTxError: { NotEnoughBalance: { balance: '1', cost: '2' } } },
+    },
+  },
+  {
+    name: 'HANDLER_ERROR',
+    cause: {
+      name: 'INVALID_TRANSACTION',
+      info: { InvalidTxError: { InvalidAccessKeyError: { NotEnoughAllowance: {} } } },
+    },
+  },
+])(
+  'retires a definite send rejection without resending identical bytes or marking uncertainty: %j',
+  async (rejection) => {
+    const o = opts();
+    sendRejection = rejection;
+    const r = await keep(o);
+    expect(r.incidents).toContainEqual(
+      expect.objectContaining({ classification: 'rejected', deliveryId: 0 }),
+    );
+    expect(r.incidents.some((i) => i.classification === 'uncertain')).toBe(false);
+    expect((await o.store.load('near:mainnet|annon.near|delivery:0|submission'))?.tx).toBeNull();
+    unknown = true;
+    await keep(o);
+    expect(queries.filter((q) => q.method === 'send_tx')).toHaveLength(1);
+  },
+);
+
+it('retires a definite rejection during recovery without resending on following passes', async () => {
+  const o = opts();
+  failSend = true;
+  await keep(o);
+  const bytes = queries.filter((q) => q.method === 'send_tx').map((q) => q.params.signed_tx_base64);
+  expect(new Set(bytes).size).toBe(1);
+  failSend = false;
+  unknown = true;
+  sendRejection = { data: { TxExecutionError: { InvalidTxError: 'Expired' } } };
+  const r = await keep(o);
+  expect(r.incidents).toContainEqual(expect.objectContaining({ classification: 'rejected' }));
+  expect(r.incidents.some((i) => i.classification === 'uncertain')).toBe(false);
+  const count = queries.filter((q) => q.method === 'send_tx').length;
+  await keep(o);
+  expect(queries.filter((q) => q.method === 'send_tx')).toHaveLength(count);
+});
+it('fails closed without signing when the final balance query is unavailable', async () => {
+  const original = globalThis.fetch;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url, init) => {
+      const q = JSON.parse(String(init?.body));
+      return q.params.request_type === 'view_account'
+        ? Response.json({ id: q.id, error: { message: 'unavailable' } })
+        : original(url, init);
+    }),
+  );
+  const o = opts();
+  const r = await keep(o);
+  expect(r.errors).toHaveLength(1);
+  expect(created).not.toHaveBeenCalled();
+  expect(await o.budgetStore.load('near:mainnet|keeper.near|keeper-spend')).toBeNull();
+});
+
+it.each(['legacy', 'modern'])(
+  'retains an included tx after an InvalidNonce resend (%s) and resolves its outcome',
+  async (shape) => {
+    const o = opts();
+    await keep(o);
+    const id = 'near:mainnet|annon.near|delivery:0|submission';
+    const originalJob = await o.store.load(id);
+    unknown = true;
+    const invalid = { InvalidNonce: { tx_nonce: 1, ak_nonce: 1 } };
+    sendRejection =
+      shape === 'legacy'
+        ? { data: { TxExecutionError: { InvalidTxError: invalid } } }
+        : { cause: { name: 'INVALID_TRANSACTION', info: { InvalidTxError: invalid } } };
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, init) => {
+        const reply = await originalFetch(url, init);
+        if (JSON.parse(String(init?.body)).method === 'send_tx') unknown = false;
+        return reply;
+      }),
+    );
+    const result = await keep(o);
+    expect(result.incidents.some((i) => i.classification === 'rejected')).toBe(false);
+    expect((await o.store.load(id))?.tx).toEqual(originalJob?.tx);
+    expect(queries.filter((q) => q.method === 'tx')).toHaveLength(2);
+    expect(created).toHaveBeenCalledTimes(1);
+    final = true;
+    all = [d(0, 2, [2])];
+    await keep(o);
+    expect((await o.store.load(id))?.tx).toBeNull();
+    expect((await o.store.load('near:mainnet|annon.near|active:keeper.near'))?.active).toEqual([]);
+    expect(created).toHaveBeenCalledTimes(1);
+  },
+);
+
+it('keeps InvalidNonce and unrecognized invalid-transaction replies uncertain until final proof', async () => {
+  for (const error of [
+    { cause: { name: 'INVALID_TRANSACTION', info: { InvalidTxError: { InvalidNonce: {} } } } },
+    { cause: { name: 'INVALID_TRANSACTION' } },
+    { data: { TxExecutionError: { InvalidTxError: 'FutureVariant' } } },
+  ]) {
+    resetRelayState();
+    const o = opts();
+    unknown = true;
+    sendRejection = error;
+    const result = await keep(o);
+    expect(result.sent[0]?.result).toMatchObject({ uncertain: true });
+    expect((await o.store.load('near:mainnet|annon.near|delivery:0|submission'))?.tx).toBeTruthy();
+    keyNonce = 1;
+    const resolved = await keep(o);
+    expect(resolved.incidents).toContainEqual(
+      expect.objectContaining({ reason: 'nonce consumed at finality' }),
+    );
+    keyNonce = 0;
+  }
+});
+
+it('deduplicates InFlight alerts per delivery across passes, restarts and funding/payout phases', async () => {
+  const o = { ...opts(), alert: vi.fn() };
+  all = [d(0, 1), d(1, 2, [1])];
+  await keep(o);
+  await keep({ ...o });
+  all = [d(0, 2, [1]), d(1, 2, [1])];
+  await keep({ ...o });
+  expect(o.alert.mock.calls.map(([a]) => a)).toEqual([
+    { type: 'in_flight', deliveryId: 0 },
+    { type: 'in_flight', deliveryId: 1 },
+  ]);
+});
+
+it.each([false, true])(
+  'alerts again after a delivery leaves InFlight (removed=%s)',
+  async (removed) => {
+    const o = { ...opts(), alert: vi.fn() };
+    const id = 'near:mainnet|annon.near|delivery:0|submission';
+    all = [d(0, 1)];
+    await keep(o);
+    all = removed ? [] : [d(0, 2, [2])];
+    // A delivery can disappear between the indexed snapshot and its fresh state read.
+    if (removed) {
+      const original = globalThis.fetch;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url, init) => {
+          const q = JSON.parse(String(init?.body));
+          const value =
+            q.params.method_name === 'open_delivery_count'
+              ? 1
+              : q.params.method_name === 'list_open_deliveries'
+                ? [d(0, 1)]
+                : undefined;
+          return value === undefined
+            ? original(url, init)
+            : Response.json({
+                id: q.id,
+                result: { result: [...Buffer.from(JSON.stringify(value))] },
+              });
+        }),
+      );
+      await keep({ ...o });
+      vi.stubGlobal('fetch', original);
+    } else await keep({ ...o });
+    expect((await o.store.load(id))?.inFlightAlerted).toBe(false);
+    all = [d(0, 2, [1])];
+    await keep({ ...o });
+    await keep({ ...o });
+    expect(o.alert.mock.calls.map(([a]) => a)).toEqual([
+      { type: 'in_flight', deliveryId: 0 },
+      { type: 'in_flight', deliveryId: 0 },
+    ]);
+    expect(created).not.toHaveBeenCalled();
+  },
+);
+
+it('continues runnable payout work after losing the InFlight alert CAS', async () => {
+  const o = { ...opts(), alert: vi.fn() };
+  all = [d(0, 2, [1, 0])];
+  const cas = o.store.compareAndSet.bind(o.store);
+  let raced = false;
+  vi.spyOn(o.store, 'compareAndSet').mockImplementation(async (id, old, next) => {
+    if (!raced && next?.inFlightAlerted) {
+      raced = true;
+      expect(await cas(id, old, next)).toBe(true);
+      return false;
+    }
+    return cas(id, old, next);
+  });
+  const result = await keep(o);
+  expect(raced).toBe(true);
+  expect(o.alert).not.toHaveBeenCalled();
+  expect(result.incidents).toContainEqual({ classification: 'in_flight', deliveryId: 0 });
+  expect(result.errors).toEqual([]);
+  expect(result.sent).toHaveLength(1);
+  expect(created).toHaveBeenCalledTimes(1);
+});
+
+it.each([false, true])(
+  'judges low balance once per pass using the largest cost (reverse=%s)',
+  async (reverse) => {
+    const o = { ...opts(), hourlyBudget: 1n, alert: vi.fn() };
+    accountAmount = '550000000000000000000000';
+    all = reverse ? [d(0, 2), d(1)] : [d(0), d(1, 2)];
+    await keep(o);
+    await keep({ ...o });
+    expect(o.alert).toHaveBeenCalledTimes(1);
+    expect(o.alert).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'low_balance', needed: '600919026549026500000000' }),
+    );
+    expect((await o.store.load('near:mainnet|keeper.near|balance'))?.balanceLow).toBe(true);
+  },
+);
+
+it('does not consume a half-open breaker probe while balance is low', async () => {
+  const o = opts();
+  const id = 'near:mainnet|annon.near|breaker';
+  const breaker = { id, revision: 0, tries: 1, nextAt: 99999 };
+  await o.store.compareAndSet(id, null, breaker);
+  accountAmount = '1';
+  await keep(o);
+  expect(await o.store.load(id)).toEqual(breaker);
+  accountAmount = '10000000000000000000000000';
+  await keep(o);
+  expect(created).toHaveBeenCalledTimes(1);
+});

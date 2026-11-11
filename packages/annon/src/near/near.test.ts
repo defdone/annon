@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Identity } from '../settle-near/identity.js';
 import type { ReopenV2 } from '../settle-near/purchase.js';
-import { getConfig, NearError, readOutcome, txOutcome, view } from './rpc.js';
+import { getConfig, NearError, readOutcome, rpcReply, txOutcome, view } from './rpc.js';
 import {
   type RegisterArgs,
   registerText,
@@ -266,4 +266,82 @@ describe('draft-3 authoritative texts', () => {
       expect(text).not.toContain('\nnetwork:');
       expect(text.endsWith('\n')).toBe(false);
     });
+});
+
+it('names an RPC rate limit (429 without a request id) instead of a foreign reply', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      Response.json(
+        { jsonrpc: '2.0', error: { code: -429, message: 'Rate limits exceeded' } },
+        { status: 429 },
+      ),
+    ),
+  );
+  await expect(view('https://rpc.example', 'annon.near', 'get_config', {})).rejects.toThrow(
+    /rate limited/,
+  );
+  vi.unstubAllGlobals();
+});
+
+it.each([401, 403, 500, 503, 429])(
+  'reports HTTP %s before parsing or checking a request id',
+  async (status) => {
+    for (const body of ['not JSON', JSON.stringify({ error: { message: 'unauthorized' } })]) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(body, { status })),
+      );
+      await expect(view('https://rpc.example', 'annon.near', 'get_config', {})).rejects.toThrow(
+        status === 429 ? /NEAR RPC HTTP 429.*rate limited/ : `NEAR RPC HTTP ${status}`,
+      );
+    }
+  },
+);
+
+it.each([
+  [400, 'REQUEST_VALIDATION_ERROR', 'PENDING'],
+  [400, 'REQUEST_VALIDATION_ERROR', 'NOT_OBSERVED'],
+  [400, 'HANDLER_ERROR', 'DOES_NOT_TRACK_SHARD'],
+  [408, 'TIMEOUT_ERROR', 'TIMEOUT_ERROR'],
+  [500, 'INTERNAL_ERROR', 'INTERNAL_ERROR'],
+] as const)('preserves a structured HTTP %s RPC error (%s / %s)', async (status, name, cause) => {
+  const error = { name, cause: { name: cause, info: { detail: 'keep this' } } };
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url, init) =>
+      Response.json({ jsonrpc: '2.0', id: JSON.parse(String(init?.body)).id, error }, { status }),
+    ),
+  );
+  await expect(rpcReply('https://rpc.example', 'tx', {})).resolves.toEqual({
+    jsonrpc: '2.0',
+    id: expect.any(String),
+    error,
+  });
+});
+
+it('checks the request id on a structured non-2xx RPC reply', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      Response.json(
+        { jsonrpc: '2.0', id: 'foreign', error: { name: 'INTERNAL_ERROR' } },
+        { status: 500 },
+      ),
+    ),
+  );
+  await expect(rpcReply('https://rpc.example', 'tx', {})).rejects.toThrow('another request');
+});
+
+it('names any HTTP 429 as rate limited, even with a JSON-RPC body that lacks the request id', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      Response.json({ jsonrpc: '2.0', error: { code: -32000, message: 'busy' } }, { status: 429 }),
+    ),
+  );
+  await expect(view('https://rpc.example', 'annon.near', 'get_config', {})).rejects.toThrow(
+    /rate limited/,
+  );
+  vi.unstubAllGlobals();
 });

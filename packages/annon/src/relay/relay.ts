@@ -504,7 +504,9 @@ export interface RelayResult {
    * operation again is safe: the contract refuses it if the first one landed.
    */
   uncertain?: true;
-  /** With `uncertain`: what NEAR answered, for the operator. */
+  /** RPC validation refused this submission before execution. */
+  rejected?: true;
+  /** With `uncertain` or `rejected`: what NEAR answered, for the operator. */
   reason?: string;
 }
 
@@ -657,7 +659,7 @@ export async function keep(o: KeepOptions): Promise<KeepResult> {
     () =>
       runKeeper(o, {
         sign: (method, args, gas) => sign(o, key, method, args, gas),
-        send: (hash, signed) => send(o, key, hash, signed),
+        send: (hash, signed) => send(o, key, hash, signed, true),
       }),
     key,
   );
@@ -665,13 +667,14 @@ export async function keep(o: KeepOptions): Promise<KeepResult> {
 
 /**
  * Sends signed bytes; after a lost or unclear answer, looks the transaction up and sends the same
- * bytes again (same hash: NEAR never runs it twice). Never throws: any doubt is `uncertain`.
+ * bytes again (same hash). Keepers retire only definite validation refusals.
  */
 async function send(
   o: { nearRpc: string; sender: Sender },
   key: string,
   txHash: string,
   signed: string,
+  keeper = false,
 ): Promise<RelayResult> {
   const unclear = (reason: string): RelayResult => ({ txHash, uncertain: true, reason });
   let reason = 'no clear answer from NEAR';
@@ -686,12 +689,44 @@ async function send(
             wait_until: 'INCLUDED',
           }).catch(() => null);
       if (reply && !reply.error && inBlock(reply.result)) return { txHash };
-      const refused = (
-        reply?.error?.data as { TxExecutionError?: { InvalidTxError?: unknown } } | undefined
-      )?.TxExecutionError?.InvalidTxError;
+      const legacy = reply?.error?.data as
+        | { TxExecutionError?: { InvalidTxError?: unknown } }
+        | undefined;
+      const info = reply?.error?.cause?.info as { InvalidTxError?: unknown } | undefined;
+      const refused = legacy?.TxExecutionError?.InvalidTxError ?? info?.InvalidTxError;
+      const variant =
+        typeof refused === 'string'
+          ? refused
+          : isObject(refused)
+            ? Object.keys(refused)[0]
+            : undefined;
+      // InvalidNonce can mean these very bytes already landed. Unknown variants are ambiguous too.
+      const definite = new Set([
+        'NotEnoughBalance',
+        'NotEnoughAllowance',
+        'InvalidAccessKeyError',
+        'InvalidSignerId',
+        'SignerDoesNotExist',
+        'InvalidReceiverId',
+        'InvalidSignature',
+        'CostOverflow',
+        'InvalidChain',
+        'Expired',
+        'ActionsValidation',
+        'TransactionSizeExceeded',
+      ]);
+      if (keeper && variant !== undefined && definite.has(variant)) {
+        accounts.delete(key);
+        // Only the variant name is public; RPC data may echo arbitrary transaction fields.
+        return {
+          txHash,
+          rejected: true,
+          reason: variant && /^[A-Za-z]+$/.test(variant) ? variant : 'InvalidTxError',
+        };
+      }
       // The chain is past the nonces given out here: later operations read it afresh, whether or
       // not this one landed.
-      if (isObject(refused) && 'InvalidNonce' in refused) accounts.delete(key);
+      if (variant === 'InvalidNonce') accounts.delete(key);
       const status = await lookUp(o.nearRpc, txHash, o.sender.accountId);
       if (status && !status.error && inBlock(status.result)) return { txHash };
       // A refusal doesn't prove nothing landed (a node may accept a transaction and refuse it on
@@ -709,7 +744,8 @@ async function send(
         const next = advice(e);
         reason = `NEAR answered the ${what}: ${describe(e)}`;
         if (next === 'elsewhere') return unclear(`${reason}; ask a NEAR RPC that tracks its shard`);
-        if (next === 'stop' && what === 'send') return unclear(reason);
+        if (what === 'send' && (next === 'stop' || (keeper && next !== 'pending')))
+          return unclear(reason);
         if (next === 'pending') look = true;
         if (next === 'later') later = true;
       }

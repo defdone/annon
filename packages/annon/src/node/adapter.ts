@@ -5,8 +5,8 @@ import { Annon, type AnnonOptions } from '../api/annon.js';
 import { download, secureUrl } from '../download/download.js';
 import { sameResource } from '../download/proof.js';
 import { inspect, inspectHeader, MAX_HEADER, parseHeader } from '../envelope/pay2.js';
-import { getFile, getPurchase, txOutcome } from '../near/rpc.js';
-import { OneClick, type Origin } from '../oneclick/oneclick.js';
+import { getConfig, getFile, getPurchase, txOutcome } from '../near/rpc.js';
+import { OneClick, OneClickRefused, type Origin } from '../oneclick/oneclick.js';
 import {
   type EncryptedRecord,
   encryptedRecoveryStore,
@@ -28,6 +28,7 @@ import { type Config, loadConfig, type TrustPrompt, trustContract } from './conf
 import { AdapterError, publicError, usage } from './errors.js';
 import { newOutput, writeBackup } from './io.js';
 import { type Keychain, osKeychain } from './keychain.js';
+import { humanPaymentTerms, validatePaymentToken } from './payment-terms.js';
 import { assertSignerInput, configuredWallet } from './signer-wallet.js';
 import { type SigningResult, signingRequest, verifySigningResult } from './signing.js';
 import {
@@ -559,46 +560,64 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         baseRecipient: f.terms.base?.pay_to,
         token: route === 'base' ? f.terms.base?.usdc : f.terms.near.token,
       };
+      const paymentConfig = await getConfig(c.nearRpc, c.contractId);
+      if (paymentConfig.network !== c.network)
+        return fail(
+          'network_mismatch',
+          'The contract network differs from the configured network.',
+          2,
+        );
+      validatePaymentToken(paymentTerms, paymentConfig);
       d.paymentTerms?.(paymentTerms);
+      let refundBudget: (() => Promise<void>) | undefined;
       if (d.agent) {
         if (c.dailyBudget === undefined)
           return fail('budget_required', 'Configure a daily agent budget before buying.', 2);
         const budgetDir = join(c.stateDir, 'budgets');
         await mkdir(budgetDir, { recursive: true, mode: 0o700 });
-        await reserveSpend(fileStore<BudgetRecord>(budgetDir), 'agent:USDC', BigInt(price), {
-          daily: c.dailyBudget === '0' ? 0n : BigInt(amount(c.dailyBudget)),
-        });
+        refundBudget = await reserveSpend(
+          fileStore<BudgetRecord>(budgetDir),
+          'agent:USDC',
+          BigInt(price),
+          {
+            daily: c.dailyBudget === '0' ? 0n : BigInt(amount(c.dailyBudget)),
+          },
+        );
       } else if (!d.browserApprovals) {
-        d.notify?.(JSON.stringify(paymentTerms));
-        if (
-          !(await (o.json ? undefined : d.prompt)?.(
-            `Approve these payment terms: ${JSON.stringify(paymentTerms)}? Type yes: `,
-          ))
-        )
+        d.notify?.(
+          o.json ? JSON.stringify(paymentTerms) : humanPaymentTerms(paymentTerms, paymentConfig),
+        );
+        if (!(await (o.json ? undefined : d.prompt)?.('Type yes to pay: ')))
           return fail(
             'confirmation_required',
             'Review and confirm the exact payment terms before paying.',
             3,
           );
       }
-      const bought = await sdk.buy({
-        fileId: found.fileId,
-        header: found.header,
-        recovery: buyer,
-        refund: buyer.identity,
-        ...(route === '1click' ? {} : { payer: buyer }),
-        maxPrice,
-        moderators: o.moderator ? [o.moderator] : (c.moderators ?? []),
-        paymentRequired: found.pr,
-        url: found.url,
-        ...(origin ? { origin, oneClick: new OneClick({ fetch: fetcher }) } : {}),
-        submitBase: async (payment) => {
-          const r = await response(found.url, fetcher, { 'PAYMENT-SIGNATURE': payment });
-          await r.body?.cancel();
-          if (![200, 206, 402, 503].includes(r.status))
-            throw new Error('payment submission failed');
-        },
-      });
+      const bought = await sdk
+        .buy({
+          fileId: found.fileId,
+          header: found.header,
+          recovery: buyer,
+          refund: buyer.identity,
+          ...(route === '1click' ? {} : { payer: buyer }),
+          maxPrice,
+          moderators: o.moderator ? [o.moderator] : (c.moderators ?? []),
+          paymentRequired: found.pr,
+          url: found.url,
+          ...(origin ? { origin, oneClick: new OneClick({ fetch: fetcher }) } : {}),
+          submitBase: async (payment) => {
+            const r = await response(found.url, fetcher, { 'PAYMENT-SIGNATURE': payment });
+            await r.body?.cancel();
+            if (![200, 206, 402, 503].includes(r.status))
+              throw new Error('payment submission failed');
+          },
+        })
+        .catch(async (error: unknown) => {
+          // Ledger corruption or storage failure must not replace the actionable quote refusal.
+          if (error instanceof OneClickRefused) await refundBudget?.().catch(() => {});
+          throw error;
+        });
       // Raw purchase records and signed payment payloads never cross the adapter boundary.
       return {
         purchaseId: bought.record.id,

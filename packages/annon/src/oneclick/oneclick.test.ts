@@ -194,3 +194,38 @@ it('refuses a quote missing the required timeEstimate before giving deposit inst
   });
   await expect(c.quote(message, origin)).rejects.toThrow(/delivery estimate/);
 });
+
+it('surfaces a safe quote refusal and decimal USDC minimum, discarding other response fields', async () => {
+  const c = new OneClick({
+    now: () => now,
+    fetch: async () =>
+      Response.json(
+        {
+          message: 'Amount is too low for bridge, try at least 149983',
+          secret: 'SECRET_VALUE',
+        },
+        { status: 400 },
+      ),
+  });
+  const { publicError } = await import('../node/errors.js');
+  const error = await c.quote(message, origin).catch((e: unknown) => e);
+  expect(publicError(error)).toMatchObject({
+    code: 'oneclick_refused',
+    message: 'Amount is too low for bridge, try at least 149983',
+    minimumAmountUsdc: '0.149983',
+  });
+  expect(JSON.stringify(publicError(error))).not.toContain('SECRET_VALUE');
+});
+it.each(['private_key=SECRET_VALUE', '<html>bad gateway</html>'])(
+  'keeps unrecognized 1Click failures generic: %s',
+  async (messageText) => {
+    const c = new OneClick({
+      now: () => now,
+      fetch: async () => Response.json({ message: messageText }, { status: 400 }),
+    });
+    const { publicError } = await import('../node/errors.js');
+    expect(publicError(await c.quote(message, origin).catch((e: unknown) => e)).code).toBe(
+      'operation_failed',
+    );
+  },
+);

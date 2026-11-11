@@ -1,5 +1,5 @@
 /** Native NEAR USDC delivery through 1Click. SUCCESS is delivery, not purchase acceptance. */
-import { account, uint } from '../settle-near/codec.js';
+import { account, uint, usdc } from '../settle-near/codec.js';
 import { parsePurchaseMessage } from '../settle-near/purchase.js';
 import { NEAR_USDC } from '../settle-near/terms.js';
 export interface Origin {
@@ -72,6 +72,26 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener('abort', stop, { once: true });
   });
 }
+/** Only recognized public service messages may cross the CLI/MCP boundary. */
+export class OneClickRefused extends Error {
+  readonly code = 'oneclick_refused';
+  readonly minimumAmountUsdc?: string;
+  constructor(message: string) {
+    super(message);
+    const minimum = /^Amount is too low for bridge, try at least ([0-9]{1,39})[.]?$/i.exec(message);
+    if (minimum?.[1]) this.minimumAmountUsdc = usdc(minimum[1]);
+  }
+}
+function refusalMessage(value: unknown): value is string {
+  // Do not expose arbitrary upstream text: it can echo requests, credentials or signed payloads.
+  return (
+    typeof value === 'string' &&
+    (/^Amount is too low for bridge, try at least [0-9]{1,39}[.]?$/i.test(value) ||
+      /^(No routes found|No liquidity available|Amount is too low|Amount is too high|Unsupported (origin|destination) asset)[.]?$/i.test(
+        value,
+      ))
+  );
+}
 export class OneClick {
   constructor(private readonly options: OneClickOptions = {}) {}
   private async request(
@@ -91,7 +111,14 @@ export class OneClick {
           : AbortSignal.timeout(20000),
       },
     );
-    if (!response.ok) throw new Error(`1Click HTTP ${response.status}`);
+    if (!response.ok) {
+      if (path === '/quote' && response.status >= 400 && response.status < 500) {
+        const body: unknown = await response.json().catch(() => null);
+        const message = (body as { message?: unknown } | null)?.message;
+        if (refusalMessage(message)) throw new OneClickRefused(message);
+      }
+      throw new Error(`1Click HTTP ${response.status}`);
+    }
     const result: unknown = await response.json();
     if (!result || typeof result !== 'object' || Array.isArray(result))
       throw new Error('malformed 1Click response');

@@ -55,22 +55,50 @@ export interface RpcReply {
  */
 export async function rpcReply(url: string, method: string, params: unknown): Promise<RpcReply> {
   const id = `annon-${++nextId}`;
-  let body: RpcReply & { id?: unknown };
+  let body: RpcReply & { id?: unknown; jsonrpc?: unknown };
+  let response: Response;
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(new Error('timed out')), RPC_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
+    response = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
       signal: abort.signal,
     });
-    body = await res.json();
+    const httpFailure = (): never =>
+      fail(
+        'transport',
+        `NEAR RPC HTTP ${response.status}${response.status === 429 ? ': rate limited (429)' : ''}`,
+      );
+    try {
+      body = await response.json();
+    } catch (error) {
+      if (!response.ok) return httpFailure();
+      throw error;
+    }
+    // NEAR also returns structured JSON-RPC errors on HTTP 400/408/500. Preserve them for
+    // callers that distinguish pending work from rejection; use HTTP only without an RPC body.
+    // A 429 is rate limiting whatever its body says (FastNEAR answered without an id).
+    if (response.status === 429) return httpFailure();
+    if (
+      !response.ok &&
+      (!body ||
+        typeof body !== 'object' ||
+        Array.isArray(body) ||
+        (body.jsonrpc !== '2.0' && body.id !== id) ||
+        (!('result' in body) && !('error' in body)))
+    )
+      return httpFailure();
   } catch (e) {
+    if (e instanceof NearError) throw e;
     return fail('transport', `NEAR RPC unreachable: ${(e as Error).message}`);
   } finally {
     clearTimeout(timer);
   }
+  // Rate-limit answers carry no request id; name them instead of calling them someone else's reply.
+  if ((body as { error?: { code?: unknown } })?.error?.code === -429)
+    return fail('transport', 'NEAR RPC rate limited (429)');
   if (body?.id !== id) return malformed('a reply to another request');
   return body;
 }
