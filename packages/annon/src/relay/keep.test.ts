@@ -5,6 +5,26 @@ import { memoryStore } from '../pay/store.js';
 import type { KeeperRecord } from './keeper-runner.js';
 import { keep, resetRelayState } from './relay.js';
 
+it('near-api-js decodes blockHash as a plain array, which the keeper must convert', async () => {
+  const real = await vi.importActual<typeof import('near-api-js')>('near-api-js');
+  const kp = real.KeyPair.fromRandom('ed25519');
+  const tx = real.createTransaction(
+    'a.near',
+    kp.getPublicKey(),
+    'b.near',
+    1n,
+    [real.actions.functionCall('m', {}, 1n, 0n)],
+    new Uint8Array(32).fill(7),
+  );
+  const signed = new real.SignedTransaction({
+    transaction: tx,
+    signature: new real.Signature({ keyType: 0, data: new Uint8Array(64) }),
+  });
+  const hash = real.decodeSignedTransaction(real.encodeTransaction(signed)).transaction.blockHash;
+  expect(hash instanceof Uint8Array).toBe(false);
+  expect(Uint8Array.from(hash)).toEqual(new Uint8Array(32).fill(7));
+});
+
 const created = vi.hoisted(() => vi.fn());
 vi.mock('near-api-js', async (original) => ({
   ...(await original<typeof import('near-api-js')>()),
@@ -15,7 +35,8 @@ vi.mock('near-api-js', async (original) => ({
     transaction: {
       nonce: 1n,
       publicKey: { toString: () => 'ed25519:fake' },
-      blockHash: new Uint8Array(32),
+      // Real near-api-js 7 decodes the hash as a plain number[] (mainnet keeper failed on it).
+      blockHash: Array.from(new Uint8Array(32)),
     },
   }),
   encodeTransaction: () => new Uint8Array([1, 2, 3]),

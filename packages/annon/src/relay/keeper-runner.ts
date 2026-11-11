@@ -258,7 +258,7 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
       );
       const tx = await transport.sign(method, args, gas);
       const referenceHash = base58.encode(
-        decodeSignedTransaction(base64.decode(tx.signed)).transaction.blockHash,
+        Uint8Array.from(decodeSignedTransaction(base64.decode(tx.signed)).transaction.blockHash),
       );
       const referenceBlock = await rpcReply(o.nearRpc, 'block', { block_id: referenceHash });
       const reference = (referenceBlock.result as { header?: { hash?: string; height?: number } })
@@ -350,7 +350,8 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
         const consumed = !key.error && validNonce && BigInt(String(nonce)) >= signed.nonce;
         let expired = false;
         if (!consumed) {
-          const referenceHash = base58.encode(signed.blockHash);
+          // near-api-js decodes the hash as a plain number[]; base58 needs a Uint8Array.
+          const referenceHash = base58.encode(Uint8Array.from(signed.blockHash));
           // Older records can recover the height through RPC; new records already retain it.
           const reference =
             tx.reference?.hash === referenceHash
