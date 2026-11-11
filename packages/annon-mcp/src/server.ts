@@ -76,7 +76,12 @@ const outputSchema = z.object({
   ok: z.boolean(),
   result: z.record(z.string(), z.unknown()).optional(),
   error: z
-    .object({ code: z.string(), message: z.string(), fileId: z.string().optional() })
+    .object({
+      code: z.string(),
+      message: z.string(),
+      fileId: z.string().optional(),
+      minimumAmountUsdc: z.string().optional(),
+    })
     .optional(),
 });
 export function createServer(

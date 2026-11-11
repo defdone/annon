@@ -1,4 +1,5 @@
 import { SellError } from '../api/annon.js';
+import { OneClickRefused } from '../oneclick/oneclick.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
 import { BudgetError } from './budget.js';
 
@@ -49,7 +50,15 @@ export function publicError(error: unknown): {
   fileId?: string;
   purchaseId?: string;
   txHash?: string;
+  minimumAmountUsdc?: string;
 } {
+  if (error instanceof OneClickRefused)
+    return {
+      code: error.code,
+      message: error.message,
+      exitCode: 1,
+      ...(error.minimumAmountUsdc ? { minimumAmountUsdc: error.minimumAmountUsdc } : {}),
+    };
   if (error instanceof TransactionUncertain)
     return {
       code: error.code,

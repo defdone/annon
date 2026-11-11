@@ -9,13 +9,16 @@ import { Annon, type AnnonOptions, SellError } from '../../annon/src/api/annon.j
 import { parseHeader, sealWithKey, sha256 } from '../../annon/src/envelope/pay2.js';
 import { keyFromSecret } from '../../annon/src/keys/near-ckd.js';
 import type { FileInfo } from '../../annon/src/near/rpc.js';
+import * as rpcModule from '../../annon/src/near/rpc.js';
 import * as adapterModule from '../../annon/src/node/adapter.js';
 import { createAdapter } from '../../annon/src/node/adapter.js';
+import type { BudgetRecord } from '../../annon/src/node/budget.js';
 import type { Input } from '../../annon/src/node/cli.js';
 import { runCli } from '../../annon/src/node/cli.js';
 import { exportRecovery, type RecoveryRecord } from '../../annon/src/pay/backup.js';
 import { type PurchaseRecord, purchaseKey } from '../../annon/src/pay/purchase.js';
 import { paymentRequired } from '../../annon/src/pay/seller.js';
+import { fileStore } from '../../annon/src/pay/store-node.js';
 import { bytes, hex } from '../../annon/src/settle-near/codec.js';
 import {
   baseNonceV2,
@@ -36,6 +39,16 @@ async function harness(agent = true, prompt?: (message: string) => Promise<boole
   const dir = await mkdtemp(join(tmpdir(), 'annon-mcp-'));
   directories.push(dir);
   await writeFile(join(dir, 'config.json'), JSON.stringify({ dailyBudget: '10' }));
+  const contractConfig = {
+    network: terms.network,
+    nearUsdc: terms.near.token,
+    usdc: must(terms.base).usdc,
+    mpc: 'v1.signer',
+    ckdDomain: 0,
+    foreignTxDomain: 0,
+    intents: 'intents.near',
+  };
+  vi.spyOn(rpcModule, 'getConfig').mockImplementation(async () => contractConfig);
   const account = privateKeyToAccount(`0x${'42'.repeat(32)}`);
   const wallet = {
     identity: { kind: 'evm' as const, id: account.address.toLowerCase() },
@@ -60,7 +73,11 @@ async function harness(agent = true, prompt?: (message: string) => Promise<boole
     sign: async (text: string) => account.signMessage({ message: text }),
   });
   const header = file.subarray(0, parseHeader(file).headerLen);
-  const finalTerms = { ...terms, cipher_hash: hex(sealed.cipherHash), seller: wallet.identity };
+  const finalTerms = {
+    ...structuredClone(terms),
+    cipher_hash: hex(sealed.cipherHash),
+    seller: wallet.identity,
+  };
   const f: FileInfo = {
     terms: finalTerms,
     termsHash: termsHash(finalTerms),
@@ -259,6 +276,8 @@ async function harness(agent = true, prompt?: (message: string) => Promise<boole
     agent: true,
     wait,
     notify,
+    listing: f,
+    contractConfig,
     get options() {
       return options;
     },
@@ -790,11 +809,18 @@ it('shows exact human payment terms and refuses payment until confirmed', async 
   expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(0);
   expect(prompt).toHaveBeenCalledTimes(1);
   const shown = prompt.mock.calls[0]?.[0] ?? '';
-  expect(shown).toContain(terms.file_id);
-  expect(shown).toContain('eip155:8453');
-  expect(shown).toContain(terms.near.price);
-  expect(shown).toContain(must(terms.base).pay_to);
-  for (const r of terms.near.recipients) expect(shown).toContain(r.identity.id);
+  expect(h.notify).toHaveBeenCalledTimes(1);
+  const termsText = h.notify.mock.calls[0]?.[0] ?? '';
+  expect(shown).toBe('Type yes to pay: ');
+  expect(termsText).toContain(terms.file_id);
+  expect(termsText).toContain(must(terms.base).usdc);
+  expect(termsText).not.toContain('\u2014');
+  expect(termsText).toContain('eip155:8453');
+  expect(termsText).toContain('0.2 USDC');
+  expect(termsText).toContain('100%');
+  expect(termsText).toContain('USDC on Base');
+  expect(termsText).toContain(must(terms.base).pay_to);
+  for (const r of terms.near.recipients) expect(termsText).toContain(r.identity.id);
 });
 
 it('human JSON mode never prompts or silently pays using a local key', async () => {
@@ -804,5 +830,195 @@ it('human JSON mode never prompts or silently pays using a local key', async () 
     h.adapter({ ...h.defaults, command: 'buy', target: h.offerFile, route: 'base', json: true }),
   ).rejects.toMatchObject({ code: 'confirmation_required' });
   expect(prompt).not.toHaveBeenCalled();
+  expect(h.notify).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(h.notify.mock.calls[0]?.[0] ?? '')).toMatchObject({
+    price: terms.near.price,
+    recipients: terms.near.recipients,
+  });
   expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(0);
 });
+
+it('returns a quote refusal through both CLI and MCP with a decimal minimum and no response secrets', async () => {
+  const h = await harness();
+  const original = h.fetcher.getMockImplementation();
+  h.fetcher.mockImplementation(async (url, init) =>
+    String(url).endsWith('/quote')
+      ? Response.json(
+          { message: 'Amount is too low for bridge, try at least 149983', debug: 'SECRET_VALUE' },
+          { status: 400 },
+        )
+      : must(original)(url, init),
+  );
+  const execute = (o: Input) => h.adapter({ ...h.defaults, ...o });
+  const out = vi.fn();
+  expect(
+    await runCli(
+      ['buy', h.offerFile, '--route', '1click', '--origin', 'base-usdc', '--json'],
+      execute,
+      out,
+    ),
+  ).toBe(1);
+  const expected = {
+    code: 'oneclick_refused',
+    message: 'Amount is too low for bridge, try at least 149983',
+    minimumAmountUsdc: '0.149983',
+  };
+  expect(JSON.parse(out.mock.calls[0]?.[0] ?? '').error).toEqual(expected);
+  const c = await connect(execute);
+  try {
+    const result = await c.client.callTool({
+      name: 'annon_buy',
+      arguments: { target: h.offerFile, route: '1click', origin: 'base-usdc' },
+    });
+    expect(result.structuredContent).toEqual({ ok: false, error: expected });
+    expect(JSON.stringify([result, out.mock.calls])).not.toContain('SECRET_VALUE');
+  } finally {
+    await c.close();
+  }
+});
+
+it.each([false, true])(
+  'refuses noncanonical USDC before confirmation, notification or an agent budget charge (agent=%s)',
+  async (agent) => {
+    const prompt = vi.fn(async () => true);
+    const h = await harness(agent, prompt);
+    h.listing.terms.near.token = 'fake-usdc.near';
+    await expect(
+      h.adapter({
+        ...h.defaults,
+        command: 'buy',
+        target: h.offerFile,
+        route: '1click',
+        origin: 'base-usdc',
+        json: true,
+      }),
+    ).rejects.toThrow(/canonical USDC/);
+    expect(prompt).not.toHaveBeenCalled();
+    expect(h.notify).not.toHaveBeenCalled();
+    expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(0);
+    const { fileStore } = await import('../../annon/src/pay/store-node.js');
+    expect(await fileStore(join(h.dir, 'budgets')).load('agent:USDC')).toBeNull();
+  },
+);
+
+it.each([400, 500, 429, 0])(
+  'refunds the agent budget only for a definite quote refusal (status=%s)',
+  async (status) => {
+    const h = await harness();
+    await writeFile(h.defaults.config, JSON.stringify({ dailyBudget: '0.2' }));
+    const original = must(h.fetcher.getMockImplementation());
+    h.fetcher.mockImplementation(async (url, init) => {
+      if (!String(url).endsWith('/quote')) return original(url, init);
+      if (!status) throw new Error('lost quote response');
+      return Response.json(
+        { message: status === 429 ? 'unknown refusal' : 'No routes found' },
+        { status },
+      );
+    });
+    const input = {
+      ...h.defaults,
+      command: 'buy' as const,
+      target: h.offerFile,
+      route: '1click' as const,
+      origin: 'base-usdc',
+    };
+    await expect(h.adapter(input)).rejects.toThrow();
+    h.fetcher.mockImplementation(original);
+    if (status === 400) {
+      await expect(h.adapter(input)).resolves.toMatchObject({ state: 'deposit_required' });
+      expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(2);
+    } else {
+      await expect(h.adapter(input)).rejects.toMatchObject({ code: 'budget_exceeded' });
+      expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(1);
+    }
+  },
+);
+
+it.each(['near:testnet', 'near:sandbox'])(
+  'admits configured payment tokens on %s before buy or confirmation',
+  async (network) => {
+    for (const agent of [false, true]) {
+      for (const route of ['1click', 'base'] as const) {
+        const prompt = vi.fn(async () => false);
+        const h = await harness(agent, prompt);
+        h.contractConfig.network = network;
+        h.contractConfig.nearUsdc = 'usdc.testnet';
+        h.contractConfig.usdc = `0x${'12'.repeat(20)}`;
+        h.listing.terms.network = network;
+        h.listing.terms.near.token = h.contractConfig.nearUsdc;
+        must(h.listing.terms.base).usdc = h.contractConfig.usdc;
+        const input = {
+          ...h.defaults,
+          network,
+          command: 'buy' as const,
+          target: h.offerFile,
+          route,
+          ...(route === '1click' ? { origin: 'base-usdc' } : {}),
+        };
+        if (agent) {
+          await expect(h.adapter(input)).resolves.toMatchObject({
+            state: route === '1click' ? 'deposit_required' : 'submitted',
+          });
+          expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(1);
+        } else {
+          await expect(h.adapter(input)).rejects.toMatchObject({ code: 'confirmation_required' });
+          expect(h.notify.mock.calls[0]?.[0]).toContain(
+            route === '1click' ? h.contractConfig.nearUsdc : h.contractConfig.usdc,
+          );
+          expect(prompt).toHaveBeenCalledTimes(1);
+        }
+      }
+    }
+  },
+);
+
+it.each(['near', 'base'] as const)(
+  'rejects %s payment tokens that differ from contract configuration',
+  async (route) => {
+    const h = await harness();
+    if (route === 'near') h.contractConfig.nearUsdc = 'other-usdc.near';
+    else h.contractConfig.usdc = `0x${'12'.repeat(20)}`;
+    await expect(
+      h.adapter({
+        ...h.defaults,
+        command: 'buy',
+        target: h.offerFile,
+        route: route === 'near' ? '1click' : 'base',
+        origin: 'base-usdc',
+      }),
+    ).rejects.toMatchObject({ code: 'network_mismatch' });
+    expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(0);
+    expect(await fileStore(join(h.dir, 'budgets')).load('agent:USDC')).toBeNull();
+  },
+);
+
+it.each(['invalid', '0'])(
+  'preserves oneclick_refused when the budget refund encounters a corrupt ledger (%s)',
+  async (daily) => {
+    const h = await harness();
+    const original = must(h.fetcher.getMockImplementation());
+    const ledger = fileStore<BudgetRecord>(join(h.dir, 'budgets'));
+    h.fetcher.mockImplementation(async (url, init) => {
+      if (!String(url).endsWith('/quote')) return original(url, init);
+      const old = must(await ledger.load('agent:USDC'));
+      expect(
+        await ledger.compareAndSet(old.id, old, { ...old, revision: old.revision + 1, daily }),
+      ).toBe(true);
+      return Response.json({ message: 'No routes found' }, { status: 400 });
+    });
+    await expect(
+      h.adapter({
+        ...h.defaults,
+        command: 'buy',
+        target: h.offerFile,
+        route: '1click',
+        origin: 'base-usdc',
+      }),
+    ).rejects.toMatchObject({
+      code: 'oneclick_refused',
+      message: 'No routes found',
+    });
+    expect((await ledger.load('agent:USDC'))?.daily).toBe(daily);
+    expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(1);
+  },
+);

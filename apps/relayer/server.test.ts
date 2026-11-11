@@ -15,7 +15,7 @@ import {
 } from '../../packages/annon/src/relay/relay.ts';
 import { termsHash } from '../../packages/annon/src/settle-near/terms.ts';
 import { purchase, terms } from '../../packages/annon/test/fixtures.ts';
-import { type Config, fromEnv, handle, hits, serve } from './server.ts';
+import { type Config, deliverKeeperAlert, fromEnv, handle, hits, serve } from './server.ts';
 
 const config = (over: Partial<Config> = {}): Config => ({
   nearRpc: 'https://near.rpc',
@@ -544,3 +544,107 @@ it.each(['account', 'key'] as const)(
     expect(() => serve(c, 0, 10)).toThrow('separate account and key');
   },
 );
+
+it('delivers every keeper alert as bounded webhook JSON and swallows failures without key material', async () => {
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({}))
+    .mockRejectedValueOnce(new Error('SECRET_VALUE'));
+  const alert = { type: 'low_balance' as const, balance: '1', needed: '2', key: 'SECRET_KEY' };
+  await expect(
+    deliverKeeperAlert('https://hooks.example/incoming', alert, fetcher),
+  ).resolves.toBeUndefined();
+  await expect(
+    deliverKeeperAlert('https://hooks.example/incoming', alert, fetcher),
+  ).resolves.toBeUndefined();
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  const init = fetcher.mock.calls[0]?.[1];
+  expect(JSON.parse(String(init?.body))).toEqual({
+    text: 'keeper: alert {"type":"low_balance","balance":"1","needed":"2"}',
+    alert: { type: 'low_balance', balance: '1', needed: '2' },
+  });
+  expect(init?.method).toBe('POST');
+  expect(init?.signal).toBeInstanceOf(AbortSignal);
+  expect(JSON.stringify(fetcher.mock.calls)).not.toContain('SECRET');
+});
+it('validates optional keeper webhook HTTPS URLs and balance low water', () => {
+  const enabled = {
+    CONTRACT_ID: 'c.near',
+    RELAYER_ACCOUNT: 'r.near',
+    RELAYER_KEY: 'fake',
+    KEEPER_SECONDS: '30',
+    KEEPER_ACCOUNT: 'k.near',
+    KEEPER_KEY: 'fake-keeper',
+    KEEPER_STATE_DIR: '/unused',
+    KEEPER_HOURLY_BUDGET: '1',
+    KEEPER_DAILY_BUDGET: '2',
+    KEEPER_BALANCE_LOW_WATER: '123',
+    KEEPER_ALERT_WEBHOOK: 'https://hooks.example/incoming',
+  };
+  expect(fromEnv(enabled).config.keeper).toMatchObject({
+    balanceLowWater: 123n,
+    alertWebhook: enabled.KEEPER_ALERT_WEBHOOK,
+  });
+  for (const url of ['http://hooks.example', 'https://user:pass@hooks.example', 'invalid'])
+    expect(() => fromEnv({ ...enabled, KEEPER_ALERT_WEBHOOK: url })).toThrow(
+      'KEEPER_ALERT_WEBHOOK',
+    );
+});
+
+it.each([
+  'http://hooks.example',
+  'https://user:pass@hooks.example',
+  'https://hooks.example/#fragment',
+  'invalid',
+  '',
+])('rejects a bad embedded keeper webhook at serve startup: %s', (alertWebhook) => {
+  const c = config();
+  c.keeper = {
+    sender: { accountId: 'keeper.near', key: 'fake-keeper' },
+    stateDir: '/unused',
+    hourlyBudget: 1n,
+    dailyBudget: 1n,
+    gasPrice: 1n,
+    reserveLowWater: 0n,
+    alertWebhook,
+  };
+  let server: ReturnType<typeof serve> | undefined;
+  try {
+    expect(() => {
+      server = serve(c, 0);
+    }).toThrow('KEEPER_ALERT_WEBHOOK');
+  } finally {
+    server?.close();
+  }
+});
+
+it('uses Discord Slack-compatible incoming webhooks and times out stalled delivery', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({}));
+  await deliverKeeperAlert(
+    'https://discord.com/api/webhooks/123/fake-token',
+    { type: 'breaker' },
+    fetcher,
+  );
+  expect(fetcher.mock.calls[0]?.[0]).toBe('https://discord.com/api/webhooks/123/fake-token/slack');
+  expect(fetcher.mock.calls[0]?.[1]?.redirect).toBe('error');
+  let timeoutSignal: AbortSignal | null | undefined;
+  const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(AbortSignal.abort());
+  const stalled = vi.fn<typeof fetch>(async (_url, init) => {
+    timeoutSignal = init?.signal;
+    timeoutSignal?.throwIfAborted();
+    throw new Error('unreachable');
+  });
+  try {
+    await expect(
+      deliverKeeperAlert(
+        'https://hooks.example/incoming',
+        { type: 'uncertain', deliveryId: 3 },
+        stalled,
+      ),
+    ).resolves.toBeUndefined();
+    expect(timeout).toHaveBeenCalledWith(3000);
+    expect(timeoutSignal?.aborted).toBe(true);
+  } finally {
+    timeout.mockRestore();
+  }
+});

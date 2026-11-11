@@ -13,6 +13,7 @@ import {
   materializeRefund,
   openDeliveryCount,
 } from './keeper.js';
+import { keeperBalance } from './keeper-balance.js';
 import type { RelayResult, Sender } from './relay.js';
 export interface KeeperRecord extends Versioned {
   handled?: string;
@@ -32,6 +33,8 @@ export interface KeeperRecord extends Versioned {
     reference?: { hash: string; height: number };
   } | null;
   sweep?: { block: string; count: number; from: number };
+  balanceLow?: boolean;
+  inFlightAlerted?: boolean;
 }
 export interface RefundSource {
   /** Supply current proofs from durable event history. No indexer is bundled. Retry stale proofs. */
@@ -58,8 +61,12 @@ export interface KeepOptions {
   maxUnresolved?: number;
   storagePerRefund?: bigint;
   reserveLowWater?: bigint;
+  /** Minimum liquid yoctoNEAR before signing; requires max(this, submission cost). */
+  balanceLowWater?: bigint;
   alert?: (alert: {
-    type: 'reserve_low' | 'in_flight' | 'uncertain' | 'breaker';
+    type: 'reserve_low' | 'in_flight' | 'uncertain' | 'breaker' | 'low_balance';
+    balance?: string;
+    needed?: string;
     reserve?: string;
     deliveryId?: number;
   }) => void;
@@ -71,7 +78,13 @@ export interface KeepResult {
   sent: { method: 'settle' | 'materialize_refund'; args: object; result: RelayResult }[];
   errors: { from?: number; deliveryId?: number; error: unknown }[];
   incidents: {
-    classification: 'budget' | 'transport' | 'finalized_failure' | 'in_flight' | 'uncertain';
+    classification:
+      | 'budget'
+      | 'transport'
+      | 'finalized_failure'
+      | 'in_flight'
+      | 'uncertain'
+      | 'rejected';
     deliveryId?: number;
     reason?: string;
   }[];
@@ -113,6 +126,7 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
     !Number.isSafeInteger(maxTx) ||
     maxTx < 1 ||
     o.gasPrice <= 0n ||
+    (o.balanceLowWater !== undefined && o.balanceLowWater < 0n) ||
     (o.storagePerRefund !== undefined && o.storagePerRefund < 0n) ||
     !Number.isSafeInteger(o.maxUnresolved ?? 50) ||
     (o.maxUnresolved ?? 50) < 1
@@ -195,6 +209,55 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
     await update(sweepId, { sweep: cursor });
   }
   let attempts = 0;
+  let pendingCost = 0n;
+  let passBalance: { available: bigint; needed: bigint } | undefined;
+  const balanceId = `${o.network}|${o.sender.accountId}|balance`;
+  const balanceState = async (low: boolean, balance: bigint, needed: bigint) => {
+    for (;;) {
+      const old = await o.store.load(balanceId);
+      if ((old?.balanceLow ?? false) === low) return;
+      if (
+        await o.store.compareAndSet(balanceId, old, {
+          ...old,
+          id: balanceId,
+          revision: (old?.revision ?? -1) + 1,
+          balanceLow: low,
+        })
+      ) {
+        if (low)
+          o.alert?.({
+            type: 'low_balance',
+            balance: balance.toString(),
+            needed: needed.toString(),
+          });
+        return;
+      }
+    }
+  };
+  const rejected = async (
+    id: string,
+    job: KeeperRecord,
+    deliveryId: number,
+    result: RelayResult,
+  ) => {
+    if (
+      !(await o.store.compareAndSet(id, job, {
+        ...job,
+        revision: job.revision + 1,
+        stage: 'ready',
+        tx: null,
+        tries: (job.tries ?? 0) + 1,
+        nextAt: now() + retryDelay((job.tries ?? 0) + 1, o.jitter?.() ?? Math.random()),
+      }))
+    )
+      return;
+    await untrack(id);
+    out.incidents.push({
+      classification: 'rejected',
+      deliveryId,
+      ...(result.reason ? { reason: result.reason } : {}),
+    });
+  };
   const execute = async (
     id: string,
     method: 'settle' | 'materialize_refund',
@@ -210,17 +273,6 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
       (breaker?.nextAt ?? 0) > now()
     )
       return;
-    // A half-open dependency admits one probe until verified progress or the next deadline.
-    if ((breaker?.tries ?? 0) > 0) {
-      const probe = {
-        ...breaker,
-        id: breakerId,
-        revision: (breaker?.revision ?? -1) + 1,
-        nextAt: now() + retryDelay(breaker?.tries ?? 1, o.jitter?.() ?? Math.random()),
-      };
-      if (!(await o.store.compareAndSet(breakerId, breaker, probe))) return;
-      breaker = probe;
-    }
     // Cross-process claim. Only the winner of the durable signed-hash CAS may send.
     const finalBlock = await rpcReply(o.nearRpc, 'block', { finality: 'final' });
     const finalHash = (finalBlock.result as { header?: { hash?: string } })?.header?.hash;
@@ -234,6 +286,36 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
       BigInt(gasPrice) > o.gasPrice
     )
       throw new Error('keeper gas price exceeds configured cap or is unavailable');
+    const funds = await keeperBalance({
+      nearRpc: o.nearRpc,
+      accountId: o.sender.accountId,
+      contractId: o.contractId,
+      block: finalHash,
+      gasPrice: BigInt(gasPrice),
+      method,
+      args,
+      gas,
+    });
+    const needed = funds.cost > (o.balanceLowWater ?? 0n) ? funds.cost : (o.balanceLowWater ?? 0n);
+    const available = funds.balance > pendingCost ? funds.balance - pendingCost : 0n;
+    // Judge the alert once after the pass, so cheaper calls cannot clear a costly call's warning.
+    passBalance = {
+      available:
+        passBalance && passBalance.available < available ? passBalance.available : available,
+      needed: passBalance && passBalance.needed > needed ? passBalance.needed : needed,
+    };
+    if (available < needed) return;
+    // Only affordable work consumes the half-open dependency's one probe.
+    if ((breaker?.tries ?? 0) > 0) {
+      const probe = {
+        ...breaker,
+        id: breakerId,
+        revision: (breaker?.revision ?? -1) + 1,
+        nextAt: now() + retryDelay(breaker?.tries ?? 1, o.jitter?.() ?? Math.random()),
+      };
+      if (!(await o.store.compareAndSet(breakerId, breaker, probe))) return;
+      breaker = probe;
+    }
     if (!(await track(id, deliveryId))) return;
     const claimed: KeeperRecord = {
       ...old,
@@ -290,6 +372,10 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
         return;
       const result = await transport.send(tx.txHash, tx.signed);
       out.sent.push({ method, args, result });
+      if (result.rejected) {
+        const job = await o.store.load(id);
+        if (job?.tx?.hash === tx.txHash) await rejected(id, job, deliveryId, result);
+      } else pendingCost += funds.cost;
     } catch (error) {
       // Errors before a hash is persisted did not reach send. Preserve the reservation.
       const current = await o.store.load(id);
@@ -409,6 +495,10 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
           attempts++;
           const result = await transport.send(tx.hash, tx.signed);
           out.sent.push({ method: tx.method, args: tx.args, result });
+          if (result.rejected) {
+            await rejected(id, job, deliveryId, result);
+            return true;
+          }
         }
       }
       if (
@@ -552,21 +642,33 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
           let current = await o.store.load(id);
           const d = await getDelivery(o.nearRpc, o.contractId, snapshot.id);
           if (!d) {
-            await update(id, { stage: 'retired', tries: 0, nextAt: 0 });
+            await update(id, { stage: 'retired', tries: 0, nextAt: 0, inFlightAlerted: false });
             continue;
           }
           const advanced = progress(current?.observed, d);
           if (advanced) {
             current = await update(id, { tries: 0, nextAt: 0, observed: observation(d) });
           }
-          if (d.fund.state === 2 && d.slots.some((s) => s.step.state === 1)) {
-            o.alert?.({ type: 'in_flight', deliveryId: d.id });
+          if (
+            d.fund.state === 1 ||
+            (d.fund.state === 2 && d.slots.some((s) => s.step.state === 1))
+          ) {
+            if (!current?.inFlightAlerted) {
+              const alerted = {
+                ...current,
+                id,
+                revision: (current?.revision ?? -1) + 1,
+                inFlightAlerted: true,
+              };
+              if (await o.store.compareAndSet(id, current, alerted)) {
+                current = alerted;
+                o.alert?.({ type: 'in_flight', deliveryId: d.id });
+              } else current = await o.store.load(id);
+            }
             out.incidents.push({ classification: 'in_flight', deliveryId: d.id });
-          }
-          if (d.fund.state === 1) {
-            o.alert?.({ type: 'in_flight', deliveryId: d.id });
-            out.incidents.push({ classification: 'in_flight', deliveryId: d.id });
-            continue;
+            if (d.fund.state === 1) continue;
+          } else if (current?.inFlightAlerted) {
+            current = await update(id, { inFlightAlerted: false });
           }
           const phases =
             d.fund.state === 0
@@ -647,5 +749,11 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
       out.errors.push({ error });
     }
   }
+  if (passBalance)
+    await balanceState(
+      passBalance.available < passBalance.needed,
+      passBalance.available,
+      passBalance.needed,
+    );
   return out;
 }

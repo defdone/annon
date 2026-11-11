@@ -42,6 +42,8 @@ export interface Config extends Omit<CheckOptions, 'now'> {
     dailyBudget: bigint;
     gasPrice: bigint;
     reserveLowWater: bigint;
+    balanceLowWater?: bigint;
+    alertWebhook?: string;
     refunds?: RefundSource;
   };
   /** Kill switch: answer 503 and send nothing. */
@@ -208,6 +210,7 @@ const CORS = {
 
 /** The HTTP server; nothing a client sends can make the request handler throw. */
 export function serve(c: Config, port: number, keeperSeconds = 0) {
+  if (c.keeper?.alertWebhook !== undefined) webhookUrl(c.keeper.alertWebhook);
   if (
     c.keeper &&
     (c.keeper.sender.accountId === c.sender.accountId || c.keeper.sender.key === c.sender.key)
@@ -241,6 +244,7 @@ function keeper(c: Config, seconds: number) {
           budgets = join(k.stateDir, 'budgets');
         await mkdir(jobs, { recursive: true, mode: 0o700 });
         await mkdir(budgets, { recursive: true, mode: 0o700 });
+        const deliveries: Promise<void>[] = [];
         const options: KeepOptions = {
           network: (await getConfig(c.nearRpc, c.contractId)).network,
           nearRpc: c.nearRpc,
@@ -252,10 +256,15 @@ function keeper(c: Config, seconds: number) {
           dailyBudget: k.dailyBudget,
           gasPrice: k.gasPrice,
           reserveLowWater: k.reserveLowWater,
+          ...(k.balanceLowWater === undefined ? {} : { balanceLowWater: k.balanceLowWater }),
           ...(k.refunds ? { refunds: k.refunds } : {}),
-          alert: (alert) => console.log(JSON.stringify({ keeper: 'alert', ...alert })),
+          alert: (alert) => {
+            console.log(JSON.stringify({ keeper: 'alert', ...alert }));
+            if (k.alertWebhook) deliveries.push(deliverKeeperAlert(k.alertWebhook, alert));
+          },
         };
         const result = await keep(options);
+        await Promise.all(deliveries);
         for (const incident of result.incidents)
           console.log(JSON.stringify({ keeper: 'incident', ...incident }));
         // The message only: keeper errors carry RPC and validation text, never key material.
@@ -332,6 +341,50 @@ async function respond(c: Config, req: IncomingMessage, res: ServerResponse) {
     .end(JSON.stringify(out.body));
 }
 
+function webhookUrl(value: string): string {
+  try {
+    const u = new URL(value);
+    if (u.protocol !== 'https:' || u.username || u.password || u.hash) throw new Error();
+    // Discord's Slack-compatible endpoint accepts the same {text} body as Slack.
+    if (
+      ['discord.com', 'discordapp.com'].includes(u.hostname) &&
+      /^\/api(?:\/v[0-9]+)?\/webhooks\//.test(u.pathname) &&
+      !u.pathname.endsWith('/slack')
+    )
+      u.pathname = `${u.pathname.replace(/\/$/, '')}/slack`;
+    return u.href;
+  } catch {
+    throw new Error('KEEPER_ALERT_WEBHOOK must be an HTTPS URL without user info or fragment');
+  }
+}
+
+/** Failures are deliberately contained; only public keeper alert fields are delivered. */
+export async function deliverKeeperAlert(
+  url: string,
+  value: Parameters<NonNullable<KeepOptions['alert']>>[0],
+  fetcher: typeof fetch = fetch,
+): Promise<void> {
+  try {
+    const alert: Record<string, string | number> = { type: value.type };
+    for (const field of ['balance', 'needed', 'reserve'] as const) {
+      const n = value[field];
+      if (typeof n === 'string' && /^[0-9]+$/.test(n)) alert[field] = n;
+    }
+    if (Number.isSafeInteger(value.deliveryId) && (value.deliveryId ?? -1) >= 0)
+      alert.deliveryId = value.deliveryId as number;
+    const response = await fetcher(webhookUrl(url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: `keeper: alert ${JSON.stringify(alert)}`, alert }),
+      signal: AbortSignal.timeout(3000),
+      redirect: 'error',
+    });
+    await response.body?.cancel();
+  } catch {
+    /* Alerts must never interrupt keeper work or log webhook credentials/errors. */
+  }
+}
+
 /** The settings from the environment (apps/relayer/README.md); throws on a missing or bad one. */
 export function fromEnv(e: Record<string, string | undefined>): {
   config: Config;
@@ -373,6 +426,10 @@ export function fromEnv(e: Record<string, string | undefined>): {
           dailyBudget: yocto('KEEPER_DAILY_BUDGET'),
           gasPrice: yocto('KEEPER_GAS_PRICE', '100000000'),
           reserveLowWater: yocto('KEEPER_RESERVE_LOW_WATER', '40960000000000000000000'),
+          balanceLowWater: yocto('KEEPER_BALANCE_LOW_WATER', '0'),
+          ...(e.KEEPER_ALERT_WEBHOOK?.trim()
+            ? { alertWebhook: webhookUrl(e.KEEPER_ALERT_WEBHOOK.trim()) }
+            : {}),
         }
       : undefined;
   if (
