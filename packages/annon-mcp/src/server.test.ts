@@ -16,7 +16,13 @@ import type { BudgetRecord } from '../../annon/src/node/budget.js';
 import type { Input } from '../../annon/src/node/cli.js';
 import { runCli } from '../../annon/src/node/cli.js';
 import { type OneClickQuote, OneClickQuoteExpired } from '../../annon/src/oneclick/oneclick.js';
-import { exportRecovery, type RecoveryRecord } from '../../annon/src/pay/backup.js';
+import {
+  encryptedPurchaseStore,
+  exportPurchase,
+  exportRecovery,
+  importPurchase,
+  type RecoveryRecord,
+} from '../../annon/src/pay/backup.js';
 import { block } from '../../annon/src/pay/base.js';
 import { type PurchaseRecord, purchaseKey } from '../../annon/src/pay/purchase.js';
 import { paymentRequired } from '../../annon/src/pay/seller.js';
@@ -44,6 +50,7 @@ async function harness(
   unsafeUnlock = false,
   buyerWallet?: import('../../annon/src/node/wallets.js').LocalWallet,
   realBuy = false,
+  afterBuy?: (sdk: Annon, options: AnnonOptions) => void | Promise<void>,
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'annon-mcp-'));
   directories.push(dir);
@@ -199,6 +206,7 @@ async function harness(
             route: base ? ('base-usdc' as const) : ('near-usdc' as const),
             network: base ? 'eip155:8453' : terms.network,
             asset: base ? must(terms.base).usdc : terms.near.token,
+            price: base ? must(f.terms.base).price : f.terms.near.price,
             buyer_key: hex(keyFromSecret(new Uint8Array(32).fill(6)).publicKeyBytes),
             recovery: args.recovery.identity,
             terms_hash: f.termsHash,
@@ -239,9 +247,11 @@ async function harness(
             await sdk.store.compareAndSet(purchaseKey(id), record, next);
             saved = next;
             await args.onQuote?.(quote);
+            await afterBuy?.(sdk, o);
             return { route: p.route, record: next, instructions: quote.deposit };
           }
           await args.submitBase?.('SIGNED_PAYMENT_PAYLOAD');
+          await afterBuy?.(sdk, o);
           return { route: p.route, record, payment: 'SIGNED_PAYMENT_PAYLOAD' };
         });
       vi.spyOn(sdk, 'accept').mockImplementation(async () => {
@@ -324,6 +334,435 @@ async function connect(execute: (o: Input) => Promise<Record<string, unknown>>) 
     },
   };
 }
+
+it.each(['near', 'base', '1click'] as const)(
+  'reports verified %s payment amounts through CLI and MCP, saved status and open',
+  async (route) => {
+    for (const transport of ['cli', 'mcp']) {
+      const buyer =
+        route === 'near'
+          ? { identity: { kind: 'near' as const, id: 'buyer.testnet' }, authorize: vi.fn() }
+          : undefined;
+      const h = await harness(true, undefined, false, buyer);
+      must(h.listing.terms.base).price = '123456';
+      const expected = {
+        amountUsdc: route === 'base' ? '0.123456' : '0.2',
+        amountBaseUnits: route === 'base' ? '123456' : '200000',
+        asset: {
+          symbol: 'USDC',
+          id: route === 'base' ? must(terms.base).usdc : terms.near.token,
+        },
+        network: route === 'base' ? 'eip155:8453' : terms.network,
+        route,
+        ...(route === '1click'
+          ? {
+              source: {
+                chain: 'base',
+                asset: 'nep141:base-usdc',
+                amount: '210000',
+                depositBefore: expect.any(String),
+              },
+            }
+          : {}),
+      };
+      const connection = await connect((o) => h.adapter({ ...h.defaults, ...o }));
+      try {
+        const call = async (command: 'buy' | 'status' | 'open', args: Record<string, unknown>) => {
+          if (transport === 'mcp') {
+            const response = await connection.client.callTool({
+              name: `annon_${command}`,
+              arguments: args,
+            });
+            expect(response.isError, JSON.stringify(response)).not.toBe(true);
+            return (response.structuredContent as { result: Record<string, unknown> }).result;
+          }
+          const printed: string[] = [];
+          expect(
+            await runCli(
+              [command, String(args.target), '--json'],
+              (o) => h.adapter({ ...h.defaults, ...o, ...args }),
+              (s) => printed.push(s),
+            ),
+          ).toBe(0);
+          return JSON.parse(must(printed[0])).result as Record<string, unknown>;
+        };
+        const bought = await call('buy', {
+          target: h.offerFile,
+          url: h.defaults.url,
+          route,
+          ...(route === '1click' ? { origin: 'base-usdc' } : {}),
+        });
+        expect(bought.payment).toEqual(expected);
+        const backup = await importPurchase(
+          await readFile(String(bought.backup), 'utf8'),
+          h.options.backupSecret,
+        );
+        expect(backup.payment).toEqual(bought.payment);
+        const store = encryptedPurchaseStore(h.options.rawStore, h.options.backupSecret);
+        const saved = must(await store.load(purchaseKey(String(bought.purchaseId))));
+        // Cached summaries are projected, never returned wholesale with unexpected fields.
+        const withExtraFields = {
+          ...saved,
+          revision: saved.revision + 1,
+          payment: {
+            ...must(saved.payment),
+            amountUsdc: 'HOST_TEXT',
+            authorization: 'SIGNED_PAYMENT_PAYLOAD',
+            ...(saved.payment?.source
+              ? { source: { ...saved.payment.source, address: 'deposit-address' } }
+              : {}),
+          },
+        };
+        await store.compareAndSet(purchaseKey(saved.id), saved, withExtraFields);
+        const status = await call('status', { target: bought.purchaseId });
+        const opened = await call('open', {
+          target: bought.purchaseId,
+          file: h.localFile,
+          output: join(h.dir, 'payment-output.txt'),
+        });
+        for (const result of [status, opened]) {
+          expect(result.payment).toEqual(expected);
+          expect(JSON.stringify(result)).not.toMatch(
+            /deposit-address|SIGNED_PAYMENT_PAYLOAD|buyerSecret/,
+          );
+        }
+
+        // Simulate an older backup and encrypted record without the new optional field.
+        const legacy: PurchaseRecord = {
+          ...withExtraFields,
+          revision: withExtraFields.revision + 1,
+        };
+        delete legacy.payment;
+        await store.compareAndSet(purchaseKey(saved.id), withExtraFields, legacy);
+        const legacyBackup = join(h.dir, 'legacy.json');
+        await writeFile(legacyBackup, await exportPurchase(legacy, h.options.backupSecret));
+        const { source: _, ...legacyExpected } = expected;
+        expect((await call('status', { target: saved.id })).payment).toEqual(legacyExpected);
+        expect(
+          (
+            await call('open', {
+              target: legacyBackup,
+              file: h.localFile,
+              output: join(h.dir, 'legacy-output.txt'),
+            })
+          ).payment,
+        ).toEqual(legacyExpected);
+      } finally {
+        await connection.close();
+      }
+    }
+  },
+);
+
+it.each([false, true])(
+  'pending status only includes a retry hint when no human setup is needed (saved secret %s)',
+  async (secret) => {
+    const h = await harness();
+    const bought = await h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.offerFile,
+      route: '1click',
+      origin: 'base-usdc',
+    });
+    vi.spyOn(rpcModule, 'getPurchase').mockResolvedValue(null);
+    const { ANNON_BACKUP_SECRET: _secret, ...publicEnv } = h.env;
+    const env = secret ? h.env : publicEnv;
+    const execute = createAdapter(env, { agent: true, purchase: async () => null });
+    const { wallet: _, ...defaults } = h.defaults;
+    const connection = await connect((o) => execute({ ...defaults, ...o }));
+    try {
+      const result = await connection.client.callTool({
+        name: 'annon_status',
+        arguments: { target: bought.purchaseId },
+      });
+      expect(result.structuredContent).toMatchObject({
+        ok: true,
+        result: { state: 'pending' },
+      });
+      const status = result.structuredContent as { result: Record<string, unknown> };
+      if (secret) expect(status.result.retryAfterSeconds).toBe(30);
+      else expect(status.result).not.toHaveProperty('retryAfterSeconds');
+      const printed: string[] = [];
+      expect(
+        await runCli(
+          ['status', String(bought.purchaseId), '--json'],
+          (o) => execute({ ...defaults, ...o }),
+          (s) => printed.push(s),
+        ),
+      ).toBe(4);
+      expect(JSON.parse(must(printed[0]))).toMatchObject({
+        ok: true,
+        result: { state: 'pending' },
+      });
+      if (!secret)
+        expect(JSON.parse(must(printed[0])).result).not.toHaveProperty('retryAfterSeconds');
+    } finally {
+      await connection.close();
+    }
+  },
+);
+
+it.each([
+  'wrong secret',
+  'no secret',
+  'invalid secret',
+  'missing secret file',
+  'missing record',
+  'corrupt record',
+])('accepted status survives %s without a payment summary', async (failure) => {
+  const h = await harness();
+  const bought = await h.adapter({
+    ...h.defaults,
+    command: 'buy',
+    target: h.offerFile,
+    route: 'base',
+  });
+  if (failure === 'wrong secret') h.env.ANNON_BACKUP_SECRET = 'cd'.repeat(32);
+  if (failure === 'no secret') Reflect.deleteProperty(h.env, 'ANNON_BACKUP_SECRET');
+  if (failure === 'invalid secret') h.env.ANNON_BACKUP_SECRET = 'invalid';
+  if (failure === 'missing secret file') {
+    Reflect.set(h.env, 'ANNON_BACKUP_SECRET_FILE', join(h.dir, 'missing-secret'));
+  }
+  const raw = fileStore<import('../../annon/src/pay/backup.js').EncryptedRecord>(
+    join(h.dir, 'records'),
+  );
+  const key = purchaseKey(String(bought.purchaseId));
+  const saved = must(await raw.load(key));
+  if (failure === 'missing record') await raw.compareAndSet(key, saved, null);
+  if (failure === 'corrupt record')
+    await raw.compareAndSet(key, saved, {
+      ...saved,
+      revision: saved.revision + 1,
+      backup: 'invalid',
+    });
+  const connection = await connect((o) => h.adapter({ ...h.defaults, ...o }));
+  try {
+    const result = await connection.client.callTool({
+      name: 'annon_status',
+      arguments: { target: bought.purchaseId },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      result: { state: 'accepted', purchaseId: bought.purchaseId },
+    });
+    expect((result.structuredContent as { result: object }).result).not.toHaveProperty('payment');
+  } finally {
+    await connection.close();
+  }
+  const execute = createAdapter(h.env, {
+    agent: true,
+    purchase: async () => null,
+    fetch: async () => {
+      throw new Error('unexpected network access');
+    },
+  });
+  const pending = await execute({
+    ...h.defaults,
+    command: 'status',
+    target: String(bought.purchaseId),
+  });
+  expect(pending).toMatchObject({ state: 'pending', purchaseId: bought.purchaseId });
+  expect(pending).not.toHaveProperty('payment');
+  expect(pending).not.toHaveProperty('retryAfterSeconds');
+});
+
+it.each(['wrong secret', 'missing record', 'corrupt record'])(
+  'writes recovery plaintext before best-effort payment lookup with %s',
+  async (failure) => {
+    const h = await harness();
+    const bought = await h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.offerFile,
+      route: 'base',
+    });
+    // The replacement secret protects a fresh recovery grant; the original purchase secret is unavailable.
+    h.env.ANNON_BACKUP_SECRET = 'cd'.repeat(32);
+    const recovered = await h.adapter({
+      ...h.defaults,
+      command: 'recover',
+      recovery: `evm:${h.saved.recovery.id}`,
+      purchase: String(bought.purchaseId),
+    });
+    const backup = must((recovered.recovered as { backup: string }[])[0]).backup;
+    const raw = fileStore<import('../../annon/src/pay/backup.js').EncryptedRecord>(
+      join(h.dir, 'records'),
+    );
+    const key = purchaseKey(String(bought.purchaseId));
+    const saved = must(await raw.load(key));
+    if (failure === 'missing record') await raw.compareAndSet(key, saved, null);
+    if (failure === 'corrupt record')
+      await raw.compareAndSet(key, saved, {
+        ...saved,
+        revision: saved.revision + 1,
+        backup: 'invalid',
+      });
+    const output = join(h.dir, 'recovery-output.txt');
+    let lookedUpAfterWrite = false;
+    const original = adapterModule.createAdapter;
+    const execute = original(h.env, {
+      agent: true,
+      fetch: h.fetcher,
+      sdk(options) {
+        const sdk = new Annon(options);
+        vi.spyOn(sdk, 'accept').mockResolvedValue(true);
+        vi.spyOn(sdk, 'open').mockResolvedValue({
+          meta: { name: 'file.txt', mime: 'text/plain', size: h.data.length },
+          data: h.data,
+        });
+        const load = sdk.store.load.bind(sdk.store);
+        vi.spyOn(sdk.store, 'load').mockImplementation(async (name) => {
+          // The optional lookup must occur only after the useful work is durable.
+          expect(await readFile(output)).toEqual(Buffer.from(h.data));
+          lookedUpAfterWrite = true;
+          return load(name);
+        });
+        return sdk;
+      },
+    });
+    const { wallet: _, ...defaults } = h.defaults;
+    const result = await execute({
+      ...defaults,
+      command: 'open',
+      target: backup,
+      file: h.localFile,
+      output,
+    });
+    expect(result).toMatchObject({ bytes: h.data.length, purchaseId: bought.purchaseId, output });
+    expect(result).not.toHaveProperty('payment');
+    expect(await readFile(output)).toEqual(Buffer.from(h.data));
+    expect(lookedUpAfterWrite).toBe(true);
+  },
+);
+
+it('drops invalid encrypted source metadata in status and open without losing the price', async () => {
+  const h = await harness();
+  const bought = await h.adapter({
+    ...h.defaults,
+    command: 'buy',
+    target: h.offerFile,
+    route: '1click',
+    origin: 'base-usdc',
+  });
+  const store = encryptedPurchaseStore(h.options.rawStore, h.options.backupSecret);
+  const saved = must(await store.load(purchaseKey(String(bought.purchaseId))));
+  const payment = must(saved.payment);
+  const next = {
+    ...saved,
+    revision: saved.revision + 1,
+    payment: { ...payment, source: { ...must(payment.source), decimals: 256 } },
+  };
+  await store.compareAndSet(purchaseKey(saved.id), saved, next);
+  const status = await h.adapter({ ...h.defaults, command: 'status', target: saved.id });
+  const opened = await h.adapter({
+    ...h.defaults,
+    command: 'open',
+    target: saved.id,
+    file: h.localFile,
+    output: join(h.dir, 'invalid-source.txt'),
+  });
+  for (const result of [status, opened]) {
+    expect(result.payment).toMatchObject({ amountUsdc: '0.2', route: '1click' });
+    expect(result.payment).not.toHaveProperty('source');
+  }
+});
+
+it.each(['near', 'base', '1click'] as const)(
+  'returns the completed %s purchase when optional metadata persistence fails',
+  async (route) => {
+    for (const failure of ['CAS conflict', 'CAS rejection', 'backup write']) {
+      for (const transport of ['cli', 'mcp']) {
+        const buyer =
+          route === 'near'
+            ? { identity: { kind: 'near' as const, id: terms.contract }, authorize: vi.fn() }
+            : undefined;
+        let metadataWrite = vi.fn();
+        const h = await harness(true, undefined, false, buyer, false, (sdk, options) => {
+          metadataWrite = vi.spyOn(sdk.store, 'compareAndSet');
+          if (failure === 'CAS conflict') metadataWrite.mockResolvedValue(false);
+          if (failure === 'CAS rejection')
+            metadataWrite.mockRejectedValue(new Error('private metadata failure'));
+          if (failure === 'backup write')
+            options.writeBackup = async () => {
+              throw new Error('private backup failure');
+            };
+        });
+        await writeFile(h.defaults.config, JSON.stringify({ dailyBudget: '0.2' }));
+        const args = {
+          target: h.offerFile,
+          url: h.defaults.url,
+          route,
+          ...(route === '1click' ? { origin: 'base-usdc' } : {}),
+        };
+        const connection = await connect((o) => h.adapter({ ...h.defaults, ...o }));
+        let result: Record<string, unknown>;
+        try {
+          if (transport === 'mcp') {
+            const response = await connection.client.callTool({
+              name: 'annon_buy',
+              arguments: args,
+            });
+            expect(response.isError, JSON.stringify(response)).not.toBe(true);
+            result = (response.structuredContent as { result: Record<string, unknown> }).result;
+          } else {
+            const printed: string[] = [];
+            expect(
+              await runCli(
+                ['buy', h.offerFile, '--json'],
+                (o) => h.adapter({ ...h.defaults, ...o, ...args }),
+                (s) => printed.push(s),
+              ),
+            ).toBe(0);
+            result = JSON.parse(must(printed[0])).result;
+          }
+          expect(result).toMatchObject({ purchaseId: h.saved.id, payment: { route } });
+          expect(metadataWrite).toHaveBeenCalledTimes(1);
+          if (route === '1click')
+            expect(result.instructions).toMatchObject({
+              address: 'deposit-address',
+              amount: '210000',
+            });
+          else
+            expect(
+              h.fetcher.mock.calls.some(
+                ([, init]) => init?.headers && 'PAYMENT-SIGNATURE' in init.headers,
+              ),
+            ).toBe(true);
+          expect(JSON.stringify(result)).not.toContain('private');
+          expect(
+            await fileStore<BudgetRecord>(join(h.dir, 'budgets')).load('agent:USDC'),
+          ).toMatchObject({ daily: '200000', hourly: '200000' });
+          await expect(h.adapter({ ...h.defaults, command: 'buy', ...args })).rejects.toMatchObject(
+            { code: 'budget_exceeded' },
+          );
+        } finally {
+          await connection.close();
+        }
+      }
+    }
+  },
+);
+
+it.each(['packages/annon-mcp/README.md', 'skills/annon/SKILL.md'])(
+  'documents the two route meanings in %s',
+  async (file) => {
+    const text = await readFile(new URL(`../../../${file}`, import.meta.url), 'utf8');
+    expect(text).toContain(
+      'Top-level `route` is the contract route (`near-usdc`/`base-usdc`); `payment.route` is how the buyer paid (`near`/`base`/`1click`).',
+    );
+  },
+);
+
+it('keeps the skill buy examples together before the URL rule', async () => {
+  const text = await readFile(new URL('../../../skills/annon/SKILL.md', import.meta.url), 'utf8');
+  const examples = text.indexOf('Buy directly with NEAR USDC');
+  const code = text.indexOf('```sh', examples);
+  const end = text.indexOf('```', code + 5);
+  expect(text.indexOf('URLs accept HTTPS', examples)).toBeGreaterThan(end);
+});
+
 it('creates the production MCP adapter in agent mode', async () => {
   const factory = vi.spyOn(adapterModule, 'createAdapter').mockReturnValue(async () => ({}));
   const server = createServer();
@@ -555,7 +994,12 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       });
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result)).toContain('payment_not_safe');
-      expect(JSON.stringify(result)).toContain('retry opening after finality advances');
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          message: expect.stringContaining('status again in about 30 seconds'),
+          retryAfterSeconds: 30,
+        },
+      });
       expect(JSON.stringify(result)).not.toContain('PRIVATE_UPSTREAM');
       expect(h.wait).not.toHaveBeenCalled();
       expect(h.notify).not.toHaveBeenCalled();
@@ -711,20 +1155,23 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       JSON.stringify({ resource: { url: 'https://files.example/file' } }),
     ).toString('base64');
     const sdk = new Annon(h.options);
-    await sdk.store.compareAndSet(purchaseKey(h.saved.id), h.saved, {
-      ...h.saved,
-      revision: 1,
-      attempts: [
-        {
-          attemptId: 'saved',
-          preparedAt: 1,
-          searchFromBlock: 1,
-          validBefore: '1800003600',
-          paymentRequired: JSON.parse(await readFile(h.offerFile, 'utf8')),
-          payload,
-        },
-      ],
-    });
+    const saved = must(await sdk.store.load(purchaseKey(h.saved.id)));
+    expect(
+      await sdk.store.compareAndSet(purchaseKey(saved.id), saved, {
+        ...saved,
+        revision: saved.revision + 1,
+        attempts: [
+          {
+            attemptId: 'saved',
+            preparedAt: 1,
+            searchFromBlock: 1,
+            validBefore: '1800003600',
+            paymentRequired: JSON.parse(await readFile(h.offerFile, 'utf8')),
+            payload,
+          },
+        ],
+      }),
+    ).toBe(true);
     h.fetcher.mockClear().mockImplementation(async () => new Response(h.file));
     const result = await h.adapter({
       ...h.defaults,
@@ -1231,6 +1678,7 @@ it.each(['solana', 'sol'])(
       amount: '202064',
       amountFormatted: '0.202064',
     });
+    expect(result.payment).toMatchObject({ source: result.source });
   },
 );
 it.each([

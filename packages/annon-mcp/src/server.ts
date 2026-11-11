@@ -8,6 +8,7 @@ import { z } from 'zod/v4';
 // Deployment, trust, wallets, storage and spend limits belong to the server operator.
 const common = {};
 const target = z.string().min(1);
+const urlRule = 'HTTPS URL (HTTP only for localhost, 127.0.0.1 or [::1])';
 const price = z
   .string()
   .regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/)
@@ -36,7 +37,7 @@ export const schemas = {
     ),
   buy: z.strictObject({
     ...common,
-    target: target.describe('HTTPS file URL or path to decoded x402 offer JSON'),
+    target: target.describe(`${urlRule} for a file, or path to decoded x402 offer JSON`),
     url: z.string().optional().describe('Expected resource URL, required for an offer file'),
     route: z.enum(['near', 'base', '1click']).optional(),
     origin: z.string().optional().describe('Name of a human-configured allowed origin'),
@@ -52,7 +53,7 @@ export const schemas = {
   }),
   verify: z.strictObject({
     ...common,
-    target: target.describe('Local PAY2 file or HTTPS URL (header-only verification)'),
+    target: target.describe(`Local PAY2 file or ${urlRule} (header-only verification)`),
   }),
   recover: z.strictObject({
     ...common,
@@ -74,13 +75,40 @@ const descriptions = {
 };
 const outputSchema = z.object({
   ok: z.boolean(),
-  result: z.record(z.string(), z.unknown()).optional(),
+  result: z
+    .object({
+      payment: z
+        .object({
+          amountUsdc: z.string(),
+          amountBaseUnits: z.string(),
+          asset: z.object({ symbol: z.literal('USDC'), id: z.string() }),
+          network: z.string(),
+          route: z.enum(['near', 'base', '1click']),
+          source: z
+            .object({
+              chain: z.string(),
+              asset: z.string(),
+              amount: z.string(),
+              depositBefore: z.string(),
+              symbol: z.string().optional(),
+              decimals: z.number().optional(),
+              contractAddress: z.string().optional(),
+              amountFormatted: z.string().optional(),
+            })
+            .optional(),
+        })
+        .optional(),
+      retryAfterSeconds: z.number().optional(),
+    })
+    .catchall(z.unknown())
+    .optional(),
   error: z
     .object({
       code: z.string(),
       message: z.string(),
       fileId: z.string().optional(),
       minimumAmountUsdc: z.string().optional(),
+      retryAfterSeconds: z.number().optional(),
     })
     .optional(),
 });

@@ -1,5 +1,11 @@
 import type { Config } from '../near/rpc.js';
 import type { OneClickQuote } from '../oneclick/oneclick.js';
+import type {
+  PaymentSummary,
+  PurchaseRecord,
+  SourceAsset,
+  SourcePayment,
+} from '../pay/purchase.js';
 import { usdc } from '../settle-near/codec.js';
 import { BASE_USDC, NEAR_USDC, type NearTerms } from '../settle-near/terms.js';
 import { AdapterError } from './errors.js';
@@ -32,17 +38,67 @@ export function validatePaymentToken(
     );
 }
 
-export interface SourceAsset {
-  chain: string;
-  asset: string;
-  symbol?: string;
-  decimals?: number;
-  contractAddress?: string;
+export type { SourceAsset, SourcePayment } from '../pay/purchase.js';
+
+/** Saved summaries are optional metadata. Discard a malformed source rather than fail a purchase. */
+function validSource(value: unknown): value is SourcePayment {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const s = value as Record<string, unknown>;
+  const text = (value: unknown, max: number): value is string =>
+    typeof value === 'string' && value.length > 0 && value.length <= max;
+  const identifier = (value: unknown, max = 128) =>
+    text(value, max) && /^[A-Za-z0-9._:-]+$/.test(value);
+  return (
+    identifier(s.chain) &&
+    identifier(s.asset) &&
+    (s.symbol === undefined || identifier(s.symbol, 32)) &&
+    (s.contractAddress === undefined || identifier(s.contractAddress)) &&
+    text(s.amount, 39) &&
+    /^[1-9][0-9]*$/.test(s.amount) &&
+    BigInt(s.amount) < 2n ** 128n &&
+    (s.decimals === undefined ||
+      (typeof s.decimals === 'number' &&
+        Number.isInteger(s.decimals) &&
+        s.decimals >= 0 &&
+        s.decimals <= 255)) &&
+    (s.amountFormatted === undefined ||
+      (text(s.amountFormatted, 300) && /^(0|[1-9][0-9]*)(\.[0-9]+)?$/.test(s.amountFormatted))) &&
+    text(s.depositBefore, 64) &&
+    Number.isFinite(Date.parse(s.depositBefore))
+  );
 }
-export interface SourcePayment extends SourceAsset {
-  amount: string;
-  amountFormatted?: string;
-  depositBefore: string;
+
+/** Project only public facts from verified, encrypted purchase state, including legacy records. */
+export function savedPayment(
+  record: PurchaseRecord,
+  source = record.payment?.source,
+): PaymentSummary {
+  const route = record.purchase.route === 'base-usdc' ? 'base' : record.quote ? '1click' : 'near';
+  return {
+    amountUsdc: usdc(BigInt(record.terms.price)),
+    amountBaseUnits: record.terms.price,
+    asset: { symbol: 'USDC', id: record.terms.usdc },
+    network: record.terms.network,
+    route,
+    ...(route === '1click' && validSource(source)
+      ? {
+          source: {
+            chain: source.chain,
+            asset: source.asset,
+            amount: source.amount,
+            depositBefore: source.depositBefore,
+            ...(source.symbol !== undefined ? { symbol: source.symbol } : {}),
+            ...(source.decimals !== undefined ? { decimals: source.decimals } : {}),
+            ...(source.contractAddress !== undefined
+              ? { contractAddress: source.contractAddress }
+              : {}),
+            ...(source.amountFormatted !== undefined
+              ? { amountFormatted: source.amountFormatted }
+              : {}),
+          },
+        }
+      : {}),
+  };
 }
 export function quotedSource(quote: OneClickQuote, asset: SourceAsset): SourcePayment {
   const amount = quote.deposit.amount;

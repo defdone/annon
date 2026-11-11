@@ -38,6 +38,9 @@ annon buy https://host.example/report --route base --wallet evm --json
 annon buy offer.json --url https://host.example/report --route 1click --wallet solana --from-chain solana --json
 ```
 
+URLs accept HTTPS, and plain HTTP only for `localhost`, `127.0.0.1` or `[::1]`,
+for example `http://localhost:8790/file`. This also applies to verify.
+
 `offer.json` is decoded x402 PAYMENT-REQUIRED JSON. Every buy requires a human-approved `--max-price 0.2`, `ANNON_MAX_PRICE`, or config
 `maxPrice` in decimal USDC. Never derive the cap from the offer or choose it on the user's behalf. An offer file also requires `--url` with the independently selected resource URL. A moderated offer requires an explicitly accepted `--moderator account.near`.
 The selected signing wallet is the recovery identity; `--recovery kind:id` checks it.
@@ -53,13 +56,20 @@ annon open 0xPURCHASE_ID --output report.pdf --json
 annon open report.pay2 --purchase /private/purchase-backup.json --output report.pdf --json
 ```
 
-Wait for final acceptance. A 1Click SUCCESS is only delivery, and a submitted Base payment
-is not acceptance. After a timeout, preserve encrypted state and check status; another buy
-creates another purchase. Status/open resume a saved paid Base purchase with unlock before its grant-proved download.
+Waiting: after `submitted`, poll `annon_status` (or `annon status`) about every 30 seconds
+until `accepted`, then open. `payment_not_safe` and `pending` mean wait, not failure;
+never pay again. For 1Click, fund the deposit first. Base safety usually takes one to three
+minutes; a 1Click SUCCESS is only delivery. Preserve encrypted state after a timeout.
+Status/open resume a saved paid Base purchase with unlock before its grant-proved download.
 Key-release retries reuse saved requests, with bounded backoff. Configure MCP deployment,
 trust, wallet sources, moderator trust and price caps in the server environment/config; tools
 cannot set or override these.
 Never infer payment failure from a lost reply. Outputs name files; plaintext is not printed.
+Use the public `payment` result to report the price in decimal USDC (`amountUsdc`) and
+base units (`amountBaseUnits`), asset, network and route. For 1Click, `payment.source`
+includes the reviewed source amount and asset. Status/open include payment details when saved.
+Payment reporting is best-effort: unreadable purchase records omit `payment`; recovery open still needs the secret for its recovery grant.
+Top-level `route` is the contract route (`near-usdc`/`base-usdc`); `payment.route` is how the buyer paid (`near`/`base`/`1click`).
 
 Recover on a fresh device using the same recovery wallet and a new local backup secret:
 

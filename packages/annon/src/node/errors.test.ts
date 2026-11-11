@@ -1,7 +1,17 @@
 import { expect, it } from 'vitest';
 import { NearError } from '../near/rpc.js';
 import { PayError } from '../pay/base.js';
-import { publicError } from './errors.js';
+import { AdapterError, publicError } from './errors.js';
+
+it.each([{ code: 'payment_not_safe' }, new AdapterError('payment_not_safe', 'safe message', 4)])(
+  'gives agents a retry interval for unsafe payments',
+  (error) => {
+    expect(publicError(error)).toMatchObject({ code: 'payment_not_safe', retryAfterSeconds: 30 });
+    const message = publicError({ code: 'payment_not_safe' }).message;
+    expect(message).toContain('one to three minutes');
+    expect(message).toContain('status again in about 30 seconds');
+  },
+);
 
 it.each([
   new PayError('transport', 'Base RPC rate limited (429)'),

@@ -2,7 +2,7 @@ import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seal, sha256 } from '../envelope/pay2.js';
-import { checksumAddress, DownloadError, download } from './download.js';
+import { checksumAddress, DownloadError, download, secureUrl } from './download.js';
 import { readPurchaseProof, verifyBuyerProof } from './proof.js';
 import { type SignInChallenge, signInChallenge, signInExtension } from './siwx.js';
 
@@ -32,6 +32,25 @@ const HEADER_HASH = hex(await sha256(HEADER));
 const URL_ = 'https://files.example.com/f/1';
 
 afterEach(() => vi.unstubAllGlobals());
+
+it.each([
+  'https://files.example/file',
+  'http://localhost:8790/file',
+  'http://127.0.0.1:8790/file',
+  'http://[::1]:8790/file',
+])('accepts the documented secure or local URL %s without fetching', (url) => {
+  expect(secureUrl(url).href).toBe(url);
+});
+
+it.each([
+  'http://files.example/file',
+  'http://localhost.example/file',
+  'http://127.0.0.2/file',
+  'http://[::2]/file',
+  'ftp://localhost/file',
+])('rejects the unsupported URL %s without fetching', (url) => {
+  expect(() => secureUrl(url)).toThrow();
+});
 
 describe('checksumAddress', () => {
   it('checksums addresses as EIP-55 does', () => {

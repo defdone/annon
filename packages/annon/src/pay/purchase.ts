@@ -48,8 +48,32 @@ export interface PaymentAttempt {
   payload?: string;
 }
 
+export interface SourceAsset {
+  chain: string;
+  asset: string;
+  symbol?: string;
+  decimals?: number;
+  contractAddress?: string;
+}
+export interface SourcePayment extends SourceAsset {
+  amount: string;
+  amountFormatted?: string;
+  depositBefore: string;
+}
+/** Public payment facts, without authorization payloads or deposit destinations. */
+export interface PaymentSummary {
+  amountUsdc: string;
+  amountBaseUnits: string;
+  asset: { symbol: 'USDC'; id: string };
+  network: string;
+  route: 'near' | 'base' | '1click';
+  source?: SourcePayment;
+}
+
 export interface PurchaseRecord extends Versioned {
   schemaVersion: 2;
+  /** Optional for older records. Source details are the reviewed 1Click quote. */
+  payment?: PaymentSummary;
   nearSubmission?: { state: 'uncertain'; txHash: string };
   paymentState?: 'expired' | 'canceled';
   purchase: Purchase;
