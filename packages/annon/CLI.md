@@ -192,13 +192,16 @@ Agent policy applies when the pinned config has `agent: true`, the launcher sets
 `maxPrice`, even when the launcher supplies an environment cap. Per-call `--contract-id`,
 `--near-rpc`, `--base-rpc`, `--relayer`, `--network`, `--trust-contract`, `--moderator`,
 `--max-price`, `--state-dir` and alternate config paths are refused. Init and login are refused
-once agent policy is active. Buy targets must be allowlisted URLs; local offer files are refused.
+once agent policy is active. Buy targets must be secure URLs; local offer files are refused.
 Offer header URLs must share the advertised resource origin in every mode.
 
 In every agent mode, `ANNON_STATE_DIR` is ignored; the config owns `stateDir` and its budget
 ledger. Config `maxPrice` is required. If `ANNON_MAX_PRICE` is present, the effective cap is the
-smaller of environment and config. The effective resource allowlist is config `allowedResources`
-intersected with `ANNON_ALLOWED_RESOURCES` when present; environment alone authorizes no URL.
+smaller of environment and config. Absent `allowedResources` permits any HTTPS URL or HTTP localhost URL within mandatory
+`maxPrice` and `dailyBudget`. An explicit empty list denies every URL. Entries may be exact
+URLs or path prefixes ending in `/*`, on the same origin and port. Prefixes cannot cross
+path boundaries or authorize another origin. `ANNON_ALLOWED_RESOURCES`, when present,
+further restricts the effective list, including when config leaves it open.
 These environment settings can only tighten policy, regardless of the agent-mode trigger.
 
 Agent mode also requires a human-set `workDir`. Relative `sell.target`/`output` and
@@ -231,3 +234,43 @@ required for this optimization. Missing or invalid answers fall back to verified
 Streaming sell/open accepts regular files only, refusing FIFOs; long output basenames can exceed the filesystem name limit because temporary files append a random suffix. Local verify still buffers the file.
 Interrupted processes may leave private `.tmp` plaintext files or `.annon-spool-*` encrypted directories beside the output; remove these leftovers before retrying.
 Outputs are published with a hard link, so the output directory must be on a filesystem that supports hard links (not exFAT or FAT32, and not some network or FUSE mounts); otherwise the final step fails with no output written.
+
+## Purchase storage and sponsored splits
+
+Self-funded NEAR sellers can use `annon sell <file> --price <USDC> --split <split>
+--storage-budget 0.05`. The budget is NEAR, separate from registration storage and from
+the signed terms. Registration is followed by explicit wallet funding before publication.
+A definite funding refusal clears the uncertainty state and can be retried on resume.
+Saved sell jobs record funding intent before sending and never automatically replenish
+a completed or uncertain allocation. After uncertainty, inspect the transaction and explicitly
+fund with `annon fund` if needed; resume requires the configured target to be available
+before accepting that uncertain allocation as resolved. The human config field `storageBudget` supplies the same decimal-NEAR
+target. In agent/MCP mode it is the only source; per-call storage funding overrides are
+refused. Sponsored registrations use the relayer allocation instead.
+
+`annon fund <file-id> <NEAR>` allocates nonwithdrawable NEAR using a NEAR wallet.
+`annon budget <file-id>` reads available yoctoNEAR and the admission requirement.
+Funding is human-only: agent mode refuses `fund` with `human_only`, and MCP exposes
+no funding tool. `--storage-budget` requires a self-registered NEAR sale; other routes
+refuse the flag. Self-registered sales without an allocation return a warning.
+The SDK exports `fundFileStorage(wallet, contract, fileId, amountYocto, prepaid?)`
+and `fileStorageBalance(rpc, contract, fileId)`; zero-attachment prepaid funding can spend
+only the caller's own prepaid balance.
+
+NEAR and 1Click buy preflight refuses before payment with `file_storage_low` if the
+file cannot cover the 4,096-byte admission allowance. The contract checks again at receipt;
+preflight cannot reserve capacity. Base unlock stays caller-funded and needs no file budget.
+Existing claims and recovery continue after a file budget is depleted.
+
+Sponsored sell obtains the relayer fee and treasuries from `/v1/capabilities`, adds the
+required treasury share and proportionally scales the other shares. Base listings use
+one EVM treasury share at the larger route requirement. Rounding goes to an original
+non-treasury recipient; the treasury share rounds up by less than one basis point. Interactive CLI asks approval of the resulting split
+before registering or creating a Base split. Config `maxProtocolFee` defaults to
+`{ "fixed": "30000", "bps": 100 }` (0.03 USDC plus 100 bps); `fixed` is USDC base units.
+JSON, agent and MCP sells refuse higher advertised fees with `protocol_fee_above_max`.
+Interactive CLI shows the advertised fee and whether it exceeds the ceiling before
+approval. Agent URL paths refuse `%2f` and `%5c`, case-insensitively.
+JSON/agent modes return the resulting split in `terms`.
+Self-funded listings have no compulsory protocol fee. An eight-recipient split needs a
+free slot or an existing treasury recipient before sponsorship can add a treasury.

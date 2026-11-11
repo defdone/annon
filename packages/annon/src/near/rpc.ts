@@ -167,6 +167,7 @@ const TAKEDOWN = ['illegal_content', 'court_order', 'rights_holder_notice'] as c
 
 /** Validated final contract state; price/payTo describe the optional Base route. */
 export interface FileInfo {
+  purchaseStorageBalance: bigint;
   terms: Terms;
   termsHash: string;
   seller: Identity;
@@ -191,6 +192,7 @@ export async function getFile(
   fileId: string,
 ): Promise<FileInfo | null> {
   const f = (await view(url, contractId, 'get_file', { file_id: fileId })) as {
+    purchase_storage_balance?: string;
     terms: Terms;
     terms_hash: string;
     header_hash: string | null;
@@ -205,6 +207,10 @@ export async function getFile(
     });
     if (f.terms_hash !== commitment) throw new Error();
     if (
+      (f.purchase_storage_balance !== undefined &&
+        (typeof f.purchase_storage_balance !== 'string' ||
+          !/^(0|[1-9][0-9]*)$/.test(f.purchase_storage_balance) ||
+          BigInt(f.purchase_storage_balance) >= 2n ** 128n)) ||
       f.terms.contract !== contractId ||
       f.terms.file_id !== fileId ||
       !(f.header_hash === null || isHex(f.header_hash, 32)) ||
@@ -224,6 +230,7 @@ export async function getFile(
   }
   const t = f.terms;
   return {
+    purchaseStorageBalance: BigInt(f.purchase_storage_balance ?? '0'),
     terms: t,
     termsHash: f.terms_hash,
     seller: parseIdentity(t.seller),
@@ -417,7 +424,8 @@ const canonical = (v: unknown): string =>
 /**
  * Reads an `EXPERIMENTAL_tx_status` / `tx` result. With `expect`, the answer must be about that
  * transaction and, when given, that method with those arguments: a relayer can't hand back an
- * older or another call. Only single-call transactions to `contractId` are read.
+ * older or another call. Reads exactly one function call; register may include a positive
+ * caller-funded file_budget when the expected arguments omit it.
  */
 export function readOutcome(result: unknown, contractId: string, expect?: ExpectedCall): Outcome {
   const r = result as {
@@ -439,9 +447,8 @@ export function readOutcome(result: unknown, contractId: string, expect?: Expect
   }
   const actions = Array.isArray(t?.actions) ? t.actions : [];
   const method = actions[0]?.FunctionCall?.method_name;
-  if (actions.length !== 1 || typeof method !== 'string') {
+  if (actions.length !== 1 || typeof method !== 'string')
     return malformed('not a single function call');
-  }
   if (expect?.method !== undefined && method !== expect.method) {
     return malformed('an outcome of another method');
   }
@@ -454,6 +461,24 @@ export function readOutcome(result: unknown, contractId: string, expect?: Expect
     }
     // Compared as JSON would send them: an `undefined` field is no field.
     const asked = JSON.parse(JSON.stringify(expect.args) ?? 'null');
+    if (
+      method === 'register' &&
+      sent &&
+      typeof sent === 'object' &&
+      'args' in sent &&
+      !Object.hasOwn(asked.args ?? {}, 'file_budget')
+    ) {
+      const a = (sent as { args: Record<string, unknown> }).args;
+      if (Object.hasOwn(a, 'file_budget')) {
+        if (
+          typeof a.file_budget !== 'string' ||
+          !/^[1-9][0-9]*$/.test(a.file_budget) ||
+          BigInt(a.file_budget) >= 2n ** 128n
+        )
+          return malformed('invalid registration budget');
+        delete a.file_budget;
+      }
+    }
     if (canonical(sent) !== canonical(asked)) return malformed('an outcome of another call');
   }
 
@@ -537,4 +562,32 @@ export async function isFullAccessKey(
     public_key: publicKey,
   });
   return key.permission === 'FullAccess';
+}
+
+export interface FileStorageBalance {
+  available: bigint;
+  admissionRequirement: bigint;
+}
+export async function fileStorageBalance(
+  url: string,
+  contractId: string,
+  fileId: string,
+): Promise<FileStorageBalance> {
+  const value = (await view(url, contractId, 'file_storage_balance', { file_id: fileId })) as {
+    available?: unknown;
+    admission_requirement?: unknown;
+  } | null;
+  const amount = (v: unknown) =>
+    typeof v === 'string' && /^(0|[1-9][0-9]*)$/.test(v) && BigInt(v) < 2n ** 128n;
+  if (
+    !value ||
+    !amount(value.available) ||
+    !amount(value.admission_requirement) ||
+    BigInt(value.admission_requirement as string) === 0n
+  )
+    return malformed('file_storage_balance');
+  return {
+    available: BigInt(value.available as string),
+    admissionRequirement: BigInt(value.admission_requirement as string),
+  };
 }

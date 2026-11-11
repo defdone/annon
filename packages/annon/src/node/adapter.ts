@@ -5,7 +5,7 @@ import { Annon, type AnnonOptions } from '../api/annon.js';
 import { download, secureUrl } from '../download/download.js';
 import { sameResource } from '../download/proof.js';
 import { inspect, inspectHeader, MAX_HEADER, parseHeader } from '../envelope/pay2.js';
-import { getConfig, getFile, getPurchase, txOutcome } from '../near/rpc.js';
+import { fileStorageBalance, getConfig, getFile, getPurchase, txOutcome } from '../near/rpc.js';
 import { OneClick, type Origin } from '../oneclick/oneclick.js';
 import {
   type EncryptedRecord,
@@ -15,12 +15,16 @@ import {
   importRecovery,
   type RecoveryRecord,
 } from '../pay/backup.js';
+import { PayError } from '../pay/base.js';
 import { type PaymentSummary, type PurchaseRecord, purchaseKey } from '../pay/purchase.js';
+import { readSplitState } from '../pay/split.js';
 import { fileStore } from '../pay/store-node.js';
 import { discover, type PaymentRequired, readPaymentRequired } from '../pay/x402.js';
+import { checkProtocolFee, type ProtocolFee, protocolFeeAboveMax } from '../relay/fees.js';
 import { bytes, hex } from '../settle-near/codec.js';
 import { identityJson, parseIdentity } from '../settle-near/identity.js';
 import type { NearWallet } from '../wallet/wallet.js';
+import { fundFileStorage } from '../wallet/wallet.js';
 import { agentPolicy, configPath, initAgent, savePublicConfig } from './agent.js';
 import { type BrowserSession, startBrowserSession } from './browser-login.js';
 import { type BudgetRecord, reserveSpend } from './budget.js';
@@ -38,6 +42,7 @@ import {
   savedPayment,
   validatePaymentToken,
 } from './payment-terms.js';
+import { resourceAllowed } from './resources.js';
 import { assertSignerInput, configuredWallet } from './signer-wallet.js';
 import { type SigningResult, signingRequest, verifySigningResult } from './signing.js';
 import {
@@ -348,6 +353,15 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       state: 'pending',
       next: 'Check the payment; configure readable saved state and the matching backup secret to resume Base unlock. 1Click SUCCESS alone is not acceptance.',
     });
+    if (o.command === 'budget') {
+      if (!o.target || !isId(o.target)) throw usage();
+      const budget = await fileStorageBalance(c.nearRpc, c.contractId, o.target);
+      return {
+        fileId: o.target,
+        available: budget.available.toString(),
+        admissionRequirement: budget.admissionRequirement.toString(),
+      };
+    }
     if (o.command === 'verify') {
       if (!o.target) throw usage();
       const remote = /^https?:/.test(o.target);
@@ -390,6 +404,17 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       if (!o.backupSecretFile && !env.ANNON_BACKUP_SECRET_FILE && !env.ANNON_BACKUP_SECRET)
         return pendingSetup(o.target);
     }
+    if (o.command === 'fund') {
+      if (d.agent) return fail('human_only', 'File funding requires a human CLI session.', 2);
+      if (!o.target || !isId(o.target)) throw usage();
+      const text = o.fundAmount;
+      if (!text) return fail('storage_required', 'Provide the NEAR amount to allocate.', 2);
+      const owner = await (d.wallet ?? loadWallet)({ ...o, network: c.network }, env, c.nearRpc);
+      if (owner.identity.kind !== 'near' || !('call' in owner))
+        return fail('near_wallet_required', 'File funding requires a NEAR wallet.', 2);
+      await fundFileStorage(owner as NearWallet, c.contractId, o.target, nearAmount(text));
+      return { fileId: o.target, fundedNear: text };
+    }
     let secret: Uint8Array;
     try {
       secret = await readBackupSecret(o, env);
@@ -412,11 +437,12 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     const send: NonNullable<AnnonOptions['send']> = async (method, args, owner) => {
       if (method === 'unlock' && !c.baseRpc)
         return fail('base_rpc_required', 'Configure baseRpc before resuming a Base purchase.', 2);
+      const { baseSplit: _baseSplit, ...wireArgs } = args as Record<string, unknown>;
       const signer =
         owner ?? (selected?.identity.kind === 'near' ? (selected as NearWallet) : undefined);
       let submitted: { txHash: string; signer: string } | undefined;
       const call = async () => {
-        if (signer) return signer.call({ receiverId: c.contractId, method, args });
+        if (signer) return signer.call({ receiverId: c.contractId, method, args: wireArgs });
         if (!c.relayer)
           return fail(
             'transport_required',
@@ -476,7 +502,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         const tx = submitted;
         const result = await txOutcome(c.nearRpc, tx.txHash, tx.signer, c.contractId, 'FINAL', {
           method,
-          args,
+          args: wireArgs,
         });
         if (result.state === 'released') return result.answer;
         if (result.state === 'done') return result.value;
@@ -534,6 +560,32 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       rawStore,
       backupSecret: secret,
       send,
+      ...(c.relayer
+        ? {
+            sponsorship: async () => {
+              const reply = await response(new URL('/v1/capabilities', c.relayer).href, fetcher);
+              if (!reply.ok) throw new Error('relayer capabilities unavailable');
+              const cap = (await reply.json()) as {
+                contract?: string;
+                disabled?: boolean;
+                fee?: ProtocolFee;
+              };
+              if (cap.contract !== c.contractId || cap.disabled || !cap.fee)
+                throw new Error('invalid relayer sponsorship policy');
+              if (
+                (d.agent || o.json) &&
+                o.price &&
+                protocolFeeAboveMax(amount(o.price), cap.fee, c.maxProtocolFee)
+              )
+                return fail(
+                  'protocol_fee_above_max',
+                  'The advertised protocol fee exceeds maxProtocolFee. Review the fee in human configuration.',
+                  2,
+                );
+              return { fee: cap.fee };
+            },
+          }
+        : {}),
       writeBackup: (id, encrypted) => writeBackup(backupPath(c, id), encrypted),
     });
     if (o.command === 'status') {
@@ -566,7 +618,8 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         await writeStream(output, file.file);
       };
       if (o.resume) {
-        if (!isId(o.resume) || o.price || o.split || o.base || o.moderator) throw usage();
+        if (!isId(o.resume) || o.price || o.split || o.base || o.moderator || o.storageBudget)
+          throw usage();
         const result = await sdk.resumeSell({
           fileId: o.resume,
           data: await fileSource(o.target),
@@ -603,12 +656,59 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           'Base listings require an EVM wallet and EVM split recipients.',
           2,
         );
+      const storageBudget = d.agent ? c.storageBudget : (o.storageBudget ?? c.storageBudget);
+      const selfNear = seller.identity.kind === 'near';
+      if (o.storageBudget && !selfNear)
+        return fail(
+          'invalid_arguments',
+          '--storage-budget requires a self-registered NEAR sell.',
+          2,
+        );
+      if (selfNear && !storageBudget)
+        d.notify?.(
+          'This self-registered file has no purchase storage budget. Fund it before NEAR or 1Click purchases.',
+        );
       const result = await sdk.sell({
         data: await fileSource(o.target),
         name: basename(o.target),
         mime: 'application/octet-stream',
         seller,
         near: { price: amount(o.price), recipients, remainder },
+        ...((!c.relayer || seller.identity.kind === 'near') &&
+        (d.agent ? c.storageBudget : (o.storageBudget ?? c.storageBudget))
+          ? {
+              storageBudget: nearAmount(
+                (d.agent ? c.storageBudget : (o.storageBudget ?? c.storageBudget)) as string,
+              ),
+            }
+          : {}),
+        onSplit: async (split, fee, aboveMaximum) => {
+          if (aboveMaximum && (d.agent || o.json))
+            return fail(
+              'protocol_fee_above_max',
+              'The advertised protocol fee exceeds maxProtocolFee. Review the fee in human configuration.',
+              2,
+            );
+          if (!c.relayer || seller.identity.kind === 'near') return;
+          const description = [
+            'Sponsored sale split:',
+            ...(fee
+              ? [
+                  `Protocol fee: ${fee.fixed} USDC base units + ${fee.bps} bps.`,
+                  ...(aboveMaximum ? ['This exceeds maxProtocolFee.'] : []),
+                ]
+              : []),
+            ...split.recipients.map(
+              (r, i) =>
+                `${identityJson(r.identity)}: ${(r.bps / 100).toFixed(2)}%${i === split.remainder ? ' (rounding remainder)' : ''}`,
+            ),
+          ].join('\n');
+          if (!d.agent && !o.json) {
+            d.notify?.(description);
+            if (!(await d.prompt?.(`${description}\nType yes to register: `)))
+              return fail('sale_not_approved', 'Sale split was not approved.', 3);
+          }
+        },
         ...(o.base
           ? {
               base: {
@@ -627,6 +727,13 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         file: output,
         terms: result.terms,
         ...(result.baseSplit ? { baseSplit: result.baseSplit } : {}),
+        ...(selfNear && !storageBudget
+          ? {
+              warnings: [
+                'This file has no purchase storage budget. Fund it before NEAR or 1Click purchases.',
+              ],
+            }
+          : {}),
       };
     }
     if (o.command === 'buy') {
@@ -634,7 +741,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       if (d.agent && !/^https?:/.test(o.target))
         return fail(
           'resource_not_allowed',
-          'Agent purchases require an allowlisted URL, never an offer file.',
+          'Agent purchases require a secure resource URL; offer files are refused.',
           2,
         );
       const cap = o.maxPrice ?? c.maxPrice;
@@ -648,10 +755,10 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       if (c.maxPrice && maxPrice > BigInt(amount(c.maxPrice)))
         return fail('price_above_max', 'The requested cap exceeds the configured maximum.', 2);
       const resource = /^https?:/.test(o.target) ? o.target : o.url;
-      if (d.agent && (!resource || !c.allowedResources?.some((url) => sameResource(url, resource))))
+      if (d.agent && (!resource || !resourceAllowed(c.allowedResources, resource)))
         return fail(
           'resource_not_allowed',
-          'Agent purchases require a human-allowed resource URL.',
+          'The resource URL is outside the configured agent policy.',
           2,
         );
       if (d.agent && (o.refundTo || o.fromChain || o.fromAsset))
@@ -702,6 +809,8 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           minPrice?: unknown;
           disabled?: unknown;
           methods?: unknown;
+          baseSponsorship?: unknown;
+          fee?: ProtocolFee;
         };
         if (
           !reply.ok ||
@@ -715,11 +824,46 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
             'relayer_unavailable',
             'Relayer sponsorship policy is unavailable; check configuration before paying.',
           );
-        if (cap.disabled === true || BigInt(price) < BigInt(cap.minPrice))
+        if (
+          cap.disabled === true ||
+          cap.baseSponsorship === false ||
+          BigInt(price) < BigInt(cap.minPrice)
+        )
           return fail(
             'not_sponsored',
             'The relayer does not sponsor this Base price; do not pay through this route.',
           );
+        try {
+          if (f.terms.near.recipients.some((r) => r.identity.kind !== 'evm'))
+            throw new TypeError('Base split recipients must be EVM identities');
+          if (!cap.fee) throw new TypeError('missing fee policy');
+          checkProtocolFee(f.terms, cap.fee);
+        } catch {
+          return fail(
+            'not_sponsored',
+            'The registered terms do not carry the required treasury share for Base sponsorship.',
+          );
+        }
+        if (c.baseRpc && f.terms.base) {
+          try {
+            await readSplitState(c.baseRpc, f.terms.base.pay_to, {
+              recipients: f.terms.near.recipients.map((r) => r.identity.id),
+              allocations: f.terms.near.recipients.map((r) => BigInt(r.bps)),
+              totalAllocation: 10000n,
+              distributionIncentive: 0,
+            });
+          } catch (error) {
+            if (error instanceof PayError && error.code === 'transport')
+              return fail(
+                'relayer_unavailable',
+                'Base split verification is unavailable; retry before paying.',
+              );
+            return fail(
+              'not_sponsored',
+              'The Base split code or state does not match the registered recipients.',
+            );
+          }
+        }
       }
       const paymentTerms = {
         file: found.fileId,
@@ -740,6 +884,15 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           2,
         );
       validatePaymentToken(paymentTerms, paymentConfig);
+      if (route !== 'base') {
+        const budget = await fileStorageBalance(c.nearRpc, c.contractId, f.terms.file_id);
+        if (budget.available < budget.admissionRequirement)
+          return fail(
+            'file_storage_low',
+            'This file needs more purchase storage funding before a NEAR or 1Click payment.',
+            2,
+          );
+      }
       if (origin && !d.agent && !d.browserApprovals && !o.json && !d.prompt)
         return fail(
           'confirmation_required',
@@ -1061,4 +1214,12 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
       await session?.close();
     }
   };
+}
+
+export function nearAmount(text: string): bigint {
+  if (!/^(0|[1-9][0-9]*)(\.[0-9]{1,24})?$/.test(text)) throw usage();
+  const [whole = '0', fraction = ''] = text.split('.');
+  const n = BigInt(whole) * 10n ** 24n + BigInt(fraction.padEnd(24, '0'));
+  if (n <= 0n || n >= 2n ** 128n) throw usage();
+  return n;
 }

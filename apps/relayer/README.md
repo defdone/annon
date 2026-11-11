@@ -1,7 +1,7 @@
 # Annon relayer
 
 An HTTP front for `relay` from `@defdone/annon`: it sends `register`, `unlock`, `claim_key`, `reopen`, `reopen_seller` and
-`stop_sales` to an Annon contract and pays the NEAR gas, for people and agents without a NEAR
+`stop_sales` and `fund_file_storage` to an Annon contract and pays the NEAR gas, for people and agents without a NEAR
 account. An optional keeper uses a separate account/key, durable retry/submission state, and
 persisted NEAR budgets to call permissionless `settle`. Relay admission limits remain in memory.
 Run one relayer instance per relay signing key.
@@ -15,12 +15,11 @@ docker run -p 8080:8080 --env-file relayer.env annon-relayer
 |---|---|---|
 | `CONTRACT_ID` | yes | The Annon contract, e.g. `v1.annon.defdone.near` |
 | `RELAYER_ACCOUNT` | yes | The NEAR account that sends and pays |
-| `RELAYER_KEY` | yes, secret | A function-call key of that account for the six relay methods, on that contract only |
-| `SELLERS` | yes in production | Comma-separated `kind:id` seller identities; startup refuses an empty list |
-| `DEV_ALLOW_ANY_SELLER` | no | Explicit development escape hatch: `1` permits an empty `SELLERS` list, default off |
+| `RELAYER_KEY` | yes, secret | A function-call key of that account for the relay methods including `fund_file_storage`, on that contract only |
+| `SELLERS` | no | Comma-separated `kind:id` identities eligible for `LISTED_FILE_BUDGET`; unlisted sellers remain sponsored |
 | `NEAR_RPC`, `BASE_RPC` | no | Defaults are public RPC endpoints; use endpoints with API keys for production |
 | `USDC` | no | USDC on Base (default: the canonical address) |
-| `MIN_PRICE` | no | Smallest NEAR and Base listing price, and Base unlock purchase price served, USDC base units (default `10000` = 0.01 USDC) |
+| `MIN_PRICE` | no | Smallest NEAR and Base listing price, and Base unlock purchase price served, USDC base units (default `100000` = 0.10 USDC) |
 | `MAX_DEADLINE_SECONDS` | no | How far ahead a wallet signature may be valid (default `600`) |
 | `PER_IP_HOUR`, `PER_DAY` | no | Admissions per client per hour (`60`); total transactions across all methods per daily window (`500`) |
 | `PER_DAY_REGISTER`, `PER_DAY_UNLOCK`, `PER_DAY_CLAIM_KEY`, `PER_DAY_REOPEN`, `PER_DAY_REOPEN_SELLER`, `PER_DAY_STOP_SALES` | no | Override the daily capacity of one method; each defaults to `PER_DAY` |
@@ -41,7 +40,7 @@ docker run -p 8080:8080 --env-file relayer.env annon-relayer
 The relayer needs a Base RPC endpoint with an API key in `BASE_RPC`. The file host (`baseRpc`) and CLI for Base purchases (`baseRpc` / `ANNON_BASE_RPC`) need one too. The public `https://mainnet.base.org` rate-limits the burst of reads made during settlement and unlocking. A keeper polling every few seconds also needs a NEAR RPC endpoint with an API key in `NEAR_RPC`. Keep API keys out of public files.
 
 The account needs prepaid storage on the contract (`storage_deposit`) for `register`, `unlock`
-`reopen` and `reopen_seller`. Numeric settings must be whole numbers; anything else stops the start.
+`reopen` and `reopen_seller`. Count and USDC settings must be whole numbers. File-budget and top-up settings use decimal NEAR with at most 24 fractional digits. Invalid settings stop startup.
 
 Identity-authorized requests use `{method,args,auth:{kind,sig}}`; NEAR identities call directly.
 `claim_key` and `unlock` requests have only `method` and `args`. The relay sends identity
@@ -139,3 +138,96 @@ operators can lower any method pool independently. IPv6 scope identifiers do not
 
 Embedded callers must await `relayStatus`, which can refresh stale claim outcomes before
 admission. The HTTP server awaits this lookup before charging admission or daily counters.
+
+## Open file sponsorship and fees
+
+`SELLERS` is optional. `DEV_ALLOW_ANY_SELLER` has no effect. All valid EVM/Solana
+sellers can register within these limits, including sellers absent from `SELLERS`.
+NEAR sellers register with their own wallet. Minimum prices apply to both routes.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `SPONSORED_FILES_PER_DAY` | `100` | Global sponsored registrations per day |
+| `SPONSORED_FILES_PER_IP_DAY` | `5` | Sponsored registrations per IP bucket per day |
+| `FILE_BUDGET` | `0.05` | NEAR allocated per new unlisted file |
+| `LISTED_FILE_BUDGET` | `FILE_BUDGET` | NEAR allocated per new listed file |
+| `TOPUP_PER_FILE` | `0.15` | Lifetime NEAR allocation cap per sponsored file, including registration |
+| `TOPUP_PER_FILE_DAY` | `0.05` | Additional NEAR allocation per file per UTC day |
+| `TOPUP_PER_DAY` | `0.5` | Additional NEAR allocation globally per UTC day |
+| `PER_DAY_FUND_FILE_STORAGE` | `PER_DAY` | Top-up method admission pool |
+| `FEE_FIXED` | `30000` | Fixed protocol fee in USDC base units |
+| `FEE_BPS` | `100` | Proportional fee basis points |
+| `TREASURY_NEAR` | unset | NEAR-only route recipient as `kind:id`, or a bare NEAR account ID; falls back to `TREASURY_EVM` |
+| `TREASURY_EVM` | unset | Required when Base sponsorship is enabled; also accepted for the NEAR route |
+| `BASE_SPONSORSHIP` | `1` | Set `0` to disable sponsored Base registrations and unlocks |
+| `KEEPER_MIN_PAYOUT` | `10000` | USDC base-unit minimum for purchase-payout sponsorship |
+
+Registration sends one zero-deposit FunctionCall action: `register` with optional
+`args.file_budget`, a yoctoNEAR string. The contract atomically debits registration storage
+and that allocation from the caller's prepaid balance. Insufficient prepaid funding rolls
+back the whole registration. The normal register return carries the CKD callback result.
+The relay hot key method list is `register,unlock,claim_key,reopen,reopen_seller,stop_sales,fund_file_storage`.
+Use a function-call key restricted to this contract. Top-ups each send one FunctionCall.
+A leaked hot key can allocate its account's prepaid balance to any active file, even files
+outside relayer policy; those allocations cannot be withdrawn. Cap prepaid balances and key
+gas allowances, monitor allocations, and rotate a compromised key. Gas allowances do not cap
+prepaid storage allocations.
+A zero `FILE_BUDGET` explicitly disables the allocation, leaving the listing unfunded.
+
+Request an additional allocation through `POST /v1/relay` with
+`{method:"fund_file_storage",args:{file_id:"<file-id>",amount:"<yoctoNEAR>"}}`.
+Only files sponsored by this running relayer qualify. The amount is explicit, positive,
+and subject to all three top-up caps, existing IP/day/method pools and prepaid-balance
+checks. No automatic top-ups run. Ambiguous sends retain allocations and quotas.
+Duplicate operations retain their transaction hash during the hold window.
+
+Registration counters use bounded daily windows; SDK registration and top-up accounting
+also enforce UTC days. Admission, sponsored-file eligibility and allocation totals live in
+memory. Restart resets IP, daily, operation, allocation and top-up counters and holds. It
+forgets top-up eligibility, so old-file top-ups fail closed. Base unlock eligibility is
+verified on chain and survives restarts. Repeated same-amount top-ups are permitted after the hold and consume
+the allocation caps again. An uncertain send retains its hold until expiry; inspect its
+transaction before a new top-up. Run one instance, use finite key allowances and prepaid balances, and do not use
+restarts to replenish quotas. Keeper gas state remains durable.
+
+A sponsored registration must include at least
+`ceil((FEE_FIXED * 10000 + price * FEE_BPS) / price)` basis points for the route treasury.
+The defaults mean 0.03 USDC plus 1% of the price. Each zero disables that fee component;
+set both to zero to disable fees. Startup refuses fees without any treasury, or Base sponsorship without `TREASURY_EVM`.
+`BASE_SPONSORSHIP=0` disables sponsored Base registration and unlock. A fee consuming the whole price is refused.
+A file with Base terms uses one EVM treasury share, equal to the larger of the NEAR and
+Base fee requirements. `TREASURY_EVM` also serves a NEAR-only route when `TREASURY_NEAR`
+is unset. All Base recipients must be EVM identities; the eight-recipient limit includes
+the treasury.
+
+Sponsored Base registration includes `baseSplit:{kind,salt}` outside contract arguments.
+The relayer locally recomputes the immutable, ownerless split address from canonical
+recipients, bps, kind and salt, with zero distribution incentive. It refuses a different
+`pay_to`. This registration-time salt check is independent of unlock verification.
+
+For Base unlock, including files registered before a restart or through another instance,
+the relayer reads `BASE_RPC` and requires `terms.base.pay_to` to have the exact clone runtime
+of a known 0xSplits v2.2 implementation. At the same Base block it checks that `splitHash()`
+matches the registered recipients and bps with zero distribution incentive, `owner()` is
+zero, and `paused()` is false. It also requires the current treasury share policy in the
+registered terms. No salt or registration history is needed. Successful code and state
+checks are cached in memory by RPC and exact terms; a restart only causes another check.
+Refused split checks are cached for 60 seconds (up to 1024 entries); RPC transport failures
+remain retryable immediately. Current fee policy and the sponsorship switch apply on every attempt.
+EOAs, unknown implementations, different splits, owned or paused splits, and missing or
+insufficient treasury shares are refused. RPC failures fail closed with HTTP 503
+`unavailable` and `Retry-After`, so the buyer can retry without spending relay gas.
+
+`GET /v1/capabilities` publishes `baseSponsorship`, `fee` (`fixed`, `bps`, `treasuryNear`, `treasuryEvm`) and
+`sponsorship` limits and allocations in yoctoNEAR. The SDK adds required treasury shares,
+scales other shares proportionally, and assigns rounding to an original seller recipient.
+If the original first recipient is the treasury, another recipient receives rounding.
+Required fee bps round up, so the actual share can exceed the nominal fee by less than one bp. Interactive sell reviews this split before registration or Base split creation;
+JSON and agent results include the resulting public terms. Direct self-funded registration
+has no compulsory treasury share.
+
+The keeper skips purchase deliveries below `KEEPER_MIN_PAYOUT` and always considers refund
+only deliveries within its existing gas and transaction budgets. Sellers and other callers
+can settle skipped deliveries. File-funded purchases remain independent of the refund
+reserve; malformed payments and rejected purchases never spend a file budget. A successful
+purchase with an excess-refund slot bypasses the threshold so its refund can settle.

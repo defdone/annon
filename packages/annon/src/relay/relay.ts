@@ -21,7 +21,8 @@ import {
   type SellerArgs,
   stopSalesText,
 } from '../near/texts.js';
-import { block, blockHeader, type EvmLog, getReceipt, paymentLogs } from '../pay/base.js';
+import { block, blockHeader, type EvmLog, getReceipt, PayError, paymentLogs } from '../pay/base.js';
+import { createSplit, readSplitState } from '../pay/split.js';
 import { bytes, exactKeys, uint } from '../settle-near/codec.js';
 import { type Authorization, identityJson, verifyAuthorization } from '../settle-near/identity.js';
 import {
@@ -31,12 +32,19 @@ import {
   purchaseId,
 } from '../settle-near/purchase.js';
 import { type SettlementAssets, termsHash } from '../settle-near/terms.js';
+import { checkProtocolFee, type ProtocolFee } from './fees.js';
 import { type KeepOptions, type KeepResult, runKeeper } from './keeper-runner.js';
 
 export type { KeeperRecord, KeepOptions, KeepResult, RefundSource } from './keeper-runner.js';
 
 export type RelayRequest =
-  | { method: 'register'; args: RegisterArgs; auth: Authorization }
+  | { method: 'fund_file_storage'; args: { file_id: string; amount: string } }
+  | {
+      method: 'register';
+      args: RegisterArgs;
+      auth: Authorization;
+      baseSplit?: { kind: 'push' | 'pull'; salt: string };
+    }
   | { method: 'reopen'; args: ReopenArgs; auth: Authorization }
   | { method: 'stop_sales' | 'reopen_seller'; args: SellerArgs; auth: Authorization }
   | { method: 'claim_key'; args: { purchase_id: string; grant?: number } }
@@ -76,7 +84,17 @@ const fail = (code: RelayErrorCode, message?: string): never => {
 };
 export interface RelayPolicy {
   minPrice: bigint;
+  baseSponsorship?: boolean;
+  /** Listed sellers get a larger allocation; unlisted sellers remain eligible. */
+  fileBudget?: bigint;
+  listedFileBudget?: bigint;
+  fee?: ProtocolFee;
+  sponsoredFilesPerDay?: number;
+  topupPerFile?: bigint;
+  topupPerFileDay?: bigint;
+  topupPerDay?: bigint;
   maxDeadlineSeconds: number;
+  /** Listed-seller predicate for allocation tiers; does not deny unlisted sellers. */
   sellerAllowed?: (seller: string) => boolean | Promise<boolean>;
   registrationsPerSeller?: number;
   reopensPerWalletFile?: number;
@@ -99,7 +117,18 @@ export function canonicalRequest(input: unknown, assets?: SettlementAssets): Rel
   try {
     const r = structuredClone(input) as RelayRequest;
     if (!r || typeof r !== 'object') throw new Error('expected request');
-    exactKeys(r, ['method', 'args', ...('auth' in r ? ['auth'] : [])]);
+    exactKeys(r, [
+      'method',
+      'args',
+      ...('auth' in r ? ['auth'] : []),
+      ...('baseSplit' in r ? ['baseSplit'] : []),
+    ]);
+    if ('baseSplit' in r) {
+      if (r.method !== 'register' || !r.baseSplit) throw new Error('invalid split provenance');
+      exactKeys(r.baseSplit, ['kind', 'salt']);
+      if (!['push', 'pull'].includes(r.baseSplit.kind)) throw new Error('invalid split kind');
+      bytes(r.baseSplit.salt, 32);
+    }
     if ('auth' in r) {
       exactKeys(r.auth, ['kind', 'sig']);
       if (!['evm', 'solana'].includes(r.auth.kind)) throw new Error('invalid auth kind');
@@ -107,6 +136,11 @@ export function canonicalRequest(input: unknown, assets?: SettlementAssets): Rel
     }
     const a = r.args;
     switch (r.method) {
+      case 'fund_file_storage':
+        exactKeys(a, ['file_id', 'amount']);
+        bytes(r.args.file_id, 32);
+        if (uint(r.args.amount, 128) <= 0n) throw new Error('positive topup required');
+        break;
       case 'register':
         exactKeys(a, ['terms', 'seller_key', 'deadline']);
         termsHash(r.args.terms, assets);
@@ -235,17 +269,43 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
         baseUsdc: o.usdc,
         ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
       });
-      if (
-        o.policy.sellerAllowed &&
-        !(await o.policy.sellerAllowed(identityJson(r.args.terms.seller)))
-      )
-        fail('not_sponsored');
+      if (o.policy.fee) {
+        try {
+          checkProtocolFee(r.args.terms, o.policy.fee);
+        } catch {
+          fail('not_sponsored', 'required treasury share missing or invalid');
+        }
+      }
+      if (r.args.terms.base) {
+        const provenance = r.baseSplit;
+        if (o.policy.baseSponsorship === false || !provenance) return fail('not_sponsored');
+        try {
+          if (r.args.terms.near.recipients.some((r) => r.identity.kind !== 'evm'))
+            throw new Error();
+          const split = createSplit(
+            provenance.kind,
+            {
+              recipients: r.args.terms.near.recipients.map((r) => r.identity.id),
+              allocations: r.args.terms.near.recipients.map((r) => BigInt(r.bps)),
+              totalAllocation: 10000n,
+              distributionIncentive: 0,
+            },
+            provenance.salt,
+          );
+          if (split.address !== r.args.terms.base.pay_to) throw new Error();
+        } catch {
+          fail('not_sponsored', 'Base split does not match recipients');
+        }
+      }
       return;
     }
     if (!file) return fail('unknown_file');
     if (file.takenDown) fail('taken_down');
-    if (o.policy.sellerAllowed && !(await o.policy.sellerAllowed(identityJson(file.seller))))
-      fail('not_sponsored');
+    if (r.method === 'fund_file_storage') {
+      if (!sponsoredFiles.has(`${o.nearRpc}|${o.contractId}|${r.args.file_id}`))
+        fail('not_sponsored');
+      return;
+    }
     if (r.method === 'claim_key') {
       if (!(await getGrant(o.nearRpc, o.contractId, r.args.purchase_id, r.args.grant)))
         fail('not_buyer');
@@ -278,6 +338,7 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
       return;
     }
     if (r.method !== 'unlock') return;
+    if (o.policy.baseSponsorship === false) fail('not_sponsored');
     const a = r.args;
     const purchase = parsePurchaseMessage(a.purchase, { baseUsdc: o.usdc });
     if (BigInt(purchase.price) < o.policy.minPrice) fail('not_sponsored');
@@ -290,7 +351,42 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
       purchase.price !== file.terms.base.price ||
       purchase.asset !== o.usdc
     )
-      fail('bad_request');
+      return fail('bad_request');
+    try {
+      if (file.terms.near.recipients.some((r) => r.identity.kind !== 'evm'))
+        fail('not_sponsored', 'Base split recipients must be EVM identities');
+      if (o.policy.fee) checkProtocolFee(file.terms, o.policy.fee);
+    } catch {
+      fail('not_sponsored', 'required treasury share missing or invalid');
+    }
+    const verifiedKey = JSON.stringify([o.baseRpc, o.nearRpc, o.contractId, termsHash(file.terms)]);
+    const now = Date.now();
+    for (const [key, until] of refusedBaseTerms) {
+      if (until <= now) refusedBaseTerms.delete(key);
+    }
+    if (refusedBaseTerms.has(verifiedKey))
+      fail('not_sponsored', 'Base split code or state does not match registered recipients');
+    if (!verifiedBaseTerms.has(verifiedKey)) {
+      try {
+        await readSplitState(o.baseRpc, file.terms.base.pay_to, {
+          recipients: file.terms.near.recipients.map((r) => r.identity.id),
+          allocations: file.terms.near.recipients.map((r) => BigInt(r.bps)),
+          totalAllocation: 10000n,
+          distributionIncentive: 0,
+        });
+      } catch (error) {
+        if (error instanceof PayError && error.code === 'transport')
+          fail('unavailable', 'Base split verification unavailable; retry later');
+        // Bound attacker-controlled refusals; transient RPC failures are never cached.
+        if (refusedBaseTerms.size >= 1024) {
+          const oldest = refusedBaseTerms.keys().next().value;
+          if (oldest !== undefined) refusedBaseTerms.delete(oldest);
+        }
+        refusedBaseTerms.set(verifiedKey, Date.now() + 60000);
+        fail('not_sponsored', 'Base split code or state does not match registered recipients');
+      }
+      verifiedBaseTerms.add(verifiedKey);
+    }
     if (await getPurchase(o.nearRpc, o.contractId, id)) fail('payment_used');
     const auth = a.logs[0];
     if (!auth) return fail('bad_request');
@@ -325,7 +421,7 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
 export interface Sender {
   /** The NEAR account that sends and pays, e.g. `relayer.annon.defdone.near`. */
   accountId: string;
-  /** Its function-call key for the six methods, `ed25519:…`. Only for this contract. */
+  /** Its function-call key for the relay methods, including file funding, `ed25519:…`. Only for this contract. */
   key: string;
 }
 
@@ -362,7 +458,13 @@ interface CachedClaim {
 const claims = new Map<string, CachedClaim>();
 const counts = new Map<string, { n: number; until: number }>();
 /** When each recent write was sent, per payer and contract (see `enoughStorage`). */
-const writes = new Map<string, number[]>();
+const writes = new Map<string, { at: number; amount: bigint }[]>();
+// Successful Base code/state checks last until restart; refused checks expire after 60 seconds.
+const verifiedBaseTerms = new Set<string>();
+const refusedBaseTerms = new Map<string, number>();
+// Allocations remain charged after ambiguous sends. Restart forgets eligibility, so topups fail closed.
+const sponsoredFiles = new Map<string, { allocated: bigint; day: number; today: bigint }>();
+const topupDays = new Map<string, { day: number; amount: bigint }>();
 const queues = new Map<string, Promise<unknown>>();
 let waiting = 0;
 let checking = 0;
@@ -378,6 +480,10 @@ export function resetRelayState() {
   counts.clear();
   accounts.clear();
   writes.clear();
+  sponsoredFiles.clear();
+  verifiedBaseTerms.clear();
+  refusedBaseTerms.clear();
+  topupDays.clear();
 }
 
 /**
@@ -458,9 +564,13 @@ const lookUp = (url: string, tx: string, accountId: string) =>
  * in the last couple of minutes, which a balance read may not show yet. The contract decides; a
  * write it refuses for storage costs gas, within the key's allowance.
  */
-async function enoughStorage(o: CheckOptions & { sender: Sender }, scope: string) {
+async function enoughStorage(
+  o: CheckOptions & { sender: Sender },
+  scope: string,
+  required = STORAGE_PER_WRITE,
+) {
   const since = Date.now() - WRITE_SETTLES;
-  const recent = (writes.get(scope) ?? []).filter((t) => t > since);
+  const recent = (writes.get(scope) ?? []).filter((t) => t.at > since);
   writes.set(scope, recent);
   const balance = await view(o.nearRpc, o.contractId, 'storage_balance_of', {
     account_id: o.sender.accountId,
@@ -468,7 +578,7 @@ async function enoughStorage(o: CheckOptions & { sender: Sender }, scope: string
   if (
     typeof balance !== 'string' ||
     !/^\d+$/.test(balance) ||
-    BigInt(balance) < STORAGE_PER_WRITE * BigInt(recent.length + 1)
+    BigInt(balance) < required + recent.reduce((sum, item) => sum + item.amount, 0n)
   ) {
     fail('unavailable', "the relayer's prepaid storage is low; try later or send it yourself");
   }
@@ -499,6 +609,8 @@ const identity = (r: RelayRequest, _contract: string) => {
   if (r.method === 'reopen')
     return `reopen:${r.args.purchase_id}:${r.args.fresh_key}:${r.args.nonce}`;
   if (r.method === 'register') return `register:${r.args.terms.file_id}`;
+  if (r.method === 'fund_file_storage')
+    return `fund_file_storage:${r.args.file_id}:${r.args.amount}`;
   return `${r.method}:${r.args.file_id}:${r.args.key ?? ''}`;
 };
 const signedByItsWallet = (r: RelayRequest, contract: string, assets?: SettlementAssets) => {
@@ -693,17 +805,93 @@ export async function relay(
       const key = senderKey(o);
       // Storage is the payer's balance on the contract, whichever of its keys signs.
       const scope = `${o.nearRpc}|${o.contractId}|${o.sender.accountId}`;
-      const write = ['register', 'unlock', 'reopen', 'reopen_seller'].includes(r.method);
-      if (write) await enoughStorage(o, scope).catch(asRelayError);
-      const { txHash, signed } = await sign(o, key, r.method, contractArgs(r));
+      const write = ['register', 'unlock', 'reopen', 'reopen_seller', 'fund_file_storage'].includes(
+        r.method,
+      );
+      let allocation = 0n;
+      const fileId =
+        r.method === 'register'
+          ? r.args.terms.file_id
+          : r.method === 'fund_file_storage'
+            ? r.args.file_id
+            : null;
+      const fileScope = `${o.nearRpc}|${o.contractId}|${fileId}`;
+      const day = Math.floor(Date.now() / DAY);
+      const previousFile = sponsoredFiles.get(fileScope);
+      if (r.method === 'register') {
+        const listed = await o.policy.sellerAllowed?.(identityJson(r.args.terms.seller));
+        allocation = listed
+          ? (o.policy.listedFileBudget ?? o.policy.fileBudget ?? 5n * 10n ** 22n)
+          : (o.policy.fileBudget ?? 5n * 10n ** 22n);
+        const n = counts.get(`${scope}|sponsored:${day}`)?.n ?? 0;
+        if (n >= (o.policy.sponsoredFilesPerDay ?? 100)) fail('limited');
+      } else if (r.method === 'fund_file_storage') {
+        allocation = BigInt(r.args.amount);
+        if (!previousFile) return fail('not_sponsored');
+        const daily = topupDays.get(scope);
+        if (
+          previousFile.allocated + allocation > (o.policy.topupPerFile ?? 15n * 10n ** 22n) ||
+          (previousFile.day === day ? previousFile.today : 0n) + allocation >
+            (o.policy.topupPerFileDay ?? 5n * 10n ** 22n) ||
+          (daily?.day === day ? daily.amount : 0n) + allocation >
+            (o.policy.topupPerDay ?? 5n * 10n ** 23n)
+        )
+          fail('limited');
+      }
+      const storage = (r.method === 'fund_file_storage' ? 0n : STORAGE_PER_WRITE) + allocation;
+      if (write) await enoughStorage(o, scope, storage).catch(asRelayError);
+      const args =
+        r.method === 'register'
+          ? {
+              args: {
+                ...r.args,
+                ...(allocation > 0n ? { file_budget: allocation.toString() } : {}),
+              },
+              auth: r.auth,
+            }
+          : contractArgs(r);
+      const { txHash, signed } = await sign(o, key, r.method, args, GAS);
       sent = true;
       submitted.set(id, { txHash, uncertain: true });
-      if (write) writes.get(scope)?.push(Date.now()) ?? writes.set(scope, [Date.now()]);
+      if (write)
+        writes.get(scope)?.push({ at: Date.now(), amount: storage }) ??
+          writes.set(scope, [{ at: Date.now(), amount: storage }]);
+      if (fileId) {
+        sponsoredFiles.set(fileScope, {
+          allocated: (previousFile?.allocated ?? 0n) + allocation,
+          day,
+          today:
+            r.method === 'fund_file_storage'
+              ? (previousFile?.day === day ? previousFile.today : 0n) + allocation
+              : 0n,
+        });
+        if (r.method === 'register') {
+          const counterKey = `${scope}|sponsored:${day}`;
+          counts.set(counterKey, {
+            n: (counts.get(counterKey)?.n ?? 0) + 1,
+            until: (day + 1) * DAY,
+          });
+        } else {
+          const old = topupDays.get(scope);
+          topupDays.set(scope, { day, amount: (old?.day === day ? old.amount : 0n) + allocation });
+        }
+      }
       const result = await send(o, key, txHash, signed);
       if (result.rejected) {
         sent = false;
         submitted.delete(id);
         if (write) writes.get(scope)?.pop();
+        if (fileId) {
+          if (previousFile) sponsoredFiles.set(fileScope, previousFile);
+          else sponsoredFiles.delete(fileScope);
+          if (r.method === 'register') {
+            const counter = counts.get(`${scope}|sponsored:${day}`);
+            if (counter) counter.n--;
+          } else {
+            const counter = topupDays.get(scope);
+            if (counter) counter.amount -= allocation;
+          }
+        }
         fail('unavailable', 'the transaction was refused before execution; try later');
       }
       return result;

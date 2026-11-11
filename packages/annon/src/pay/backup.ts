@@ -22,6 +22,8 @@ export interface RecoveryRecord extends Versioned {
   grant: number | null;
 }
 export interface SellRecord extends Versioned {
+  storageBudget?: string;
+  storageFunding?: 'pending' | 'funded' | 'refused';
   kind: 'sell';
   terms: import('../settle-near/terms.js').Terms;
   /** Immutable Base split provenance. Recipients and bps come from terms.near;
@@ -68,6 +70,16 @@ function validate(r: PrivateRecord) {
       r.deadline < 0
     )
       throw new TypeError('invalid sell record');
+    if (
+      r.storageBudget !== undefined &&
+      (!/^[1-9][0-9]*$/.test(r.storageBudget) || BigInt(r.storageBudget) >= 2n ** 128n)
+    )
+      throw new TypeError('invalid sell storage budget');
+    if (
+      r.storageFunding !== undefined &&
+      (!r.storageBudget || !['pending', 'funded', 'refused'].includes(r.storageFunding))
+    )
+      throw new TypeError('invalid sell funding state');
     if (r.published === true) {
       if (r.fileKey !== null || r.sellerSecret !== null || r.ckdSecret !== null)
         throw new TypeError('published sell retains secrets');

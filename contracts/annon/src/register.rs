@@ -127,6 +127,8 @@ impl TermsJson {
 #[derive(Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RegisterArgs {
+    /// Nonwithdrawable allocation from the caller's prepaid balance, separate from signed Terms.
+    pub file_budget: Option<U128>,
     pub terms: TermsJson,
     /// The seller's one-time BLS12-381 G1 key (48 bytes compressed, hex) for the file key.
     pub seller_key: String,
@@ -206,6 +208,7 @@ impl Annon {
             file_id,
             File {
                 terms,
+                purchase_storage_balance: 0,
                 header_hash: [0; 32],
                 sales_stopped_at: 0,
                 taken_down: 0,
@@ -214,6 +217,9 @@ impl Annon {
         self.files.flush();
         self.pay_for_storage(env::storage_usage() - before);
         emit("file_registered", event);
+        if let Some(amount) = args.file_budget {
+            self.allocate_file_storage(file_id, amount.0);
+        }
         self.ckd(&file_id, &seller_key, "register", seller, None)
     }
 

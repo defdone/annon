@@ -55,8 +55,8 @@ fn then(p: PromiseIndex, method: &str, args: String, gas: Gas) -> PromiseIndex {
 
 impl Annon {
     /// Once a delivery is funded and every slot paid, its record goes and the storage it held
-    /// returns to the delivery reserve, so the reserve is spent only on deliveries still being
-    /// paid out (a flood of tiny refunds can't use it up for good). The events keep the history.
+    /// returns to the purchase file, or to refund working capital for refund-only deliveries.
+    /// The permanent purchase keeps its entitlement and the events keep the history.
     fn retire_delivery(&mut self, delivery_id: u64) {
         let done = self
             .deliveries
@@ -68,15 +68,34 @@ impl Annon {
         self.deliveries.flush();
         self.open_deliveries.flush();
         let before = env::storage_usage();
+        let file_id = self
+            .deliveries
+            .get(&delivery_id)
+            .unwrap()
+            .purchase
+            .map(|p| self.purchases.get(&p).expect("purchase missing").file_id);
         self.deliveries.remove(&delivery_id);
         self.open_deliveries.remove(&delivery_id);
         self.deliveries.flush();
         self.open_deliveries.flush();
         let freed = before.saturating_sub(env::storage_usage());
-        self.reserve += env::storage_byte_cost().as_yoctonear() * u128::from(freed);
+        let credit = env::storage_byte_cost().as_yoctonear() * u128::from(freed);
+        if let Some(id) = file_id {
+            let file = self.files.get_mut(&id).expect("file missing");
+            file.purchase_storage_balance = file
+                .purchase_storage_balance
+                .checked_add(credit)
+                .expect("file storage overflow");
+        } else {
+            self.reserve = self
+                .reserve
+                .checked_add(credit)
+                .expect("refund reserve overflow");
+        }
         emit(
             "delivery_settled",
-            json!({ "delivery_id": delivery_id, "freed_bytes": freed }),
+            json!({ "delivery_id": delivery_id, "freed_bytes": freed, "storage_credit": U128(credit),
+                "storage_destination": file_id.map(|id| crate::evm::hex0x(&id)).unwrap_or_else(|| "receiver_reserve".into()) }),
         );
     }
 
@@ -550,6 +569,8 @@ mod tests {
         c.register(a, auth);
         as_caller("anyone.near", NearToken::from_near(1));
         c.fund_receiver_reserve();
+        as_caller("anyone.near", NearToken::from_near(1));
+        c.fund_file_storage(FILE.into(), None);
         let p = crate::purchase::Purchase {
             terms_hash: hash,
             ..near_purchase()

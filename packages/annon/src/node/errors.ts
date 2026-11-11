@@ -18,6 +18,11 @@ export class AdapterError extends Error {
 export const usage = () =>
   new AdapterError('invalid_arguments', 'Invalid arguments. Run annon --help.', 2);
 const actions: Record<string, string> = {
+  protocol_fee_above_max:
+    'The advertised protocol fee exceeds maxProtocolFee. Review the fee in human configuration.',
+  funding_refused: 'File funding was refused. Correct the cause before retrying.',
+  file_storage_low:
+    'This file needs more purchase storage funding before a NEAR or 1Click payment.',
   source_changed: 'The source changed between passes. Restore the original file before retrying.',
   quote_expired: 'The 1Click quote expired. Run buy again.',
   settlement_processing: 'The purchase is still settling. Check status and resume before opening.',

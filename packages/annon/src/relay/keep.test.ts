@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { purchase as sample, terms } from '../../test/fixtures.js';
 import finalizedSettle from '../../test/keeper-final.json' with { type: 'json' };
 import type { BudgetRecord } from '../node/budget.js';
 import { memoryStore } from '../pay/store.js';
+import { termsHash } from '../settle-near/terms.js';
 import type { KeeperRecord } from './keeper-runner.js';
 import { keep, resetRelayState } from './relay.js';
 
@@ -45,7 +47,7 @@ const d = (id = 0, fund: 0 | 1 | 2 = 0, slots: (0 | 1 | 2)[] = [0]) => ({
   id,
   amount: '10',
   sender: 'intents.near',
-  purchase: null,
+  purchase: null as string | null,
   reason: 0,
   fund: { state: fund, attempt: 0 },
   funded: fund === 2 ? '10' : '0',
@@ -158,7 +160,27 @@ beforeEach(() => {
               ? all.slice(a.from, a.from + a.limit)
               : q.params.method_name === 'get_delivery'
                 ? (all.find((x) => x.id === a.delivery_id) ?? null)
-                : '0';
+                : q.params.method_name === 'get_purchase'
+                  ? {
+                      purchase_id: a.purchase_id,
+                      file_id: terms.file_id,
+                      terms_hash: termsHash(terms),
+                      buyer_key: sample.buyer_key,
+                      recovery: sample.recovery,
+                      route: 'near-usdc',
+                      delivery: 0,
+                      accepted_at: 1,
+                      grants: 1,
+                    }
+                  : q.params.method_name === 'get_file'
+                    ? {
+                        terms: { ...terms, near: { ...terms.near, price: '10' } },
+                        terms_hash: termsHash({ ...terms, near: { ...terms.near, price: '10' } }),
+                        header_hash: null,
+                        sales_stopped_at: null,
+                        taken_down: null,
+                      }
+                    : '0';
         result = { result: [...Buffer.from(JSON.stringify(value))] };
       } else if (q.method === 'send_tx') {
         if (failSend) throw new Error('transport');
@@ -857,4 +879,16 @@ it('reports snapshot InFlight incidents during backoff without extra delivery re
   expect(o.alert).toHaveBeenCalledExactlyOnceWith({ type: 'in_flight', deliveryId: 0 });
   expect(queries.filter((q) => q.params.method_name === 'get_delivery')).toHaveLength(0);
   expect(created).not.toHaveBeenCalled();
+});
+
+it('skips dust purchase payouts but always sponsors dust refunds', async () => {
+  all = [{ ...d(0), purchase: `0x${'12'.repeat(32)}` }, d(1)];
+  const result = await keep({ ...opts(), minPayout: 10000n });
+  expect(result.sent.map((s) => (s.args as { delivery_id: number }).delivery_id)).toEqual([1]);
+});
+
+it('sponsors a dust purchase with an excess refund slot', async () => {
+  all = [{ ...d(0, 0, [0, 0]), purchase: `0x${'12'.repeat(32)}`, amount: '11' }];
+  const result = await keep({ ...opts(), minPayout: 10000n });
+  expect(result.sent).toHaveLength(1);
 });

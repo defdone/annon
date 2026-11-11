@@ -13,7 +13,7 @@ use crate::register::now;
 use crate::state::{Delivery, PurchaseRec, Slot, Step, PENDING};
 use crate::{Annon, AnnonExt};
 
-/// Storage set aside per delivery before it is written (purchase, delivery with up to 9 slots,
+/// Admission allowance before a write (purchase, delivery with up to 9 slots,
 /// recovery index and open-delivery index). Debited by what was actually used.
 pub const DELIVERY_BYTES: u64 = 4096;
 
@@ -30,6 +30,7 @@ pub mod reason {
     pub const DUPLICATE: u8 = 8;
     pub const UNDERPAID: u8 = 9;
     pub const NO_STORAGE: u8 = 10;
+    pub const FILE_STORAGE_LOW: u8 = 11;
 }
 
 #[near(serializers = [json])]
@@ -76,12 +77,15 @@ impl Annon {
 
     pub(crate) fn index_purchase(&mut self, recovery: &Identity, purchase_id: [u8; 32]) {
         let k = recovery_key(recovery);
-        let n = self.recovery_count.get(&k).copied().unwrap_or(0);
-        let mut entry = [0u8; 36];
-        entry[..32].copy_from_slice(&k);
-        entry[32..].copy_from_slice(&n.to_le_bytes());
-        self.recovery.insert(entry, purchase_id);
-        self.recovery_count.insert(k, n + 1);
+        if let Some((n, _)) = self.recovery_count.get_mut(&k) {
+            let mut entry = [0u8; 36];
+            entry[..32].copy_from_slice(&k);
+            entry[32..].copy_from_slice(&n.to_le_bytes());
+            self.recovery.insert(entry, purchase_id);
+            *n = n.checked_add(1).expect("recovery index full");
+        } else {
+            self.recovery_count.insert(k, (1, purchase_id));
+        }
     }
 }
 
@@ -129,7 +133,22 @@ impl Annon {
         self.next_delivery += 1;
 
         let byte = env::storage_byte_cost().as_yoctonear();
-        if self.reserve < byte * u128::from(DELIVERY_BYTES) {
+        let admission = byte * u128::from(DELIVERY_BYTES);
+        let outcome = outcome.and_then(|(p, id)| {
+            let available = self.file(&p.file_id).purchase_storage_balance;
+            if available < admission {
+                emit(
+                    "file_storage_low",
+                    json!({ "file_id": hex0x(&p.file_id),
+                    "available": U128(available), "admission_requirement": U128(admission) }),
+                );
+                Err(reason::FILE_STORAGE_LOW)
+            } else {
+                Ok((p, id))
+            }
+        });
+        // Rejected payments use only refund working capital, never a file budget.
+        if outcome.is_err() && self.reserve < admission {
             if self.refunds.is_full() {
                 // ponytail: 2^32 leaves; unreachable in practice. Refused, so NEP-141 returns it.
                 env::log_str("delivery refused: no storage reserve and the refund tree is full");
@@ -154,6 +173,10 @@ impl Annon {
         }
 
         let before = env::storage_usage();
+        let accepted = outcome
+            .as_ref()
+            .ok()
+            .map(|(p, id)| (p.file_id, *id, p.buyer_key, p.recovery.text()));
         match outcome {
             Ok((p, id)) => {
                 let file = self.files.get(&p.file_id).unwrap();
@@ -173,7 +196,6 @@ impl Annon {
                     id,
                     PurchaseRec {
                         file_id: p.file_id,
-                        terms_hash: p.terms_hash,
                         buyer_key: p.buyer_key,
                         recovery: p.recovery.clone(),
                         route: 0,
@@ -197,11 +219,6 @@ impl Annon {
                         funded: 0,
                         slots,
                     },
-                );
-                emit(
-                    "purchase_accepted",
-                    json!({ "purchase_id": hex0x(&id), "file_id": hex0x(&p.file_id), "delivery_id": delivery_id,
-                            "buyer_key": hex0x(&p.buyer_key), "recovery": p.recovery.text() }),
                 );
             }
             Err(why) => {
@@ -232,7 +249,37 @@ impl Annon {
         self.recovery.flush();
         self.recovery_count.flush();
         let used = env::storage_usage().saturating_sub(before);
-        self.reserve = self.reserve.saturating_sub(byte * u128::from(used));
+        require!(
+            used <= DELIVERY_BYTES,
+            "acceptance exceeds storage allowance"
+        );
+        let cost = byte * u128::from(used);
+        if let Some((file_id, id, buyer_key, recovery)) = accepted {
+            let file = self.files.get_mut(&file_id).unwrap();
+            file.purchase_storage_balance = file
+                .purchase_storage_balance
+                .checked_sub(cost)
+                .expect("file storage underflow");
+            let remaining = file.purchase_storage_balance;
+            emit(
+                "purchase_accepted",
+                json!({ "purchase_id": hex0x(&id), "file_id": hex0x(&file_id),
+                "delivery_id": delivery_id, "buyer_key": hex0x(&buyer_key), "recovery": recovery,
+                "charged_bytes": used, "charged_cost": U128(cost), "remaining_budget": U128(remaining) }),
+            );
+            if remaining < admission {
+                emit(
+                    "file_storage_low",
+                    json!({ "file_id": hex0x(&file_id), "available": U128(remaining),
+                    "admission_requirement": U128(admission) }),
+                );
+            }
+        } else {
+            self.reserve = self
+                .reserve
+                .checked_sub(cost)
+                .expect("refund reserve underflow");
+        }
         emit(
             "delivery_received",
             json!({ "delivery_id": delivery_id, "amount": amount }),
@@ -246,8 +293,8 @@ impl Annon {
         self.reserve += env::attached_deposit().as_yoctonear();
     }
 
-    /// NEAR (yocto) left for the storage of future deliveries; below 4096 bytes' worth, a delivery
-    /// becomes a refund leaf.
+    /// NEAR (yocto) refund working capital. Below 4096 bytes' worth, rejected payments
+    /// become refund leaves; funded purchases remain independent.
     pub fn receiver_reserve(&self) -> U128 {
         U128(self.reserve)
     }
@@ -323,6 +370,8 @@ pub(crate) mod tests {
         registered(&mut c, &Seller::new(1));
         as_caller("anyone.near", NearToken::from_near(1));
         c.fund_receiver_reserve();
+        as_caller("anyone.near", NearToken::from_near(1));
+        c.fund_file_storage(FILE.into(), None);
         c
     }
 
@@ -546,6 +595,8 @@ pub(crate) mod tests {
         c.register(a, None);
         as_caller("anyone.near", NearToken::from_near(1));
         c.fund_receiver_reserve();
+        as_caller("anyone.near", NearToken::from_near(1));
+        c.fund_file_storage(FILE.into(), None);
         let p = Purchase {
             terms_hash: hash,
             ..near_purchase()
@@ -559,11 +610,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_delivery_pays_its_storage_from_the_reserve() {
+    fn a_purchase_pays_its_storage_from_the_file() {
         let mut c = selling();
-        let before = c.reserve;
+        let before = c.file_storage_balance(FILE.into()).available.0;
         deliver(&mut c, 10_000, &message(&near_purchase()));
-        let used = before - c.reserve;
+        let used = before - c.file_storage_balance(FILE.into()).available.0;
         assert_eq!(c.receiver_reserve(), U128(c.reserve));
         assert!(
             used > 0 && used < NearToken::from_millinear(41).as_yoctonear(),

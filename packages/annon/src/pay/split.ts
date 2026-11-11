@@ -304,14 +304,37 @@ export async function readSplit(
       `${address} is not an ownerless 0xSplits V2.2 split of these terms`,
     );
   }
+  return inspectSplit(baseRpc, to, split, [f]);
+}
+
+/**
+ * Reads an ownerless, unpaused V2.2 clone with these exact terms without its creation salt or
+ * nonce. This checks current code and state only; `readSplit` also proves ownerless creation.
+ */
+export async function readSplitState(
+  baseRpc: string,
+  address: string,
+  split: Split,
+): Promise<SplitTerms> {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new TypeError('address must be 0x and 20 bytes');
+  checkTerms(split);
+  return inspectSplit(baseRpc, address.toLowerCase(), split, SPLIT_FACTORIES);
+}
+
+async function inspectSplit(
+  baseRpc: string,
+  address: string,
+  split: Split,
+  factories: readonly (typeof SPLIT_FACTORIES)[number][],
+): Promise<SplitTerms> {
   const at = (await head(baseRpc)).number;
-  if ((await getCode(baseRpc, to, at)) !== cloneCode(f.implementation)) {
-    fail('bad_requirements', `${address} is not deployed yet`);
-  }
+  const code = await getCode(baseRpc, address, at);
+  const f = factories.find((f) => code === cloneCode(f.implementation));
+  if (!f) return fail('bad_requirements', `${address} is not deployed as a known V2.2 clone`);
   const read = (sig: string) =>
     viewWord(baseRpc, address, selector(sig), at).catch((e: unknown) => {
-      // A contract without the function reverts, a wallet answers nothing: neither is a split.
-      if (e instanceof PayError && /revert|eth_call result/i.test(e.message)) {
+      // A reverted view is an invalid split; malformed or unavailable RPC replies stay retryable.
+      if (e instanceof PayError && /revert/i.test(e.message)) {
         fail('bad_requirements', `${address} does not answer ${sig}: not an 0xSplits v2 split`);
       }
       throw e;

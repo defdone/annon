@@ -65,6 +65,8 @@ export async function agentPolicy(o: Input, env: Environment, forced = false): P
         o.trustContract,
         o.moderator,
         o.maxPrice,
+        o.storageBudget,
+        o.fundAmount,
       ].some((v) => v !== undefined))
   )
     throw new AdapterError(
@@ -106,6 +108,8 @@ export async function savePublicConfig(
     'moderators',
     'origins',
     'allowedResources',
+    'storageBudget',
+    'maxProtocolFee',
   ];
   const publicConfig = Object.fromEntries(Object.entries(old).filter(([k]) => allowed.includes(k)));
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });

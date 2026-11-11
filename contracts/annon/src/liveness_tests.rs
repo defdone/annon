@@ -254,22 +254,24 @@ fn maximum_delivery_admission_and_index_charge_are_exact() {
     as_caller(&"s".repeat(64), NearToken::from_near(1));
     c.register(a, None);
     c.publish_header(FILE.into(), format!("0x{}", "ab".repeat(32)));
-    c.reserve =
+    let allowance =
         env::storage_byte_cost().as_yoctonear() * u128::from(crate::receive::DELIVERY_BYTES);
+    as_caller("sponsor.near", NearToken::from_yoctonear(allowance));
+    c.fund_file_storage(FILE.into(), None);
     let p = crate::purchase::Purchase {
         terms_hash: hash,
         refund: identity(&near_id(&"x".repeat(64))),
         recovery: identity(&near_id(&"x".repeat(64))),
         ..near_purchase()
     };
-    let start = c.reserve;
+    let start = c.file_storage_balance(FILE.into()).available.0;
     as_caller(NEAR_USDC, NearToken::from_yoctonear(0));
     let before = env::storage_usage();
     c.ft_on_transfer("b".repeat(64).parse().unwrap(), U128(12_000), message(&p));
     let used = env::storage_usage() - before;
     assert!(used <= crate::receive::DELIVERY_BYTES, "{used}");
     assert_eq!(
-        start - c.reserve,
+        start - c.file_storage_balance(FILE.into()).available.0,
         u128::from(used) * env::storage_byte_cost().as_yoctonear()
     );
     assert_eq!(c.list_open_deliveries(0, 50)[0].slots.len(), 9);

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { must } from '../../test/fixtures.js';
 import type { Identity } from '../settle-near/identity.js';
 import type { ReopenV2 } from '../settle-near/purchase.js';
 import { getConfig, NearError, readOutcome, rpcReply, txOutcome, view } from './rpc.js';
@@ -344,4 +345,51 @@ it('names any HTTP 429 as rate limited, even with a JSON-RPC body that lacks the
     /rate limited/,
   );
   vi.unstubAllGlobals();
+});
+
+it('refuses a multi-action registration and funding batch', () => {
+  const file = `0x${'12'.repeat(32)}`;
+  const key = `0x${'34'.repeat(48)}`;
+  const args = { args: { terms: { file_id: file }, seller_key: key } };
+  const result = tx(['register', 'fund_file_storage'], ok, [
+    {
+      executor: CONTRACT,
+      logs: [event('key_released', { file_id: file, key, reason: 'register' })],
+      status: { SuccessValue: b64(answer) },
+    },
+  ]);
+  must(result.transaction.actions[0]).FunctionCall.args = b64(args);
+  must(result.transaction.actions[1]).FunctionCall.args = b64({
+    file_id: file,
+    amount: '50000000000000000000000',
+  });
+  expect(() => readOutcome(result, CONTRACT)).toThrow(/single function call/);
+});
+
+it('binds a single register action while allowing only a valid relayer budget injection', () => {
+  const args = {
+    args: { terms: { file_id: 'test' }, seller_key: 'test', deadline: 1 },
+    auth: { kind: 'evm', sig: 'test' },
+  };
+  const result = tx(['register'], ok, []);
+  must(result.transaction.actions[0]).FunctionCall.args = b64({
+    ...args,
+    args: { ...args.args, file_budget: '5' },
+  });
+  const expected = { txHash: 'H', signer: 'buyer.near', method: 'register', args };
+  expected.txHash = result.transaction.hash;
+  expected.signer = result.transaction.signer_id;
+  expect(() => readOutcome(result, CONTRACT, expected)).not.toThrow();
+  for (const file_budget of ['0', '-1', 'invalid', (2n ** 128n).toString()]) {
+    must(result.transaction.actions[0]).FunctionCall.args = b64({
+      ...args,
+      args: { ...args.args, file_budget },
+    });
+    expect(() => readOutcome(result, CONTRACT, expected)).toThrow();
+  }
+  must(result.transaction.actions[0]).FunctionCall.args = b64({
+    ...args,
+    args: { ...args.args, file_budget: '5', deadline: 2 },
+  });
+  expect(() => readOutcome(result, CONTRACT, expected)).toThrow();
 });

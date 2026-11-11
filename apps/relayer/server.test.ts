@@ -45,7 +45,15 @@ describe('relayer HTTP', () => {
         contract: 'v1.annon.defdone.near',
         minPrice: '10000',
         disabled: false,
-        methods: ['register', 'unlock', 'claim_key', 'reopen', 'reopen_seller', 'stop_sales'],
+        methods: [
+          'register',
+          'unlock',
+          'claim_key',
+          'reopen',
+          'reopen_seller',
+          'stop_sales',
+          'fund_file_storage',
+        ],
       },
     });
     expect(await handle(config(), 'POST', '/v1/relay', '1.1.1.1', body, ok)).toEqual({
@@ -94,6 +102,7 @@ describe('relayer HTTP', () => {
       CONTRACT_ID: 'c.near',
       RELAYER_ACCOUNT: 'r.near',
       RELAYER_KEY: 'ed25519:x',
+      TREASURY_EVM: `0x${'55'.repeat(20)}`,
     };
     expect(fromEnv(base).config).toMatchObject({ perDay: 500, perIpHour: 60 });
     expect(fromEnv({ ...base, PER_DAY: '0' }).config.perDay).toBe(0);
@@ -402,7 +411,7 @@ describe.runIf(process.env.ANNON_TEST_CONTAINER === '1')(
           ['--no-warnings', '--import', './ts-hook.mjs', 'server.ts'],
           { cwd: app, encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH } },
         );
-        expect(start.stderr).toContain('CONTRACT_ID is not set');
+        expect(start.stderr).toContain('fees require a treasury');
         expect(start.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
         // Prove this harness detects a dev-only runtime import that the dev install permits.
         await appendFile(join(app, 'server.ts'), "\nimport 'vitest';\n");
@@ -580,6 +589,7 @@ it('requires separate durable keeper credentials and budgets when explicitly ena
     CONTRACT_ID: 'c.near',
     RELAYER_ACCOUNT: 'r.near',
     RELAYER_KEY: 'ed25519:fake',
+    TREASURY_EVM: `0x${'55'.repeat(20)}`,
   };
   expect(fromEnv(base).keeperSeconds).toBe(0);
   expect(() => fromEnv({ ...base, KEEPER_SECONDS: '30' })).toThrow('KEEPER_ACCOUNT');
@@ -643,6 +653,7 @@ it('validates optional keeper webhook HTTPS URLs and balance low water', () => {
     CONTRACT_ID: 'c.near',
     RELAYER_ACCOUNT: 'r.near',
     RELAYER_KEY: 'fake',
+    TREASURY_EVM: `0x${'55'.repeat(20)}`,
     KEEPER_SECONDS: '30',
     KEEPER_ACCOUNT: 'k.near',
     KEEPER_KEY: 'fake-keeper',
@@ -732,9 +743,14 @@ it('reserves an independent daily pool for unlock and buckets IPv6 clients by /6
     429,
   );
 });
-it('requires a seller allowlist unless development sponsorship is explicit', () => {
-  const base = { CONTRACT_ID: 'c.near', RELAYER_ACCOUNT: 'r.near', RELAYER_KEY: 'fake' };
-  expect(() => fromEnv(base)).toThrow('SELLERS');
+it('does not require a seller allowlist or a development flag', () => {
+  const base = {
+    CONTRACT_ID: 'c.near',
+    RELAYER_ACCOUNT: 'r.near',
+    RELAYER_KEY: 'fake',
+    TREASURY_EVM: `0x${'55'.repeat(20)}`,
+  };
+  expect(fromEnv(base).config.policy).toBeDefined();
   expect(fromEnv({ ...base, DEV_ALLOW_ANY_SELLER: '1' }).config.policy).toBeDefined();
 });
 
@@ -910,3 +926,77 @@ it.each(['global', 'pool'] as const)(
     expect(send).toHaveBeenCalledTimes(limit === 'global' ? 2 : 1);
   },
 );
+
+it('opens sponsorship without SELLERS and publishes bounded budgets and the protocol fee', async () => {
+  const c = fromEnv({
+    CONTRACT_ID: 'contract.test',
+    RELAYER_ACCOUNT: 'relay.test',
+    RELAYER_KEY: 'ed25519:test',
+    TREASURY_EVM: `0x${'55'.repeat(20)}`,
+  }).config;
+  expect(c.policy.minPrice).toBe(100000n);
+  const result = await handle(c, 'GET', '/v1/capabilities', 'a', '');
+  expect(result.body).toMatchObject({
+    fee: { fixed: '30000', bps: 100 },
+    sponsorship: { filesPerDay: 100, filesPerIpDay: 5, fileBudget: '50000000000000000000000' },
+  });
+});
+
+it('caps sponsored files globally and per IP before any concurrent send', async () => {
+  const c = config({
+    sponsoredFilesPerIpDay: 1,
+    policy: { minPrice: 100000n, maxDeadlineSeconds: 600, sponsoredFilesPerDay: 2 },
+  });
+  const req = JSON.stringify({ method: 'register', args: {} });
+  const send = vi.fn(ok);
+  const lookup = async () => null;
+  const results = await Promise.all(
+    ['a', 'a', 'b', 'c'].map((ip) => handle(c, 'POST', '/v1/relay', ip, req, send, lookup)),
+  );
+  expect(results.map((r) => r.status)).toEqual([200, 429, 200, 429]);
+  expect(send).toHaveBeenCalledTimes(2);
+});
+
+it('keeps the per-IP sponsored-file day cap when client counters are evicted', async () => {
+  const c = config({
+    hitsCap: 1,
+    sponsoredFilesPerIpDay: 1,
+    perIpHour: 100,
+    policy: { minPrice: 100000n, maxDeadlineSeconds: 600, sponsoredFilesPerDay: 5 },
+  });
+  const req = JSON.stringify({ method: 'register', args: {} });
+  const lookup = async () => null;
+  expect((await handle(c, 'POST', '/v1/relay', 'a', req, ok, lookup)).status).toBe(200);
+  expect((await handle(c, 'POST', '/v1/relay', 'a', req, ok, lookup)).status).toBe(429);
+});
+
+it('refuses startup with fees and no treasury or Base sponsorship and no EVM treasury', () => {
+  const e = {
+    CONTRACT_ID: 'contract.test',
+    RELAYER_ACCOUNT: 'relayer.test',
+    RELAYER_KEY: 'test-double',
+  };
+  expect(() => fromEnv(e)).toThrow('treasury');
+  expect(() => fromEnv({ ...e, TREASURY_NEAR: 'treasury.test' })).toThrow('TREASURY_EVM');
+  expect(() => fromEnv({ ...e, FEE_FIXED: '0', FEE_BPS: '0' })).toThrow('TREASURY_EVM');
+  expect(() =>
+    fromEnv({ ...e, FEE_FIXED: '0', FEE_BPS: '0', BASE_SPONSORSHIP: '0' }),
+  ).not.toThrow();
+});
+
+it('accepts EVM-only treasury configuration and validates the Base sponsorship switch', () => {
+  const e = {
+    CONTRACT_ID: 'contract.test',
+    RELAYER_ACCOUNT: 'relay.test',
+    RELAYER_KEY: 'test-double',
+    TREASURY_EVM: `0x${'55'.repeat(20)}`,
+  };
+  expect(fromEnv(e).config.policy.fee).toMatchObject({
+    treasuryNear: null,
+    treasuryEvm: { kind: 'evm', id: e.TREASURY_EVM },
+  });
+  expect(() => fromEnv({ ...e, BASE_SPONSORSHIP: 'typo' })).toThrow('BASE_SPONSORSHIP');
+  expect(() =>
+    fromEnv({ ...e, TREASURY_EVM: '', TREASURY_NEAR: 'treasury.test', BASE_SPONSORSHIP: '0' }),
+  ).not.toThrow();
+});

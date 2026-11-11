@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { terms as initial, must, purchase } from '../../test/fixtures.js';
 import { txOutcome } from '../near/rpc.js';
 import { registerText, reopenSellerText, stopSalesText } from '../near/texts.js';
+import { createSplit } from '../pay/split.js';
 import { termsHash } from '../settle-near/terms.js';
 import {
   canonicalRequest,
@@ -16,13 +17,28 @@ import {
 } from './relay.js';
 
 const wallet = privateKeyToAccount(`0x${'44'.repeat(32)}`);
-const terms = { ...initial, seller: { kind: 'evm', id: wallet.address.toLowerCase() } as const };
+const provenance = { kind: 'push' as 'push' | 'pull', salt: `0x${'01'.repeat(32)}` };
+const split = createSplit(
+  provenance.kind,
+  {
+    recipients: initial.near.recipients.map((r) => r.identity.id),
+    allocations: initial.near.recipients.map((r) => BigInt(r.bps)),
+    totalAllocation: 10000n,
+    distributionIncentive: 0,
+  },
+  provenance.salt,
+);
+const terms = {
+  ...initial,
+  base: { ...must(initial.base), pay_to: split.address },
+  seller: { kind: 'evm', id: wallet.address.toLowerCase() } as const,
+};
 const opts = {
   nearRpc: 'https://near.rpc',
   baseRpc: 'https://base.rpc',
   contractId: terms.contract,
   usdc: purchase.asset,
-  policy: { minPrice: 10000n, maxDeadlineSeconds: 600 },
+  policy: { minPrice: 10000n, maxDeadlineSeconds: 600, fileBudget: 0n },
   now: 1800000000,
 };
 const sender = { accountId: 'relayer.near', key: 'ed25519:test-double' };
@@ -30,6 +46,7 @@ const sign = async () => {
   const args = { terms, seller_key: purchase.buyer_key, deadline: 1800000600 };
   return {
     method: 'register' as const,
+    baseSplit: provenance,
     args,
     auth: {
       kind: 'evm' as const,
@@ -838,3 +855,192 @@ it('coalesces simultaneous stale claim lookups into one RPC request', async () =
     clock.mockRestore();
   }
 });
+
+it('sponsors an unlisted seller and funds the file in the same transaction from prepaid storage', async () => {
+  rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
+  const r = await sign();
+  await relay(r, {
+    ...opts,
+    sender,
+    policy: { ...opts.policy, sellerAllowed: () => false, fileBudget: 50000000000000000000000n },
+  });
+  const actions = must(created.mock.calls[0])[0].actions;
+  expect(actions).toHaveLength(1);
+  expect(actions[0].functionCall.methodName).toBe('register');
+  expect(JSON.parse(new TextDecoder().decode(actions[0].functionCall.args))).toMatchObject({
+    args: { file_budget: '50000000000000000000000' },
+  });
+});
+
+it('refuses treasury omission on sponsored registration before signing', async () => {
+  rpc(() => null);
+  const r = await sign();
+  await expect(
+    relay(r, {
+      ...opts,
+      sender,
+      policy: {
+        ...opts.policy,
+        fee: {
+          fixed: '30000',
+          bps: 100,
+          treasuryNear: { kind: 'near', id: 'treasury.test' },
+          treasuryEvm: null,
+        },
+      },
+    }),
+  ).rejects.toMatchObject({ code: 'not_sponsored' });
+  expect(created).not.toHaveBeenCalled();
+});
+
+it('bounds topups to files this relayer sponsored and keeps the per-file cap under concurrency', async () => {
+  rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
+  const o = {
+    ...opts,
+    sender,
+    policy: {
+      ...opts.policy,
+      fileBudget: 50000000000000000000000n,
+      topupPerFile: 100000000000000000000000n,
+      topupPerFileDay: 100000000000000000000000n,
+    },
+  };
+  await relay(await sign(), o);
+  rpc((method) =>
+    method === 'storage_balance_of'
+      ? '1000000000000000000000000'
+      : method === 'get_file'
+        ? {
+            terms,
+            terms_hash: termsHash(terms),
+            header_hash: null,
+            sales_stopped_at: null,
+            taken_down: null,
+          }
+        : null,
+  );
+  const topup = {
+    method: 'fund_file_storage',
+    args: { file_id: terms.file_id, amount: '30000000000000000000000' },
+  };
+  expect((await relay(topup, o)).txHash).toBeTruthy();
+  // A different amount bypasses operation deduplication, but cannot bypass the allocation cap.
+  await expect(
+    relay({ ...topup, args: { ...topup.args, amount: '30000000000000000000001' } }, o),
+  ).rejects.toMatchObject({ code: 'limited' });
+  await expect(
+    relay({ ...topup, args: { ...topup.args, file_id: `0x${'77'.repeat(32)}` } }, o),
+  ).rejects.toBeDefined();
+});
+
+it('enforces topup per-file and global daily amount caps independently', async () => {
+  rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
+  const o = {
+    ...opts,
+    sender,
+    policy: { ...opts.policy, topupPerFile: 100n, topupPerFileDay: 2n, topupPerDay: 3n },
+  };
+  await relay(await sign(), o);
+  const r = await sign();
+  r.args.terms = { ...r.args.terms, file_id: `0x${'77'.repeat(32)}` };
+  r.auth.sig = await wallet.signMessage({ message: registerText(terms.contract, r.args) });
+  await relay(r, o);
+  rpc((method, args) => {
+    if (method === 'storage_balance_of') return '1000000000000000000000000';
+    if (method !== 'get_file') return null;
+    const t = { ...terms, file_id: args.file_id as string };
+    return {
+      terms: t,
+      terms_hash: termsHash(t),
+      header_hash: null,
+      sales_stopped_at: null,
+      taken_down: null,
+    };
+  });
+  const topup = (file_id: string, amount: string) =>
+    relay({ method: 'fund_file_storage', args: { file_id, amount } }, o);
+  await topup(terms.file_id, '2');
+  await expect(topup(terms.file_id, '1')).rejects.toMatchObject({ code: 'limited' });
+  await expect(topup(r.args.terms.file_id, '2')).rejects.toMatchObject({ code: 'limited' });
+  await expect(topup(r.args.terms.file_id, '1')).resolves.toMatchObject({
+    txHash: expect.any(String),
+  });
+  await expect(topup(`0x${'66'.repeat(32)}`, '1')).rejects.toMatchObject({ code: 'not_sponsored' });
+});
+
+it('refuses a sponsored Base registration paying an arbitrary address even with the treasury share', async () => {
+  rpc(() => null);
+  const r = await sign();
+  r.args.terms = {
+    ...r.args.terms,
+    base: { ...must(r.args.terms.base), pay_to: must(initial.near.recipients[0]).identity.id },
+  };
+  r.auth.sig = await wallet.signMessage({ message: registerText(terms.contract, r.args) });
+  await expect(
+    checkRelay(r, {
+      ...opts,
+      policy: {
+        ...opts.policy,
+        fee: {
+          fixed: '30000',
+          bps: 100,
+          treasuryNear: must(initial.near.recipients[0]).identity,
+          treasuryEvm: must(initial.near.recipients[0]).identity,
+        },
+      },
+    }),
+  ).rejects.toMatchObject({ code: 'not_sponsored' });
+});
+
+it('allows a repeat same-amount topup after the hold expires', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(1800000000000);
+  try {
+    const r = await sign();
+    r.auth.sig = await wallet.signMessage({ message: registerText(terms.contract, r.args) });
+    rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
+    const o = { ...opts, sender, policy: { ...opts.policy, holdMs: 1000 } };
+    await relay(r, o);
+    rpc((method) =>
+      method === 'storage_balance_of'
+        ? '1000000000000000000000000'
+        : {
+            terms: r.args.terms,
+            terms_hash: termsHash(r.args.terms),
+            header_hash: null,
+            sales_stopped_at: null,
+            taken_down: null,
+          },
+    );
+    const topup = { method: 'fund_file_storage', args: { file_id: terms.file_id, amount: '1' } };
+    await relay(topup, o);
+    clock.mockReturnValue(1800000001001);
+    await relay(topup, o);
+    expect(created).toHaveBeenCalledTimes(3);
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+it.each(['push', 'pull'] as const)(
+  'verifies the immutable %s split and rejects a different salt',
+  async (kind) => {
+    rpc(() => null);
+    const r = await sign();
+    r.baseSplit = { ...provenance, kind };
+    const split = createSplit(
+      kind,
+      {
+        recipients: terms.near.recipients.map((r) => r.identity.id),
+        allocations: terms.near.recipients.map((r) => BigInt(r.bps)),
+        totalAllocation: 10000n,
+        distributionIncentive: 0,
+      },
+      provenance.salt,
+    );
+    r.args.terms = { ...terms, base: { ...must(terms.base), pay_to: split.address } };
+    r.auth.sig = await wallet.signMessage({ message: registerText(terms.contract, r.args) });
+    await expect(checkRelay(r, opts)).resolves.toBeUndefined();
+    r.baseSplit.salt = `0x${'02'.repeat(32)}`;
+    await expect(checkRelay(r, opts)).rejects.toMatchObject({ code: 'not_sponsored' });
+  },
+);

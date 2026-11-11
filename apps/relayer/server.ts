@@ -44,6 +44,7 @@ export interface Config extends Omit<CheckOptions, 'now'> {
     dailyBudget: bigint;
     gasPrice: bigint;
     reserveLowWater: bigint;
+    minPayout?: bigint;
     balanceLowWater?: bigint;
     alertWebhook?: string;
     refunds?: RefundSource;
@@ -51,6 +52,7 @@ export interface Config extends Omit<CheckOptions, 'now'> {
   /** Kill switch: answer 503 and send nothing. */
   disabled: boolean;
   /** New admissions per client per hour, and default daily capacity of each method pool. */
+  sponsoredFilesPerIpDay?: number;
   perIpHour: number;
   perDay: number;
   unlockReserved?: number;
@@ -171,7 +173,28 @@ async function admission(
         network: 'near:mainnet',
         contract: c.contractId,
         relayer: c.sender.accountId,
-        methods: ['register', 'unlock', 'claim_key', 'reopen', 'reopen_seller', 'stop_sales'],
+        methods: [
+          'register',
+          'unlock',
+          'claim_key',
+          'reopen',
+          'reopen_seller',
+          'stop_sales',
+          'fund_file_storage',
+        ],
+        baseSponsorship: c.policy.baseSponsorship !== false,
+        fee: c.policy.fee ?? { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
+        sponsorship: {
+          filesPerDay: c.policy.sponsoredFilesPerDay ?? 100,
+          filesPerIpDay: c.sponsoredFilesPerIpDay ?? 5,
+          fileBudget: String(c.policy.fileBudget ?? 5n * 10n ** 22n),
+          listedFileBudget: String(
+            c.policy.listedFileBudget ?? c.policy.fileBudget ?? 5n * 10n ** 22n,
+          ),
+          topupPerFile: String(c.policy.topupPerFile ?? 15n * 10n ** 22n),
+          topupPerFileDay: String(c.policy.topupPerFileDay ?? 5n * 10n ** 22n),
+          topupPerDay: String(c.policy.topupPerDay ?? 5n * 10n ** 23n),
+        },
         minPrice: c.policy.minPrice.toString(),
         maxDeadlineSeconds: c.policy.maxDeadlineSeconds,
         disabled: c.disabled,
@@ -232,16 +255,39 @@ async function admission(
   const relayMethod = (req as { method?: unknown } | null)?.method;
   const pool =
     typeof relayMethod === 'string' &&
-    ['register', 'unlock', 'claim_key', 'reopen', 'reopen_seller', 'stop_sales'].includes(
-      relayMethod,
-    )
+    [
+      'register',
+      'unlock',
+      'claim_key',
+      'reopen',
+      'reopen_seller',
+      'stop_sales',
+      'fund_file_storage',
+    ].includes(relayMethod)
       ? relayMethod
       : 'invalid';
   const charges: [string, { n: number; until: number }][] = [];
   const refund = () => {
-    for (const [key, counter] of charges)
-      if (hits.get(key) === counter && counter.n > 0) counter.n--;
+    for (const [key, counter] of charges) {
+      if (hits.get(key) === counter && counter.n > 0) {
+        counter.n--;
+        if (counter.n === 0 && key.startsWith('day:files-ip:')) hits.delete(key);
+      }
+    }
   };
+  if (pool === 'register') {
+    for (const [key, limit] of [
+      ['day:files', c.policy.sponsoredFilesPerDay ?? 100],
+      [`day:files-ip:${ip}`, c.sponsoredFilesPerIpDay ?? 5],
+    ] as const) {
+      const counter = allow(key, limit, 86_400_000, now, c.hitsCap);
+      if (!counter) {
+        refund();
+        return { status: 429, body: { error: 'limited', message: 'sponsored file limit reached' } };
+      }
+      charges.push([key, counter]);
+    }
+  }
   const global = allow('day', c.perDay, 86_400_000, now, c.hitsCap);
   if (global) charges.push(['day', global]);
   const windowMs = global ? global.until - now : 86_400_000;
@@ -372,6 +418,7 @@ export function keeper(c: Config, seconds: number) {
           dailyBudget: k.dailyBudget,
           gasPrice: k.gasPrice,
           reserveLowWater: k.reserveLowWater,
+          ...(k.minPayout === undefined ? {} : { minPayout: k.minPayout }),
           ...(k.balanceLowWater === undefined ? {} : { balanceLowWater: k.balanceLowWater }),
           ...(k.refunds ? { refunds: k.refunds } : {}),
           alert: (alert) => {
@@ -609,6 +656,40 @@ export function fromEnv(e: Record<string, string | undefined>): {
     if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error(`${name} must be yoctoNEAR`);
     return BigInt(value);
   };
+  const nearAmount = (name: string, fallback: string) => {
+    const value = env(name, fallback);
+    if (!/^(0|[1-9][0-9]*)(\.[0-9]{1,24})?$/.test(value)) throw new Error(`${name} must be NEAR`);
+    const [whole = '0', fraction = ''] = value.split('.');
+    const amount = BigInt(whole) * 10n ** 24n + BigInt(fraction.padEnd(24, '0'));
+    if (amount >= 2n ** 128n) throw new Error(`${name} too large`);
+    return amount;
+  };
+  const treasury = (name: string) => {
+    const value = e[name]?.trim();
+    if (!value) return null;
+    const at = value.indexOf(':');
+    const identity = parseIdentity(
+      at < 0
+        ? { kind: name === 'TREASURY_EVM' ? 'evm' : 'near', id: value }
+        : { kind: value.slice(0, at), id: value.slice(at + 1) },
+    );
+    if (name === 'TREASURY_EVM' && identity.kind !== 'evm')
+      throw new Error('TREASURY_EVM must be EVM');
+    return identity;
+  };
+  if (count('FEE_BPS', '100') >= 10000) throw new Error('FEE_BPS must be below 10000');
+  const treasuryNear = treasury('TREASURY_NEAR');
+  const treasuryEvm = treasury('TREASURY_EVM');
+  const baseSetting = env('BASE_SPONSORSHIP', '1');
+  if (!['0', '1'].includes(baseSetting)) throw new Error('BASE_SPONSORSHIP must be 0 or 1');
+  const baseSponsorship = baseSetting === '1';
+  if (
+    (yocto('FEE_FIXED', '30000') > 0n || count('FEE_BPS', '100') > 0) &&
+    !treasuryNear &&
+    !treasuryEvm
+  )
+    throw new Error('fees require a treasury');
+  if (baseSponsorship && !treasuryEvm) throw new Error('Base sponsorship requires TREASURY_EVM');
   const keeperConfig =
     keeperSeconds > 0
       ? {
@@ -617,6 +698,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
           hourlyBudget: yocto('KEEPER_HOURLY_BUDGET'),
           dailyBudget: yocto('KEEPER_DAILY_BUDGET'),
           gasPrice: yocto('KEEPER_GAS_PRICE', '100000000'),
+          minPayout: yocto('KEEPER_MIN_PAYOUT', '10000'),
           reserveLowWater: yocto('KEEPER_RESERVE_LOW_WATER', '40960000000000000000000'),
           balanceLowWater: yocto('KEEPER_BALANCE_LOW_WATER', '0'),
           ...(e.KEEPER_ALERT_WEBHOOK?.trim()
@@ -631,8 +713,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
   )
     throw new Error('keeper requires a separate account and key');
   const contractId = env('CONTRACT_ID');
-  if (!sellers?.length && e.DEV_ALLOW_ANY_SELLER !== '1')
-    throw new Error('SELLERS is required; DEV_ALLOW_ANY_SELLER=1 is for development only');
+
   const perDay = count('PER_DAY', '500');
   const unlockReserved = count('UNLOCK_RESERVED', String(Math.ceil(perDay / 2)));
   if (unlockReserved > perDay) throw new Error('UNLOCK_RESERVED cannot exceed PER_DAY');
@@ -644,7 +725,20 @@ export function fromEnv(e: Record<string, string | undefined>): {
       usdc: env('USDC', '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913'),
       sender: { accountId: env('RELAYER_ACCOUNT'), key: env('RELAYER_KEY') },
       policy: {
-        minPrice: BigInt(count('MIN_PRICE', '10000')),
+        minPrice: BigInt(count('MIN_PRICE', '100000')),
+        baseSponsorship,
+        fileBudget: nearAmount('FILE_BUDGET', '0.05'),
+        listedFileBudget: nearAmount('LISTED_FILE_BUDGET', env('FILE_BUDGET', '0.05')),
+        sponsoredFilesPerDay: count('SPONSORED_FILES_PER_DAY', '100'),
+        topupPerFile: nearAmount('TOPUP_PER_FILE', '0.15'),
+        topupPerFileDay: nearAmount('TOPUP_PER_FILE_DAY', '0.05'),
+        topupPerDay: nearAmount('TOPUP_PER_DAY', '0.5'),
+        fee: {
+          fixed: yocto('FEE_FIXED', '30000').toString(),
+          bps: count('FEE_BPS', '100'),
+          treasuryNear,
+          treasuryEvm,
+        },
         maxDeadlineSeconds: count('MAX_DEADLINE_SECONDS', '600'),
         claimsPerPurchase: count('CLAIMS_PER_PURCHASE_DAY', '3'),
         registrationsPerSeller: count('REGISTRATIONS_PER_SELLER_DAY', '20'),
@@ -656,14 +750,20 @@ export function fromEnv(e: Record<string, string | undefined>): {
       },
       ...(keeperConfig ? { keeper: keeperConfig } : {}),
       disabled: env('DISABLED', '0') === '1',
+      sponsoredFilesPerIpDay: count('SPONSORED_FILES_PER_IP_DAY', '5'),
       perIpHour: count('PER_IP_HOUR', '60'),
       perDay,
       unlockReserved,
       perMethodDay: Object.fromEntries(
-        ['register', 'unlock', 'claim_key', 'reopen', 'reopen_seller', 'stop_sales'].map((m) => [
-          m,
-          count(`PER_DAY_${m.toUpperCase()}`, env('PER_DAY', '500')),
-        ]),
+        [
+          'register',
+          'unlock',
+          'claim_key',
+          'reopen',
+          'reopen_seller',
+          'stop_sales',
+          'fund_file_storage',
+        ].map((m) => [m, count(`PER_DAY_${m.toUpperCase()}`, env('PER_DAY', '500'))]),
       ),
       hitsCap: Math.max(1, count('HITS_CAP', '100000')),
       requestMultiplier: count('REQUEST_MULTIPLIER', '10'),

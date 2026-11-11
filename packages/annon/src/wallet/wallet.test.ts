@@ -131,3 +131,34 @@ it('offers an explicit prepaid storage helper with a positive human-selected amo
   });
   await expect(storageDeposit({ call }, 'annon.near', 0n)).rejects.toThrow();
 });
+
+it.each(['returned', 'thrown'] as const)('recognizes a %s final funding refusal', async (mode) => {
+  const { fundFileStorage } = await import('./wallet.js');
+  const args = { file_id: `0x${'12'.repeat(32)}`, amount: '5' };
+  const result = {
+    transaction: {
+      hash: 'H',
+      signer_id: 'sponsor.test',
+      receiver_id: 'contract.test',
+      actions: [
+        {
+          FunctionCall: {
+            method_name: 'fund_file_storage',
+            args: Buffer.from(JSON.stringify(args)).toString('base64'),
+          },
+        },
+      ],
+    },
+    status: {
+      Failure: { ActionError: { kind: { FunctionCallError: { ExecutionError: 'stopped' } } } },
+    },
+    receipts_outcome: [],
+  };
+  const call = async () => {
+    if (mode === 'thrown') throw Object.assign(new Error('final'), { transactionResult: result });
+    return result;
+  };
+  await expect(fundFileStorage({ call }, 'contract.test', args.file_id, 5n)).rejects.toMatchObject({
+    code: 'funding_refused',
+  });
+});

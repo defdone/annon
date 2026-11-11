@@ -359,6 +359,17 @@ impl World {
             .await?)
     }
 
+    async fn fund_file(&self, file: &str) -> anyhow::Result<()> {
+        self.relayer
+            .call(self.annon.id(), "fund_file_storage")
+            .args_json(json!({ "file_id": file, "amount": null }))
+            .deposit(NearToken::from_near(1))
+            .transact()
+            .await?
+            .into_result()?;
+        Ok(())
+    }
+
     async fn fund_reserve(&self) -> anyhow::Result<()> {
         self.relayer
             .call(self.annon.id(), "fund_receiver_reserve")
@@ -783,6 +794,7 @@ async fn a_function_call_key_registers_and_unlocks_from_a_prepaid_balance_but_ca
                     "reopen_seller",
                     "stop_sales",
                     "claim_key",
+                    "fund_file_storage",
                     "fund_delivery",
                     "pay_slot",
                 ],
@@ -944,6 +956,7 @@ async fn a_near_purchase_is_split_through_intents_and_releases_the_key() -> anyh
     let file = w.file(10);
     w.register(&file).await?.into_result()?;
     w.fund_reserve().await?;
+    w.fund_file(&file).await?;
     let p = w.purchase(&file, 0).await?;
     let start = w.ft_balance(w.payer.id().as_str()).await?;
 
@@ -1018,6 +1031,7 @@ async fn refunds_are_automatic_and_foreign_messages_bounce() -> anyhow::Result<(
     let file = w.file(11);
     w.register(&file).await?.into_result()?;
     w.fund_reserve().await?;
+    w.fund_file(&file).await?;
     let p = w.purchase(&file, 0).await?;
     let start = w.ft_balance(w.payer.id().as_str()).await?;
 
@@ -1105,5 +1119,84 @@ async fn without_a_reserve_a_refund_waits_in_the_tree_until_someone_materializes
         w.delivery(0).await?["slots"][0]["amount"],
         PRICE.to_string()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn function_call_key_registers_and_funds_atomically_and_tops_up() -> anyhow::Result<()> {
+    let w = world().await?;
+    w.relayer
+        .call(w.annon.id(), "storage_deposit")
+        .args_json(json!({}))
+        .deposit(NearToken::from_near(1))
+        .transact()
+        .await?
+        .into_result()?;
+    let hot = SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
+    w.relayer
+        .batch(w.relayer.id())
+        .add_key(
+            hot.public_key(),
+            AccessKey::function_call_access(w.annon.id(), &["register", "fund_file_storage"], None),
+        )
+        .transact()
+        .await?
+        .into_result()?;
+    let agent = Account::from_secret_key(w.relayer.id().clone(), hot, &w.worker);
+    let before = w.balance(&w.relayer).await?;
+    let file = w.file(70);
+    let mut args = w.register_args(&file, w.seller.id());
+    args["file_budget"] = json!("50000000000000000000000");
+    let text = w.text("register_text", &args).await?;
+    let out = agent
+        .call(w.annon.id(), "register")
+        .args_json(json!({"args": args, "auth": w.seller.auth(&text)}))
+        .gas(Gas::from_tgas(300))
+        .transact()
+        .await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    assert_eq!(events(&out, "file_storage_funded").len(), 1);
+    assert_eq!(events(&out, "key_released").len(), 1);
+    let value: Value = out.clone().into_result()?.json()?;
+    assert_eq!(value["big_y"], "bls12381g1:mockY");
+    assert!(before - w.balance(&w.relayer).await? > 50_000_000_000_000_000_000_000);
+    let out = agent
+        .call(w.annon.id(), "fund_file_storage")
+        .args_json(json!({"file_id":file,"amount":"1"}))
+        .gas(Gas::from_tgas(30))
+        .transact()
+        .await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    assert_eq!(events(&out, "file_storage_funded")[0]["amount"], "1");
+    let reserve: String = w.annon.view("receiver_reserve").await?.json()?;
+    assert_eq!(reserve, "0");
+    let p = w.purchase(&file, 0).await?;
+    let out = w.pay_near(PRICE, &p.message()).await?;
+    assert!(out.is_success());
+    assert!(w.bought(&p).await?);
+    assert_eq!(events(&out, "purchase_accepted").len(), 1);
+    let reserve: String = w.annon.view("receiver_reserve").await?.json()?;
+    assert_eq!(reserve, "0");
+    // An unfundable sponsorship rolls back the registration too.
+    let file = w.file(71);
+    let mut args = w.register_args(&file, w.seller.id());
+    args["file_budget"] = json!("2000000000000000000000000");
+    let text = w.text("register_text", &args).await?;
+    let before_failure = w.balance(&w.relayer).await?;
+    let out = agent
+        .call(w.annon.id(), "register")
+        .args_json(json!({"args":args,"auth":w.seller.auth(&text)}))
+        .gas(Gas::from_tgas(300))
+        .transact()
+        .await?;
+    assert!(out.is_failure());
+    let missing: Value = w
+        .annon
+        .view("get_file")
+        .args_json(json!({"file_id":file}))
+        .await?
+        .json()?;
+    assert!(missing.is_null());
+    assert_eq!(w.balance(&w.relayer).await?, before_failure);
     Ok(())
 }

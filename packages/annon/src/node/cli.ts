@@ -2,6 +2,8 @@ import { parseArgs } from 'node:util';
 import { publicError, usage } from './errors.js';
 
 export type Command =
+  | 'fund'
+  | 'budget'
   | 'sell'
   | 'buy'
   | 'open'
@@ -13,6 +15,8 @@ export type Command =
   | 'init';
 export interface Input {
   command: Command;
+  storageBudget?: string;
+  fundAmount?: string;
   agent?: boolean;
   noOpen?: boolean;
   signer?: string;
@@ -76,6 +80,8 @@ const common = [
   'backup-secret-file',
 ];
 const perCommand: Record<Command, string[]> = {
+  fund: [],
+  budget: [],
   login: [],
   init: [
     'signer',
@@ -88,7 +94,7 @@ const perCommand: Record<Command, string[]> = {
     'new-key',
     'daily-budget',
   ],
-  sell: ['resume', 'price', 'split', 'base', 'moderator', 'output'],
+  sell: ['resume', 'price', 'split', 'base', 'moderator', 'output', 'storage-budget'],
   buy: [
     'origin',
     'route',
@@ -119,7 +125,12 @@ export function parseCli(argv: string[]): Input {
       ),
     });
     const [command, target, ...extra] = parsed.positionals;
-    if (!command || !(command in perCommand) || extra.length) throw usage();
+    if (
+      !command ||
+      !(command in perCommand) ||
+      (command === 'fund' ? extra.length !== 1 : extra.length !== 0)
+    )
+      throw usage();
     const cmd = command as Command;
     if (
       (['recover', 'login', 'init'].includes(cmd) && target !== undefined) ||
@@ -141,7 +152,8 @@ export function parseCli(argv: string[]): Input {
           values.price ||
           values.split ||
           values.base ||
-          values.moderator
+          values.moderator ||
+          values.storageBudget
         )
           throw usage();
       } else if (!values.price || !values.split) throw usage();
@@ -150,7 +162,12 @@ export function parseCli(argv: string[]): Input {
     if (cmd === 'recover' && !values.recovery) throw usage();
     if (values.route && !['near', 'base', '1click'].includes(String(values.route))) throw usage();
     if (values.wallet && !['evm', 'solana', 'near'].includes(String(values.wallet))) throw usage();
-    return { command: cmd, ...(target === undefined ? {} : { target }), ...values } as Input;
+    return {
+      command: cmd,
+      ...(target === undefined ? {} : { target }),
+      ...(cmd === 'fund' ? { fundAmount: extra[0] } : {}),
+      ...values,
+    } as Input;
   } catch {
     throw usage();
   }
@@ -159,7 +176,9 @@ export const HELP = `annon <command> [options]
 login [--wallet evm|near] [--no-open]
 init --agent --daily-budget <USDC> [--key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> --credential-env <name>]
 sell <file> --resume <file-id> [--output <PAY2>]
-sell <file> --price <USDC> --split <kind:id:bps,...> [--base] [--moderator <account>] [--output <PAY2>]
+fund <file-id> <NEAR>
+budget <file-id>
+sell <file> [--storage-budget <NEAR>] --price <USDC> --split <kind:id:bps,...> [--base] [--moderator <account>] [--output <PAY2>]
 buy <url|offer.json> [--route near|base|1click] [--origin <configured name>] [--from-chain <chain>] [--from-asset <1Click asset>] [--refund-to <address>] [--recovery <kind:id>] [--max-price <USDC> or configured cap] [--url <expected resource for offer.json>] [--moderator <trusted account>]
 open <purchase-id|backup|PAY2> [--purchase <id|backup>] [--file <PAY2> | --url <url>] --output <file>
 recover --recovery <kind:id> [--purchase <id>]

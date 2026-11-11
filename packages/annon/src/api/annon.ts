@@ -19,6 +19,7 @@ import { SourceChangedError } from '../envelope/stream.js';
 import { fileAppId, keyFromSecret, oneTimeKey, openAnswer } from '../keys/near-ckd.js';
 import {
   type FileInfo,
+  fileStorageBalance,
   getConfig,
   getFile,
   getGrant,
@@ -56,6 +57,12 @@ import { nextStep } from '../pay/recover.js';
 import { createSplit, type SplitCall } from '../pay/split.js';
 import type { Store, Versioned } from '../pay/store.js';
 import type { PaymentRequired } from '../pay/x402.js';
+import {
+  applySponsoredFee,
+  checkProtocolFee,
+  type ProtocolFee,
+  protocolFeeAboveMax,
+} from '../relay/fees.js';
 import { account, bytes, compare, hex, network } from '../settle-near/codec.js';
 import {
   type Authorization,
@@ -76,6 +83,7 @@ import {
 import { type Terms, termsHash } from '../settle-near/terms.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
 import type { EvmWallet, IdentityWallet, NearWallet } from '../wallet/wallet.js';
+import { FileFundingRefused, fundFileStorage } from '../wallet/wallet.js';
 
 export interface AnnonOptions {
   nearRpc: string;
@@ -90,8 +98,20 @@ export interface AnnonOptions {
   send?: (method: string, args: object, wallet?: NearWallet) => Promise<unknown>;
   mpcKey?: string;
   now?: () => number;
+  /** A relayer capability reader; only sponsored registrations apply its fee. */
+  sponsorship?: () => Promise<{ fee: ProtocolFee }>;
+  /** Maximum advertised fee, in USDC base units plus basis points. */
+  maxProtocolFee?: Pick<ProtocolFee, 'fixed' | 'bps'>;
 }
 export interface SellOptions<T extends SellData = Uint8Array> {
+  /** Attached yoctoNEAR for a self-funded listing. */
+  storageBudget?: bigint;
+  /** Called before registration or Base split transactions. */
+  onSplit?: (
+    near: Terms['near'],
+    fee?: ProtocolFee,
+    aboveMaximum?: boolean,
+  ) => void | Promise<void>;
   data: T;
   name: string;
   mime: string;
@@ -163,7 +183,11 @@ export class SellError extends Error {
         : 'Sell incomplete; resume with fileId.',
       options,
     );
-    if (options?.cause instanceof PayError || options?.cause instanceof SourceChangedError)
+    if (
+      options?.cause instanceof PayError ||
+      options?.cause instanceof FileFundingRefused ||
+      options?.cause instanceof SourceChangedError
+    )
       this.code = options.cause.code;
   }
 }
@@ -239,7 +263,10 @@ export class Annon {
         txHash: transaction.hash,
         signer: transaction.signer_id,
         method,
-        args,
+        args:
+          method === 'register'
+            ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'baseSplit'))
+            : args,
       });
       if (outcome.state === 'released') return outcome.answer;
       if (outcome.state === 'done') return outcome.value;
@@ -285,6 +312,10 @@ export class Annon {
     return f;
   }
   async sell<T extends SellData>(o: SellOptions<T>) {
+    if (o.storageBudget !== undefined && (o.storageBudget <= 0n || o.storageBudget >= 2n ** 128n))
+      throw new TypeError('invalid storage budget');
+    if (o.storageBudget !== undefined && o.seller.identity.kind !== 'near')
+      throw new TypeError('storage budget requires a NEAR wallet');
     const config = await getConfig(this.o.nearRpc, this.o.contractId);
     if (config.network !== this.o.network) throw new PayError('network_mismatch');
     const assets = { nearUsdc: config.nearUsdc, baseUsdc: config.usdc };
@@ -298,11 +329,41 @@ export class Annon {
       authKind: identityKind(seller) as 0 | 1 | 2,
       ...(o.previewLen === undefined ? {} : { previewLen: o.previewLen }),
     });
-    const recipients = o.near.recipients
+    let near = {
+      token: config.nearUsdc,
+      ...o.near,
+      remainder: o.near.recipients.findIndex(
+        (r) => identityJson(r.identity) === identityJson(o.near.remainder),
+      ),
+    };
+    let fee: ProtocolFee | undefined;
+    if (this.o.sponsorship && seller.kind !== 'near') {
+      const advertised = (await this.o.sponsorship()).fee;
+      fee = advertised;
+      if (
+        !o.onSplit &&
+        [near.price, ...(o.base ? [o.base.price] : [])].some((price) =>
+          protocolFeeAboveMax(price, advertised, this.o.maxProtocolFee),
+        )
+      )
+        throw new PayError('protocol_fee_above_max');
+      near = applySponsoredFee(near, fee, o.base?.price);
+      // The shared treasury share must meet both route requirements.
+      checkProtocolFee({ near, base: o.base ? { price: o.base.price } : null } as Terms, fee);
+    }
+    const aboveMaximum =
+      fee !== undefined &&
+      [near.price, ...(o.base ? [o.base.price] : [])].some((price) =>
+        protocolFeeAboveMax(price, fee, this.o.maxProtocolFee),
+      );
+    if (aboveMaximum && !o.onSplit) throw new PayError('protocol_fee_above_max');
+    await o.onSplit?.(near, fee, aboveMaximum);
+    const remainderIdentity = near.recipients[near.remainder]?.identity;
+    const recipients = near.recipients
       .map((r) => ({ ...r, identity: parseIdentity(r.identity) }))
       .sort((a, b) => compare(encodeIdentity(a.identity), encodeIdentity(b.identity)));
     const remainder = recipients.findIndex(
-      (r) => identityJson(r.identity) === identityJson(o.near.remainder),
+      (r) => identityJson(r.identity) === identityJson(remainderIdentity as Identity),
     );
     const terms: Terms = {
       network: this.o.network,
@@ -340,6 +401,7 @@ export class Annon {
     const key = oneTimeKey();
     const job: SellRecord = {
       kind: 'sell',
+      ...(o.storageBudget !== undefined ? { storageBudget: o.storageBudget.toString() } : {}),
       id: `sell:${fileId}`,
       revision: 0,
       terms,
@@ -459,7 +521,17 @@ export class Annon {
           registerText(this.o.contractId, args, assetsFor(job.terms)),
         );
         ckd = await this.answer(
-          await this.call('register', { args, ...(auth ? { auth } : {}) }, seller),
+          await this.call(
+            'register',
+            {
+              args,
+              ...(auth ? { auth } : {}),
+              ...(auth && job.baseSplit
+                ? { baseSplit: { kind: job.baseSplit.kind, salt: job.baseSplit.salt } }
+                : {}),
+            },
+            seller,
+          ),
           key.secret,
           fileId,
         );
@@ -495,6 +567,54 @@ export class Annon {
           { file_id: fileId, header_hash: hex(await sha256(header.subarray(0, headerLen - 65))) },
           seller,
         );
+      if (job.storageBudget) {
+        const name = `annon/sell/${fileId}`;
+        let current = await this.sells.load(name);
+        if (!current) throw new Error('sell job missing');
+        const target = BigInt(job.storageBudget);
+        if (current.storageFunding === 'pending') {
+          // The call may have landed and its allocation may already have been spent.
+          // A low current balance cannot justify automatically allocating the amount again.
+          const budget = await fileStorageBalance(this.o.nearRpc, this.o.contractId, fileId);
+          if (budget.available < target)
+            throw new PayError(
+              'storage_required',
+              'Previous file funding is uncertain; inspect it and explicitly fund before resuming.',
+            );
+        } else if (current.storageFunding !== 'funded') {
+          const pending = {
+            ...current,
+            revision: current.revision + 1,
+            storageFunding: 'pending' as const,
+          };
+          if (!(await this.sells.compareAndSet(name, current, pending)))
+            throw new PayError('store_conflict');
+          current = pending;
+          try {
+            await fundFileStorage(asNear(seller), this.o.contractId, fileId, target);
+          } catch (error) {
+            if (
+              error instanceof FileFundingRefused &&
+              !(await this.sells.compareAndSet(name, current, {
+                ...current,
+                revision: current.revision + 1,
+                storageFunding: 'refused' as const,
+              }))
+            )
+              throw new PayError('store_conflict');
+            throw error;
+          }
+        }
+        if (
+          current.storageFunding !== 'funded' &&
+          !(await this.sells.compareAndSet(name, current, {
+            ...current,
+            revision: current.revision + 1,
+            storageFunding: 'funded',
+          }))
+        )
+          throw new PayError('store_conflict');
+      }
       await publish({ file, header, terms: job.terms });
       if (!consumed()) throw new Error('publish did not consume the complete file stream');
     } catch (error) {
@@ -554,6 +674,10 @@ export class Annon {
     }
     const price = route === 'base-usdc' && f.terms.base ? f.terms.base.price : f.terms.near.price;
     if (BigInt(price) > o.maxPrice) throw new PayError('price_above_max');
+    if (route === 'near-usdc') {
+      const budget = await fileStorageBalance(this.o.nearRpc, this.o.contractId, o.fileId);
+      if (budget.available < budget.admissionRequirement) throw new PayError('file_storage_low');
+    }
     if (route === 'near-usdc' && o.payer?.identity.kind !== 'near' && !o.origin)
       throw new TypeError('a 1Click origin is required for cross-chain payment');
     const recovery = parseIdentity(o.recovery.identity);

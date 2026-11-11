@@ -161,9 +161,9 @@ impl Annon {
         let payer = bytes::<20>(&payer, "payer");
         let payment = bytes::<40>(&payment, "payment");
         let deposit = NearToken::from_yoctonear(deposit.0);
+        bytes::<32>(&terms_hash, "terms_hash");
         let rec = PurchaseRec {
             file_id,
-            terms_hash: bytes::<32>(&terms_hash, "terms_hash"),
             buyer_key,
             recovery: recovery.clone(),
             route: 1,

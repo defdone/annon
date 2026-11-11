@@ -7,6 +7,70 @@ use crate::{Annon, AnnonExt};
 
 #[near]
 impl Annon {
+    /// Allocates nonwithdrawable NEAR to an existing file. With no attachment, amount is
+    /// mandatory and debited only from the caller's own prepaid balance.
+    #[payable]
+    pub fn fund_file_storage(&mut self, file_id: String, amount: Option<U128>) {
+        let id = crate::evm::bytes::<32>(&file_id, "file_id");
+        let file = self.file(&id);
+        require!(file.sales_stopped_at == 0, "sales stopped");
+        require!(file.taken_down == 0, "taken down");
+        let attached = env::attached_deposit().as_yoctonear();
+        let take = amount.map_or(attached, |a| a.0);
+        require!(take > 0, "positive amount required");
+        if attached == 0 {
+            require!(amount.is_some(), "explicit prepaid amount required");
+            self.allocate_file_storage(id, take);
+            return;
+        } else {
+            require!(take == attached, "attach exactly amount");
+        }
+        self.credit_file_storage(id, take);
+    }
+}
+
+impl Annon {
+    pub(crate) fn allocate_file_storage(&mut self, id: [u8; 32], take: u128) {
+        require!(take > 0, "positive amount required");
+        let balance = self
+            .balances
+            .get_mut(&env::predecessor_account_id())
+            .expect("no prepaid balance");
+        *balance = balance
+            .checked_sub(take)
+            .expect("not enough prepaid balance");
+        self.credit_file_storage(id, take);
+    }
+
+    fn credit_file_storage(&mut self, id: [u8; 32], take: u128) {
+        let file = self.files.get_mut(&id).unwrap();
+        file.purchase_storage_balance = file
+            .purchase_storage_balance
+            .checked_add(take)
+            .expect("file storage overflow");
+        crate::events::emit(
+            "file_storage_funded",
+            near_sdk::serde_json::json!({
+                "file_id": crate::evm::hex0x(&id), "funder": env::predecessor_account_id(),
+                "amount": U128(take), "balance": U128(file.purchase_storage_balance)
+            }),
+        );
+    }
+}
+
+#[near]
+impl Annon {
+    pub fn file_storage_balance(&self, file_id: String) -> crate::FileStorageView {
+        let file = self.file(&crate::evm::bytes::<32>(&file_id, "file_id"));
+        crate::FileStorageView {
+            available: U128(file.purchase_storage_balance),
+            admission_requirement: U128(
+                env::storage_byte_cost().as_yoctonear()
+                    * u128::from(crate::receive::DELIVERY_BYTES),
+            ),
+        }
+    }
+
     /// Prepays storage for `account_id` (the caller by default). Anyone may fund anyone, e.g. an
     /// owner funding their agent; the first deposit pays for its own balance entry.
     #[payable]
