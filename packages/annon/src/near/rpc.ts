@@ -83,7 +83,12 @@ async function rpc(url: string, method: string, params: unknown): Promise<Record
   if (body.error) {
     const msg = JSON.stringify(body.error.cause?.info ?? body.error.data ?? body.error.message);
     // A view that panics comes back as an RPC error on some providers.
-    if (body.error.cause?.name === 'CONTRACT_EXECUTION_ERROR') fail('refused', msg);
+    if (
+      ['CONTRACT_EXECUTION_ERROR', 'UNKNOWN_ACCESS_KEY', 'UNKNOWN_ACCOUNT'].includes(
+        body.error.cause?.name ?? '',
+      )
+    )
+      fail('refused', msg);
     fail('transport', `NEAR RPC error: ${msg}`);
   }
   if (typeof body?.result !== 'object' || body.result === null) return malformed('no result');

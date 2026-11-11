@@ -173,7 +173,10 @@ function keeper(c: Config, seconds: number) {
   const pass = async () => {
     if (!c.disabled) {
       try {
-        for (const s of (await keep(c)).sent)
+        const result = await keep(c);
+        for (const { from, deliveryId } of result.errors)
+          console.log(JSON.stringify({ keeper: 'error', from, deliveryId }));
+        for (const s of result.sent)
           console.log(
             JSON.stringify({
               at: new Date().toISOString(),

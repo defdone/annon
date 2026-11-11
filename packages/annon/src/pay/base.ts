@@ -14,6 +14,7 @@ export type PayErrorCode =
   /** The RPC couldn't be reached or answered something malformed; safe to retry. */
   | 'transport'
   /** The payment request or the registration don't allow this purchase; nothing was signed. */
+  | 'storage_required'
   | 'unknown_file'
   | 'taken_down'
   | 'sales_stopped'

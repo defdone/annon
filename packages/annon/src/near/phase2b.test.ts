@@ -239,3 +239,22 @@ describe('NEP-413 recovery ownership', () => {
     ).rejects.toThrow();
   });
 });
+
+it('classifies absent access keys as refusal, never as a retryable transport failure', async () => {
+  const { isFullAccessKey } = await import('./rpc.js');
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_u, init) => {
+      const q = JSON.parse(String(init?.body));
+      return {
+        json: async () => ({
+          id: q.id,
+          error: { cause: { name: 'UNKNOWN_ACCESS_KEY', info: {} } },
+        }),
+      };
+    }),
+  );
+  await expect(
+    isFullAccessKey('https://rpc', 'buyer.near', 'ed25519:missing'),
+  ).rejects.toMatchObject({ code: 'refused' });
+});

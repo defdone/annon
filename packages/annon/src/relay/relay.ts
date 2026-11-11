@@ -339,6 +339,9 @@ const MAX_WAITING = 32;
 // allowance and the sender's prepaid balance. The contract refuses an operation done twice.
 const accounts = new Map<string, Account>();
 const held = new Map<string, number>();
+const submitted = new Map<string, RelayResult>();
+const keepCursors = new Map<string, number>();
+const keepRetries = new Map<string, { attempts: number; until: number }>();
 const counts = new Map<string, { n: number; until: number }>();
 /** When each recent write was sent, per payer and contract (see `enoughStorage`). */
 const writes = new Map<string, number[]>();
@@ -351,6 +354,9 @@ export const relayCounters = () => counts.size + held.size;
 /** Clears the in-memory limits; for tests. */
 export function resetRelayState() {
   held.clear();
+  submitted.clear();
+  keepRetries.clear();
+  keepCursors.clear();
   counts.clear();
   accounts.clear();
   writes.clear();
@@ -526,13 +532,19 @@ export async function relay(
     baseUsdc: o.usdc,
     ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
   });
-  await checkRelay(r, o);
+  const operation = `${o.nearRpc}|${o.contractId}|${identity(r, o.contractId)}`;
+  const previous = submitted.get(operation);
+  if (previous && (held.get(operation) ?? 0) > Date.now()) return previous;
   const now = Date.now();
-  for (const [k, v] of held) if (v <= now) held.delete(k);
+  for (const [k, v] of held)
+    if (v <= now) {
+      held.delete(k);
+      submitted.delete(k);
+    }
   for (const [k, v] of counts) if (v.until <= now) counts.delete(k);
   if (waiting >= MAX_WAITING) fail('unavailable', 'the relayer is busy; try again shortly');
   // Per contract: relayers for other contracts in the same process don't share operations.
-  const id = `${o.contractId}|${identity(r, o.contractId)}`;
+  const id = `${o.nearRpc}|${o.contractId}|${identity(r, o.contractId)}`;
   if ((held.get(id) ?? 0) > now) fail('duplicate', 'this operation was just sent or is on its way');
   const quotaOf = quota(r, o.policy);
   const q: [string, number] | null = quotaOf && [`${o.contractId}|${quotaOf[0]}`, quotaOf[1]];
@@ -572,6 +584,7 @@ export async function relay(
       return send(o, key, txHash, signed);
     });
     held.set(id, Date.now() + HOLD);
+    submitted.set(id, out);
     return out;
   } catch (e) {
     // Given back only when nothing was sent; once a transaction may be on its way, the hold and
@@ -594,6 +607,7 @@ async function sign(
   key: string,
   method: string,
   args: object,
+  gas = GAS,
 ) {
   let account = accounts.get(key);
   if (!account) {
@@ -607,7 +621,7 @@ async function sign(
   const tx = await account
     .createSignedTransaction({
       receiverId: o.contractId,
-      actions: [actions.functionCall(method, args, GAS, 0n)],
+      actions: [actions.functionCall(method, args, gas, 0n)],
     })
     .catch((e: Error) => fail('transport', `NEAR RPC: ${e.message}`));
   return {
@@ -623,29 +637,53 @@ const PAGE = 50;
 
 export interface KeepResult {
   sent: { method: 'fund_delivery' | 'pay_slot'; args: object; result: RelayResult }[];
+  errors: { from?: number; deliveryId?: number; error: unknown }[];
 }
 
 /**
- * One keeper pass over every delivery id (`0 .. delivery_count`): a pending deposit gets
- * `fund_delivery`, a pending slot of a funded delivery gets `pay_slot`. The whole range every
- * time: a refund materialized from the refund tree takes an old, empty id, and a step can go back
+ * A bounded keeper pass cycling over delivery ids (`0 .. delivery_count`): a pending deposit gets
+ * `fund_delivery`, a pending slot of a funded delivery gets `pay_slot`. Revisit the whole range: a refund materialized from the refund tree takes an old, empty id, and a step can go back
  * to pending after a failed transfer. Steps in flight are never sent again: only their callback
  * moves them on, so nothing is paid twice. Sent with the relayer's key, in the same line as
  * relayed requests. Anyone may make these calls; the contract fixes every amount and destination.
  */
-// ponytail: a full scan per pass (one view per 50 ids, views are free); an index of open
-// deliveries in the contract if the count grows large.
+// A cursor bounds each pass while retaining eventual scans of old refund-leaf ids.
 export async function keep(o: {
   nearRpc: string;
   contractId: string;
   sender: Sender;
+  /** Bound views per pass; subsequent passes cycle through old ids, including late materializations. */
+  maxPages?: number;
 }): Promise<KeepResult> {
   const sent: KeepResult['sent'] = [];
+  const errors: KeepResult['errors'] = [];
   const key = senderKey(o);
   const count = await deliveryCount(o.nearRpc, o.contractId);
-  for (const [k, v] of held) if (v <= Date.now()) held.delete(k);
-  for (let from = 0; from < count; from += PAGE) {
-    for (const d of await listDeliveries(o.nearRpc, o.contractId, from, PAGE)) {
+  for (const [k, v] of held)
+    if (v <= Date.now()) {
+      held.delete(k);
+      submitted.delete(k);
+    }
+  const maxPages = o.maxPages ?? 20;
+  if (!Number.isSafeInteger(maxPages) || maxPages < 1)
+    throw new TypeError('invalid keeper page budget');
+  const scope = `${o.nearRpc}|${o.contractId}`;
+  const pages = Math.ceil(count / PAGE);
+  const start = (keepCursors.get(scope) ?? 0) % (pages || 1);
+  for (let i = 0; i < Math.min(pages, maxPages); i++) {
+    const pageIndex = (start + i) % pages;
+    const from = pageIndex * PAGE;
+    keepCursors.set(scope, (pageIndex + 1) % pages);
+    let page: Awaited<ReturnType<typeof listDeliveries>>;
+    try {
+      page = await listDeliveries(o.nearRpc, o.contractId, from, PAGE, (error) =>
+        errors.push({ from, error }),
+      );
+    } catch (error) {
+      errors.push({ from, error });
+      continue;
+    }
+    for (const d of page) {
       const due: [KeepResult['sent'][number]['method'], object][] =
         d.fund.state === 0
           ? [['fund_delivery', { delivery_id: d.id }]]
@@ -657,19 +695,41 @@ export async function keep(o: {
               )
             : [];
       for (const [method, args] of due) {
-        const id = `${o.contractId}|keep:${method}:${JSON.stringify(args)}`;
+        const id = `${o.nearRpc}|${o.contractId}|keep:${method}:${JSON.stringify(args)}`;
         const now = Date.now();
         if ((held.get(id) ?? 0) > now) continue;
-        held.set(id, now + KEEP_HOLD);
-        const result = await enqueue(async () => {
-          const tx = await sign(o, key, method, args);
-          return send(o, key, tx.txHash, tx.signed);
-        });
-        sent.push({ method, args, result });
+        if (keepRetries.size >= 10000 && !keepRetries.has(id)) {
+          for (const [k, v] of keepRetries) if (v.until < now - DAY) keepRetries.delete(k);
+          if (keepRetries.size >= 10000) {
+            errors.push({ deliveryId: d.id, error: new Error('keeper retry capacity') });
+            continue;
+          }
+        }
+        const retry = keepRetries.get(id);
+        if (retry && retry.until > now) continue;
+        const attempts = (retry?.attempts ?? 0) + 1;
+        const until = now + KEEP_HOLD * 2 ** Math.min(attempts - 1, 8);
+        held.set(id, until);
+        keepRetries.set(id, { attempts, until });
+        try {
+          const result = await enqueue(async () => {
+            const tx = await sign(
+              o,
+              key,
+              method,
+              args,
+              method === 'fund_delivery' ? 150000000000000n : 80000000000000n,
+            );
+            return send(o, key, tx.txHash, tx.signed);
+          });
+          sent.push({ method, args, result });
+        } catch (error) {
+          errors.push({ deliveryId: d.id, error });
+        }
       }
     }
   }
-  return { sent };
+  return { sent, errors };
 }
 
 /**

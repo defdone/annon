@@ -55,6 +55,7 @@ function harness(seller: Identity = wallet.identity) {
     }
   >();
   const grants = new Map<string, string>();
+  const blockedFiles = new Set<string>();
   let baseCode = '0x';
   let baseBalance = 1000000n;
   const calls: {
@@ -95,7 +96,7 @@ function harness(seller: Identity = wallet.identity) {
       const grant = reopened.get(request) ?? p.grants++;
       reopened.set(request, grant);
       grants.set(`${x.purchase_id}:${grant}`, x.fresh_key);
-      return { grant, answer: answer(p.file_id, x.fresh_key) };
+      return answer(p.file_id, x.fresh_key);
     }
     return null;
   });
@@ -118,50 +119,60 @@ function harness(seller: Identity = wallet.identity) {
       }
       const a = JSON.parse(Buffer.from(q.params.args_base64, 'base64').toString());
       const result =
-        q.params.method_name === 'get_file'
-          ? {
-              terms,
-              terms_hash: termsHash(terms),
-              header_hash: header
-                ? hex(
-                    await (await import('../envelope/pay2.js')).sha256(
-                      header.subarray(0, header.length - 65),
-                    ),
-                  )
-                : null,
-              sales_stopped_at: null,
-              taken_down: null,
-            }
-          : q.params.method_name === 'get_purchase'
-            ? purchases.has(a.purchase_id)
+        q.params.method_name === 'public_key'
+          ? mpcKey
+          : q.params.method_name === 'get_file'
+            ? blockedFiles.has(a.file_id)
               ? {
-                  route: 'near-usdc',
-                  delivery: 0,
-                  accepted_at: now,
-                  ...purchases.get(a.purchase_id),
+                  terms: { ...terms, file_id: a.file_id },
+                  terms_hash: termsHash({ ...terms, file_id: a.file_id }),
+                  header_hash: null,
+                  sales_stopped_at: null,
+                  taken_down: 'court_order',
                 }
-              : null
-            : q.params.method_name === 'get_grant'
-              ? grants.has(`${a.purchase_id}:${a.grant}`)
+              : {
+                  terms,
+                  terms_hash: termsHash(terms, { nearUsdc: terms.near.token }),
+                  header_hash: header
+                    ? hex(
+                        await (await import('../envelope/pay2.js')).sha256(
+                          header.subarray(0, header.length - 65),
+                        ),
+                      )
+                    : null,
+                  sales_stopped_at: null,
+                  taken_down: null,
+                }
+            : q.params.method_name === 'get_purchase'
+              ? purchases.has(a.purchase_id)
                 ? {
-                    purchase_id: a.purchase_id,
-                    grant: a.grant,
-                    buyer_key: grants.get(`${a.purchase_id}:${a.grant}`),
+                    route: 'near-usdc',
+                    delivery: 0,
+                    accepted_at: now,
+                    ...purchases.get(a.purchase_id),
                   }
                 : null
-              : q.params.method_name === 'get_config'
-                ? {
-                    network: 'near:mainnet',
-                    near_usdc: terms.near.token,
-                    intents: 'intents.near',
-                    mpc: 'v1.signer',
-                    ckd_domain: 2,
-                    foreign_tx_domain: 3,
-                    usdc: initial.base?.usdc,
-                  }
-                : q.params.method_name === 'purchases_of'
-                  ? [...purchases.keys()].slice(a.from, a.from + a.limit)
-                  : null;
+              : q.params.method_name === 'get_grant'
+                ? grants.has(`${a.purchase_id}:${a.grant}`)
+                  ? {
+                      purchase_id: a.purchase_id,
+                      grant: a.grant,
+                      buyer_key: grants.get(`${a.purchase_id}:${a.grant}`),
+                    }
+                  : null
+                : q.params.method_name === 'get_config'
+                  ? {
+                      network: 'near:mainnet',
+                      near_usdc: terms.near.token,
+                      intents: 'intents.near',
+                      mpc: 'v1.signer',
+                      ckd_domain: 2,
+                      foreign_tx_domain: 3,
+                      usdc: initial.base?.usdc,
+                    }
+                  : q.params.method_name === 'purchases_of'
+                    ? [...purchases.keys()].slice(a.from, a.from + a.limit)
+                    : null;
       return {
         json: async () => ({
           id: q.id,
@@ -201,6 +212,10 @@ function harness(seller: Identity = wallet.identity) {
     calls,
     purchases,
     grants,
+    blockedFiles,
+    set nearToken(value: string) {
+      terms = { ...terms, near: { ...terms.near, token: value } };
+    },
     get terms() {
       return terms;
     },
@@ -375,6 +390,7 @@ describe('high-level one-model API', () => {
         header: h.header,
         recovery,
         refund: recovery.identity,
+        origin: { asset: 'nep141:origin', chain: 'near', refundTo: 'buyer.near' },
         maxPrice: 200000n,
       }),
     ).rejects.toThrow(/ownership proof/);
@@ -410,12 +426,15 @@ describe('high-level one-model API', () => {
       ...wallet,
       address: account.address,
       signTypedData: async (data: ReturnType<typeof typedData>) => {
-        expect(h.backups.size).toBe(1);
+        expect([...h.backups.keys()].filter((k) => !k.startsWith('sell:'))).toHaveLength(1);
         return account.signTypedData(data as never);
       },
     };
     const submitBase = vi.fn(async () => {
-      const r = await importPurchase(must([...h.backups.values()][0]), h.backupSecret);
+      const r = await importPurchase(
+        must([...h.backups.entries()].find(([k]) => !k.startsWith('sell:'))?.[1]),
+        h.backupSecret,
+      );
       expect(r.attempts[0]?.payload).toBeTruthy();
     });
     const result = await h.sdk.buy({
@@ -539,5 +558,280 @@ describe('high-level one-model API', () => {
     expect(must(r).buyerSecret).toBe(pending.buyerSecret);
     expect(must(r).grant).toBe(1);
     expect(must(h.purchases.get(id)).grants).toBe(2);
+  });
+  it('uses deadlines below the relay limit even with a client clock one second ahead', async () => {
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'x',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    });
+    expect((must(h.calls[0]).args.args as { deadline: number }).deadline).toBeLessThanOrEqual(
+      now - 1 + 600,
+    );
+  });
+  it('rejects an unavailable fallback before recovery signatures, records or backups', async () => {
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'x',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      base: { price: '200000', sendTransaction: async () => {} },
+      publish: h.publish,
+    });
+    h.baseBalance = 0n;
+    const authorize = vi.fn(wallet.authorize);
+    const backups = h.backups.size;
+    await expect(
+      h.sdk.buy({
+        fileId: h.terms.file_id,
+        header: h.header,
+        recovery: { ...wallet, authorize },
+        payer: { ...wallet, signTypedData: vi.fn() } as never,
+        refund: wallet.identity,
+        maxPrice: 200000n,
+      }),
+    ).rejects.toThrow(/origin/);
+    expect(authorize).not.toHaveBeenCalled();
+    expect(h.backups.size).toBe(backups);
+  });
+  it('rotates an expired unaccepted recovery and isolates a broken purchase in a batch', async () => {
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'x',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    });
+    const id = `0x${'99'.repeat(32)}`;
+    const broken = `0x${'98'.repeat(32)}`;
+    const brokenFile = `0x${'97'.repeat(32)}`;
+    h.blockedFiles.add(brokenFile);
+    h.purchases.set(broken, {
+      purchase_id: broken,
+      file_id: brokenFile,
+      terms_hash: termsHash(h.terms),
+      recovery: wallet.identity,
+      buyer_key: hex(bls.G1.Point.BASE.toBytes(true)),
+      grants: 1,
+    });
+    h.purchases.set(id, {
+      purchase_id: id,
+      file_id: h.terms.file_id,
+      terms_hash: termsHash(h.terms),
+      recovery: wallet.identity,
+      buyer_key: hex(bls.G1.Point.BASE.toBytes(true)),
+      grants: 1,
+    });
+    h.send.mockRejectedValueOnce(new Error('offline'));
+    await expect(h.sdk.recover({ wallet, purchaseId: id })).rejects.toThrow('offline');
+    const old = await importRecovery(must(h.backups.get(`recovery:${id}`)), h.backupSecret);
+    const fresh = new Annon({ ...h.config, now: () => now + 601 });
+    const errors: string[] = [];
+    const recovered = await fresh.recover({
+      wallet,
+      onError: (id: string) => {
+        errors.push(id);
+      },
+    } as never);
+    expect(errors).toEqual([broken]);
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.buyerSecret).not.toBe(old.buyerSecret);
+    expect(recovered[0]?.revision).toBe(2);
+    expect([...h.backups.keys()].some((k) => k.includes('revision'))).toBe(true);
+  });
+
+  it('resumes a seller after registration lands and the answer or publication is lost', async () => {
+    const h = harness();
+    const fileId = `0x${'ab'.repeat(32)}`;
+    const original = must(h.send.getMockImplementation());
+    h.send.mockImplementationOnce(async (method, args) => {
+      await original(method, args);
+      throw new Error('lost register answer');
+    });
+    const options = {
+      data: body,
+      name: 'x',
+      mime: '',
+      seller: wallet,
+      fileId,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    };
+    await expect(h.sdk.sell(options)).rejects.toThrow('lost register answer');
+    expect(h.backups.has(`sell:${fileId}`)).toBe(true);
+    h.send.mockImplementation(async (method, args) => {
+      if (method === 'reopen_seller') {
+        const a = (args as { args: { key: string } }).args;
+        const sig = hashPoint(pk, fileAppId(h.terms.contract, bytes(fileId, 32))).multiply(msk);
+        return {
+          big_y: `bls12381g1:${base58.encode(bls.G1.Point.BASE.multiply(77n).toBytes(true))}`,
+          big_c: `bls12381g1:${base58.encode(sig.add(bls.G1.Point.fromBytes(bytes(a.key, 48)).multiply(77n)).toBytes(true))}`,
+        };
+      }
+      return original(method, args);
+    });
+    const resumed = new Annon(h.config);
+    const publish = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('host unavailable'))
+      .mockImplementation(h.publish);
+    await expect(
+      resumed.resumeSell({ fileId, data: body, seller: wallet, publish }),
+    ).rejects.toThrow('host unavailable');
+    const sold = await resumed.resumeSell({ fileId, data: body, seller: wallet, publish });
+    expect(sold.terms.file_id).toBe(fileId);
+    expect(h.calls.filter((c) => c.method === 'register')).toHaveLength(1);
+    await expect(
+      resumed.resumeSell({ fileId, data: new Uint8Array([9]), seller: wallet, publish }),
+    ).rejects.toThrow(/cipher/);
+  });
+  it('reads CKD keys from the configured MPC domain, with explicit overrides pinned to it', async () => {
+    const h = harness();
+    const globalFetch = globalThis.fetch;
+    const observed: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, init) => {
+        const q = JSON.parse(String(init?.body));
+        if (q.params?.method_name === 'public_key') {
+          observed.push({
+            account: q.params.account_id,
+            args: JSON.parse(Buffer.from(q.params.args_base64, 'base64').toString()),
+          });
+          return {
+            json: async () => ({
+              id: q.id,
+              result: { result: [...Buffer.from(JSON.stringify(mpcKey))] },
+            }),
+          };
+        }
+        return globalFetch(url, init);
+      }),
+    );
+    const dynamic = new Annon({ ...h.config, mpcKey: undefined } as never);
+    await dynamic.sell({
+      data: body,
+      name: 'x',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    });
+    expect(observed).toContainEqual({ account: 'v1.signer', args: { domain_id: 2 } });
+  });
+
+  it('reopens a seller on a fresh device without an existing sell job', async () => {
+    const h = harness();
+    const sdk = new Annon({ ...h.config, rawStore: memoryStore<EncryptedRecord>() });
+    const original = must(h.send.getMockImplementation());
+    h.send.mockImplementation(async (method, args) => {
+      if (method !== 'reopen_seller') return original(method, args);
+      expect([...h.backups.keys()].some((k) => k.startsWith('seller-key:'))).toBe(true);
+      const a = (args as { args: { key: string } }).args;
+      const sig = hashPoint(pk, fileAppId(h.terms.contract, bytes(h.terms.file_id, 32))).multiply(
+        msk,
+      );
+      return {
+        big_y: `bls12381g1:${base58.encode(bls.G1.Point.BASE.multiply(77n).toBytes(true))}`,
+        big_c: `bls12381g1:${base58.encode(sig.add(bls.G1.Point.fromBytes(bytes(a.key, 48)).multiply(77n)).toBytes(true))}`,
+      };
+    });
+    expect(await sdk.reopenSeller({ fileId: h.terms.file_id, seller: wallet })).toHaveLength(48);
+  });
+  it('reports missing prepaid storage with an actionable refusal', async () => {
+    const h = harness();
+    h.send.mockRejectedValueOnce(
+      new Error('attach at least 500 yoctoNEAR for storage, or call storage_deposit first'),
+    );
+    await expect(
+      h.sdk.sell({
+        data: body,
+        name: 'x',
+        mime: '',
+        seller: wallet,
+        near: {
+          price: '200000',
+          recipients: [{ identity: wallet.identity, bps: 10000 }],
+          remainder: wallet.identity,
+        },
+        publish: h.publish,
+      }),
+    ).rejects.toMatchObject({ code: 'storage_required' });
+  });
+  it('requires a real price cap at the SDK runtime boundary', async () => {
+    const h = harness();
+    await expect(h.sdk.buy({ maxPrice: undefined } as never)).rejects.toThrow(/maxPrice/);
+  });
+  it('rejects a configured CKD pin that differs from the configured MPC domain', async () => {
+    const h = harness();
+    const sdk = new Annon({
+      ...h.config,
+      mpcKey: `bls12381g2:${base58.encode(bls.G2.Point.BASE.toBytes(true))}`,
+    });
+    await expect(
+      sdk.sell({
+        data: body,
+        name: 'x',
+        mime: '',
+        seller: wallet,
+        near: {
+          price: '200000',
+          recipients: [{ identity: wallet.identity, bps: 10000 }],
+          remainder: wallet.identity,
+        },
+        publish: h.publish,
+      }),
+    ).rejects.toThrow(/configured MPC key/);
+  });
+  it('retains configured token support when saving and resuming seller registrations', async () => {
+    const h = harness();
+    h.nearToken = 'usdc.test.near';
+    const fileId = `0x${'ac'.repeat(32)}`;
+    const options = {
+      fileId,
+      data: body,
+      name: 'x',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    };
+    const sold = await h.sdk.sell(options);
+    expect(sold.terms.near.token).toBe('usdc.test.near');
+    expect(
+      (await h.sdk.resumeSell({ fileId, data: body, seller: wallet, publish: h.publish })).file,
+    ).toEqual(sold.file);
   });
 });

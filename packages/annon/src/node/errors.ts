@@ -11,6 +11,8 @@ export class AdapterError extends Error {
 export const usage = () =>
   new AdapterError('invalid_arguments', 'Invalid arguments. Run annon --help.', 2);
 const actions: Record<string, string> = {
+  storage_required:
+    'Prepay storage with storageDeposit before register or reopen, then resume the saved operation.',
   unknown_file: 'The configured contract has no such file. Check the file ID and deployment.',
   taken_down: 'The moderator has taken down this file; key release is blocked.',
   sales_stopped:

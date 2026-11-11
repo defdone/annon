@@ -21,8 +21,54 @@ export interface RecoveryRecord extends Versioned {
   deadline: number;
   grant: number | null;
 }
-type PrivateRecord = PurchaseRecord | RecoveryRecord;
+export interface SellRecord extends Versioned {
+  kind: 'sell';
+  terms: import('../settle-near/terms.js').Terms;
+  fileKey: string;
+  sellerSecret: string;
+  deadline: number;
+  name: string;
+  mime: string;
+  previewLen: number;
+  ckdSecret: string | null;
+}
+export interface SellerKeyRecord extends Versioned {
+  kind: 'seller-key';
+  file_id: string;
+  seller: import('../settle-near/identity.js').Identity;
+  buyerSecret: string;
+  deadline: number;
+}
+type PrivateRecord = PurchaseRecord | RecoveryRecord | SellRecord | SellerKeyRecord;
 function validate(r: PrivateRecord) {
+  if ('kind' in r && r.kind === 'seller-key') {
+    if (
+      r.id !== `seller-key:${r.file_id}` ||
+      !Number.isSafeInteger(r.revision) ||
+      r.revision < 0 ||
+      !Number.isSafeInteger(r.deadline) ||
+      r.deadline < 0
+    )
+      throw new TypeError('invalid seller key record');
+    bytes(r.file_id, 32);
+    bytes(r.buyerSecret, 32);
+    identityJson(r.seller);
+    return;
+  }
+  if ('kind' in r && r.kind === 'sell') {
+    if (
+      r.id !== `sell:${r.terms.file_id}` ||
+      !Number.isSafeInteger(r.revision) ||
+      r.revision < 0 ||
+      !Number.isSafeInteger(r.deadline) ||
+      r.deadline < 0
+    )
+      throw new TypeError('invalid sell record');
+    bytes(r.fileKey, 32);
+    bytes(r.sellerSecret, 32);
+    if (r.ckdSecret !== null) bytes(r.ckdSecret, 48);
+    return;
+  }
   if ('kind' in r && r.kind === 'recovery') {
     bytes(r.purchase_id, 32);
     bytes(r.file_id, 32);
@@ -166,7 +212,7 @@ export const exportRecovery = (record: RecoveryRecord, secret: Uint8Array) =>
   encrypt(record, secret);
 export const importRecovery = async (file: string, secret: Uint8Array): Promise<RecoveryRecord> => {
   const r = await decrypt(file, secret);
-  if (!('kind' in r)) throw new TypeError('not a recovery');
+  if (!('kind' in r) || r.kind !== 'recovery') throw new TypeError('not a recovery');
   return r;
 };
 /** Wrap memory, IndexedDB, fileStore or an existing durable store; keep only ciphertext at rest. */
@@ -208,3 +254,21 @@ export const encryptedRecoveryStore = (
   raw: Store<EncryptedRecord>,
   secret: Uint8Array,
 ): Store<RecoveryRecord> => encryptedStore<RecoveryRecord>(raw, secret);
+
+export const exportSell = (record: SellRecord, secret: Uint8Array) => encrypt(record, secret);
+export const importSell = async (file: string, secret: Uint8Array): Promise<SellRecord> => {
+  const r = await decrypt(file, secret);
+  if (!('kind' in r) || r.kind !== 'sell') throw new TypeError('not a sell record');
+  return r;
+};
+export const encryptedSellStore = (
+  raw: Store<EncryptedRecord>,
+  secret: Uint8Array,
+): Store<SellRecord> => encryptedStore<SellRecord>(raw, secret);
+
+export const exportSellerKey = (record: SellerKeyRecord, secret: Uint8Array) =>
+  encrypt(record, secret);
+export const encryptedSellerKeyStore = (
+  raw: Store<EncryptedRecord>,
+  secret: Uint8Array,
+): Store<SellerKeyRecord> => encryptedStore<SellerKeyRecord>(raw, secret);

@@ -1,0 +1,183 @@
+Stage 2 sandbox measurements, 2026-11-11. Gas is burnt, in Tgas.
+Receipt indexes are local outcome ordering; zero-work refund receipts are retained.
+Local accounts are ephemeral sandbox identities; imports use mainnet read-only views.
+
+MAINNET snapshot height=223997921 hash=8LpJ63gNcvU375GhW8hrFeDnFSdrMA8QcNSLVStyEzYx
+PROTOCOL mainnet=88 sandbox=88
+ANNON wasm sha256=0xecdc464ab8ca4b7adaca6bb2595b3445798f94da4ab7eb84cd7cbe46510a78f6
+MAINNET code account=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 sha256=0xb98ccd530f7e643cfef32f4529ade060ef87ff73b0101536399470777b86cfe6
+MAINNET code account=intents.near sha256=0xa1afab98916d9f213746544dcf8e4e6bdb22c0be6bc5dfbd8ea8814c9922b547
+GAS receiver-max-9-slots: total=13.221981 Tgas
+RECEIPT receiver-max-9-slots 0: executor=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 gas=3.018330 Tgas success=true
+RECEIPT receiver-max-9-slots 1: executor=dev-20261111013023-31641002563920.test.near gas=7.772639 Tgas success=true
+RECEIPT receiver-max-9-slots 2: executor=dev-20261111013022-25165200377974.test.near gas=0.223183 Tgas success=true
+RECEIPT receiver-max-9-slots 3: executor=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 gas=1.628809 Tgas success=true
+RECEIPT receiver-max-9-slots 4: executor=dev-20261111013022-25165200377974.test.near gas=0.223183 Tgas success=true
+GAS fund-real-usdc-intents-max: total=14.279614 Tgas
+RECEIPT fund-real-usdc-intents-max 0: executor=dev-20261111013023-31641002563920.test.near gas=2.879718 Tgas success=true
+RECEIPT fund-real-usdc-intents-max 1: executor=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 gas=2.844138 Tgas success=true
+RECEIPT fund-real-usdc-intents-max 2: executor=intents.near gas=3.494429 Tgas success=true
+RECEIPT fund-real-usdc-intents-max 3: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT fund-real-usdc-intents-max 4: executor=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 gas=1.627171 Tgas success=true
+RECEIPT fund-real-usdc-intents-max 5: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT fund-real-usdc-intents-max 6: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT fund-real-usdc-intents-max 7: executor=dev-20261111013023-31641002563920.test.near gas=2.231939 Tgas success=true
+RECEIPT fund-real-usdc-intents-max 8: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK fund-real-usdc-intents-max: burnt=2.231939 allowance=15 margin=12.768061 Tgas
+GAS pay-real-locked-failure: total=8.607033 Tgas
+RECEIPT pay-real-locked-failure 0: executor=dev-20261111013023-31641002563920.test.near gas=2.900221 Tgas success=true
+RECEIPT pay-real-locked-failure 1: executor=intents.near gas=2.605965 Tgas success=false
+RECEIPT pay-real-locked-failure 2: executor=dev-20261111013023-31641002563920.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-locked-failure 3: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-locked-failure 4: executor=dev-20261111013023-31641002563920.test.near gas=2.121619 Tgas success=true
+RECEIPT pay-real-locked-failure 5: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-real-locked-failure: burnt=2.121619 allowance=15 margin=12.878381 Tgas
+GAS pay-real-slot-0: total=9.688744 Tgas
+RECEIPT pay-real-slot-0 0: executor=dev-20261111013023-31641002563920.test.near gas=2.900221 Tgas success=true
+RECEIPT pay-real-slot-0 1: executor=intents.near gas=3.771544 Tgas success=true
+RECEIPT pay-real-slot-0 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-slot-0 3: executor=dev-20261111013023-31641002563920.test.near gas=2.260934 Tgas success=true
+RECEIPT pay-real-slot-0 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-real-slot-0: burnt=2.260934 allowance=15 margin=12.739066 Tgas
+GAS pay-real-slot-1: total=9.731559 Tgas
+RECEIPT pay-real-slot-1 0: executor=dev-20261111013023-31641002563920.test.near gas=2.902734 Tgas success=true
+RECEIPT pay-real-slot-1 1: executor=intents.near gas=3.793345 Tgas success=true
+RECEIPT pay-real-slot-1 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-slot-1 3: executor=dev-20261111013023-31641002563920.test.near gas=2.279435 Tgas success=true
+RECEIPT pay-real-slot-1 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-real-slot-1: burnt=2.279435 allowance=15 margin=12.720565 Tgas
+GAS pay-real-slot-2: total=9.645624 Tgas
+RECEIPT pay-real-slot-2 0: executor=dev-20261111013023-31641002563920.test.near gas=2.894694 Tgas success=true
+RECEIPT pay-real-slot-2 1: executor=intents.near gas=3.749501 Tgas success=true
+RECEIPT pay-real-slot-2 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-slot-2 3: executor=dev-20261111013023-31641002563920.test.near gas=2.245383 Tgas success=true
+RECEIPT pay-real-slot-2 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-real-slot-2: burnt=2.245383 allowance=15 margin=12.754617 Tgas
+GAS pay-real-slot-3: total=9.647904 Tgas
+RECEIPT pay-real-slot-3 0: executor=dev-20261111013023-31641002563920.test.near gas=2.894694 Tgas success=true
+RECEIPT pay-real-slot-3 1: executor=intents.near gas=3.751781 Tgas success=true
+RECEIPT pay-real-slot-3 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-slot-3 3: executor=dev-20261111013023-31641002563920.test.near gas=2.245383 Tgas success=true
+RECEIPT pay-real-slot-3 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-real-slot-3: burnt=2.245383 allowance=15 margin=12.754617 Tgas
+GAS pay-real-slot-4: total=9.652464 Tgas
+RECEIPT pay-real-slot-4 0: executor=dev-20261111013023-31641002563920.test.near gas=2.894694 Tgas success=true
+RECEIPT pay-real-slot-4 1: executor=intents.near gas=3.756341 Tgas success=true
+RECEIPT pay-real-slot-4 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-slot-4 3: executor=dev-20261111013023-31641002563920.test.near gas=2.245383 Tgas success=true
+RECEIPT pay-real-slot-4 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-real-slot-4: burnt=2.245383 allowance=15 margin=12.754617 Tgas
+GAS pay-real-slot-5: total=9.650184 Tgas
+RECEIPT pay-real-slot-5 0: executor=dev-20261111013023-31641002563920.test.near gas=2.894694 Tgas success=true
+RECEIPT pay-real-slot-5 1: executor=intents.near gas=3.754061 Tgas success=true
+RECEIPT pay-real-slot-5 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-slot-5 3: executor=dev-20261111013023-31641002563920.test.near gas=2.245383 Tgas success=true
+RECEIPT pay-real-slot-5 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-real-slot-5: burnt=2.245383 allowance=15 margin=12.754617 Tgas
+GAS pay-real-slot-6: total=9.652464 Tgas
+RECEIPT pay-real-slot-6 0: executor=dev-20261111013023-31641002563920.test.near gas=2.894694 Tgas success=true
+RECEIPT pay-real-slot-6 1: executor=intents.near gas=3.756341 Tgas success=true
+RECEIPT pay-real-slot-6 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-slot-6 3: executor=dev-20261111013023-31641002563920.test.near gas=2.245383 Tgas success=true
+RECEIPT pay-real-slot-6 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-real-slot-6: burnt=2.245383 allowance=15 margin=12.754617 Tgas
+GAS pay-real-slot-7: total=9.654744 Tgas
+RECEIPT pay-real-slot-7 0: executor=dev-20261111013023-31641002563920.test.near gas=2.894694 Tgas success=true
+RECEIPT pay-real-slot-7 1: executor=intents.near gas=3.758621 Tgas success=true
+RECEIPT pay-real-slot-7 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-slot-7 3: executor=dev-20261111013023-31641002563920.test.near gas=2.245383 Tgas success=true
+RECEIPT pay-real-slot-7 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-real-slot-7: burnt=2.245383 allowance=15 margin=12.754617 Tgas
+GAS pay-real-slot-8: total=9.836604 Tgas
+RECEIPT pay-real-slot-8 0: executor=dev-20261111013023-31641002563920.test.near gas=2.896906 Tgas success=true
+RECEIPT pay-real-slot-8 1: executor=intents.near gas=3.927202 Tgas success=true
+RECEIPT pay-real-slot-8 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-real-slot-8 3: executor=dev-20261111013023-31641002563920.test.near gas=2.256450 Tgas success=true
+RECEIPT pay-real-slot-8 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-real-slot-8: burnt=2.256450 allowance=15 margin=12.743550 Tgas
+GAS receiver-largest-9-max-identities: total=13.317016 Tgas
+RECEIPT receiver-largest-9-max-identities 0: executor=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 gas=3.026843 Tgas success=true
+RECEIPT receiver-largest-9-max-identities 1: executor=dev-20261111013023-31641002563920.test.near gas=7.857158 Tgas success=true
+RECEIPT receiver-largest-9-max-identities 2: executor=dev-20261111013022-25165200377974.test.near gas=0.223183 Tgas success=true
+RECEIPT receiver-largest-9-max-identities 3: executor=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 gas=1.628809 Tgas success=true
+RECEIPT receiver-largest-9-max-identities 4: executor=dev-20261111013022-25165200377974.test.near gas=0.223183 Tgas success=true
+GAS fund-largest-9-max-identities: total=14.454022 Tgas
+RECEIPT fund-largest-9-max-identities 0: executor=dev-20261111013023-31641002563920.test.near gas=2.943139 Tgas success=true
+RECEIPT fund-largest-9-max-identities 1: executor=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 gas=2.844138 Tgas success=true
+RECEIPT fund-largest-9-max-identities 2: executor=intents.near gas=3.542243 Tgas success=true
+RECEIPT fund-largest-9-max-identities 3: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT fund-largest-9-max-identities 4: executor=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 gas=1.627171 Tgas success=true
+RECEIPT fund-largest-9-max-identities 5: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT fund-largest-9-max-identities 6: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT fund-largest-9-max-identities 7: executor=dev-20261111013023-31641002563920.test.near gas=2.295111 Tgas success=true
+RECEIPT fund-largest-9-max-identities 8: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK fund-largest-9-max-identities: burnt=2.295111 allowance=15 margin=12.704889 Tgas
+GAS pay-largest-slot-0: total=9.839035 Tgas
+RECEIPT pay-largest-slot-0 0: executor=dev-20261111013023-31641002563920.test.near gas=2.961989 Tgas success=true
+RECEIPT pay-largest-slot-0 1: executor=intents.near gas=3.794046 Tgas success=true
+RECEIPT pay-largest-slot-0 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-largest-slot-0 3: executor=dev-20261111013023-31641002563920.test.near gas=2.326955 Tgas success=true
+RECEIPT pay-largest-slot-0 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-largest-slot-0: burnt=2.326955 allowance=15 margin=12.673045 Tgas
+GAS pay-largest-slot-1: total=9.845905 Tgas
+RECEIPT pay-largest-slot-1 0: executor=dev-20261111013023-31641002563920.test.near gas=2.962003 Tgas success=true
+RECEIPT pay-largest-slot-1 1: executor=intents.near gas=3.800886 Tgas success=true
+RECEIPT pay-largest-slot-1 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-largest-slot-1 3: executor=dev-20261111013023-31641002563920.test.near gas=2.326970 Tgas success=true
+RECEIPT pay-largest-slot-1 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-largest-slot-1: burnt=2.326970 allowance=15 margin=12.673030 Tgas
+GAS pay-largest-slot-2: total=9.850465 Tgas
+RECEIPT pay-largest-slot-2 0: executor=dev-20261111013023-31641002563920.test.near gas=2.962003 Tgas success=true
+RECEIPT pay-largest-slot-2 1: executor=intents.near gas=3.805446 Tgas success=true
+RECEIPT pay-largest-slot-2 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-largest-slot-2 3: executor=dev-20261111013023-31641002563920.test.near gas=2.326970 Tgas success=true
+RECEIPT pay-largest-slot-2 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-largest-slot-2: burnt=2.326970 allowance=15 margin=12.673030 Tgas
+GAS pay-largest-slot-3: total=9.848185 Tgas
+RECEIPT pay-largest-slot-3 0: executor=dev-20261111013023-31641002563920.test.near gas=2.962003 Tgas success=true
+RECEIPT pay-largest-slot-3 1: executor=intents.near gas=3.803166 Tgas success=true
+RECEIPT pay-largest-slot-3 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-largest-slot-3 3: executor=dev-20261111013023-31641002563920.test.near gas=2.326970 Tgas success=true
+RECEIPT pay-largest-slot-3 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-largest-slot-3: burnt=2.326970 allowance=15 margin=12.673030 Tgas
+GAS pay-largest-slot-4: total=9.848185 Tgas
+RECEIPT pay-largest-slot-4 0: executor=dev-20261111013023-31641002563920.test.near gas=2.962003 Tgas success=true
+RECEIPT pay-largest-slot-4 1: executor=intents.near gas=3.803166 Tgas success=true
+RECEIPT pay-largest-slot-4 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-largest-slot-4 3: executor=dev-20261111013023-31641002563920.test.near gas=2.326970 Tgas success=true
+RECEIPT pay-largest-slot-4 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-largest-slot-4: burnt=2.326970 allowance=15 margin=12.673030 Tgas
+GAS pay-largest-slot-5: total=9.850465 Tgas
+RECEIPT pay-largest-slot-5 0: executor=dev-20261111013023-31641002563920.test.near gas=2.962003 Tgas success=true
+RECEIPT pay-largest-slot-5 1: executor=intents.near gas=3.805446 Tgas success=true
+RECEIPT pay-largest-slot-5 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-largest-slot-5 3: executor=dev-20261111013023-31641002563920.test.near gas=2.326970 Tgas success=true
+RECEIPT pay-largest-slot-5 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-largest-slot-5: burnt=2.326970 allowance=15 margin=12.673030 Tgas
+GAS pay-largest-slot-6: total=9.845905 Tgas
+RECEIPT pay-largest-slot-6 0: executor=dev-20261111013023-31641002563920.test.near gas=2.962003 Tgas success=true
+RECEIPT pay-largest-slot-6 1: executor=intents.near gas=3.800886 Tgas success=true
+RECEIPT pay-largest-slot-6 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-largest-slot-6 3: executor=dev-20261111013023-31641002563920.test.near gas=2.326970 Tgas success=true
+RECEIPT pay-largest-slot-6 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-largest-slot-6: burnt=2.326970 allowance=15 margin=12.673030 Tgas
+GAS pay-largest-slot-7: total=9.848185 Tgas
+RECEIPT pay-largest-slot-7 0: executor=dev-20261111013023-31641002563920.test.near gas=2.962003 Tgas success=true
+RECEIPT pay-largest-slot-7 1: executor=intents.near gas=3.803166 Tgas success=true
+RECEIPT pay-largest-slot-7 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-largest-slot-7 3: executor=dev-20261111013023-31641002563920.test.near gas=2.326970 Tgas success=true
+RECEIPT pay-largest-slot-7 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-largest-slot-7: burnt=2.326970 allowance=15 margin=12.673030 Tgas
+GAS pay-largest-slot-8: total=10.000702 Tgas
+RECEIPT pay-largest-slot-8 0: executor=dev-20261111013023-31641002563920.test.near gas=2.962003 Tgas success=true
+RECEIPT pay-largest-slot-8 1: executor=intents.near gas=3.955683 Tgas success=true
+RECEIPT pay-largest-slot-8 2: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+RECEIPT pay-largest-slot-8 3: executor=dev-20261111013023-31641002563920.test.near gas=2.326970 Tgas success=true
+RECEIPT pay-largest-slot-8 4: executor=dev-20261111013021-30562636954562.test.near gas=0.223183 Tgas success=true
+CALLBACK pay-largest-slot-8: burnt=2.326970 allowance=15 margin=12.673030 Tgas
+GAS foreign-bounce: total=7.569514 Tgas
+RECEIPT foreign-bounce 0: executor=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 gas=2.873620 Tgas success=true
+RECEIPT foreign-bounce 1: executor=dev-20261111013023-31641002563920.test.near gas=1.832365 Tgas success=true
+RECEIPT foreign-bounce 2: executor=dev-20261111013022-25165200377974.test.near gas=0.223183 Tgas success=true
+RECEIPT foreign-bounce 3: executor=17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1 gas=2.103478 Tgas success=true
+RECEIPT foreign-bounce 4: executor=dev-20261111013022-25165200377974.test.near gas=0.223183 Tgas success=true

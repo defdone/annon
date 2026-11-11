@@ -18,10 +18,13 @@ export {
   encryptedRecoveryStore,
   exportPurchase,
   exportRecovery,
+  exportSell,
   importPurchase,
   importRecovery,
+  importSell,
   newBackupSecret,
   type RecoveryRecord,
+  type SellRecord,
 } from './pay/backup.js';
 export type { PurchaseRecord } from './pay/purchase.js';
 export * from './settle-near/index.js';
@@ -33,4 +36,5 @@ export {
   nearKeyPairWallet,
   nearSelectorWallet,
   solanaWallet,
+  storageDeposit,
 } from './wallet/wallet.js';

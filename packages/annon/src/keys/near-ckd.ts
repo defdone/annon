@@ -13,10 +13,6 @@ const G2 = bls.G2.Point;
 const Fr = bls.fields.Fr;
 const DST = 'NEAR BLS12381G1_XMD:SHA-256_SSWU_RO_';
 
-/** NEAR MPC's CKD public key on mainnet: `v1.signer` `public_key({domain_id: 2})`, read 5 Nov 2026. */
-export const MAINNET_CKD_KEY =
-  'bls12381g2:24mhN4RnB2CbiUkAfukyh4s1CT6dUNd9Pc8kRnL4LvAP3tcxhUupbphmfbmwHSi66aFCiZkMgiH2KqXWJLD7JUeAFhoLS3WQbzWcpUzhERLqxyocwT9Xrd4WNvEuKavxmXdR';
-
 export type CkdErrorCode =
   /** MPC didn't answer; the purchase stands and `reopen` gets the key. */
   | 'ckd_failed'
@@ -70,8 +66,8 @@ export interface OpenAnswerOptions {
   secret: Uint8Array;
   /** `fileAppId(contractId, fileId)` for an Annon file. */
   appId: Uint8Array;
-  /** `bls12381g2:…`; defaults to mainnet. */
-  mpcKey?: string;
+  /** `bls12381g2:…` read from the trusted contract's MPC account and CKD domain. */
+  mpcKey: string;
 }
 
 /**
@@ -84,7 +80,7 @@ export function openAnswer(answer: unknown, opts: OpenAnswerOptions): Uint8Array
   if (a && typeof a.error === 'string') fail('ckd_failed', a.error);
   const Y = point(G1, a?.big_y, 'bls12381g1:', 48);
   const C = point(G1, a?.big_c, 'bls12381g1:', 48);
-  const pk = point(G2, opts.mpcKey ?? MAINNET_CKD_KEY, 'bls12381g2:', 96);
+  const pk = point(G2, opts.mpcKey, 'bls12381g2:', 96);
   return decrypt(scalar(opts.secret), Y, C, pk, opts.appId).toBytes(true);
 }
 

@@ -12,6 +12,8 @@ describe('deployment trust', () => {
         {
           command: 'status',
           contractId: 'files.near',
+          nearRpc: 'https://near.example',
+          baseRpc: 'https://base.example',
           stateDir: dir,
           config: join(dir, 'missing'),
         },
@@ -33,4 +35,17 @@ describe('deployment trust', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+});
+
+it('requires human-configured RPC anchors instead of supplying implicit endpoints', async () => {
+  await expect(
+    loadConfig(
+      {
+        command: 'status',
+        contractId: 'annon.near',
+        config: '/private/tmp/annon-sdk-nonexistent-config.json',
+      },
+      {},
+    ),
+  ).rejects.toMatchObject({ code: 'invalid_config' });
 });

@@ -5,26 +5,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod/v4';
 
 // Secret values have no tool argument. Only explicitly selected files or server env supply keys.
-const common = {
-  config: z.string().optional(),
-  contractId: z.string().optional(),
-  nearRpc: z.string().optional(),
-  baseRpc: z.string().optional(),
-  network: z.string().optional(),
-  stateDir: z.string().optional(),
-  relayer: z.string().optional(),
-  trustContract: z
-    .boolean()
-    .optional()
-    .describe('Explicitly trust the configured contract for key release on first use.'),
-  wallet: z.enum(['evm', 'solana', 'near']).optional(),
-  evmKeyFile: z.string().optional(),
-  solanaKeyFile: z.string().optional(),
-  nearKeyFile: z.string().optional(),
-  nearAccount: z.string().optional(),
-  nearPublicKey: z.string().optional(),
-  backupSecretFile: z.string().optional(),
-};
+// Deployment, trust, wallets, storage and spend limits belong to the server operator.
+const common = {};
 const target = z.string().min(1);
 const price = z
   .string()
@@ -43,13 +25,12 @@ export const schemas = {
   buy: z.strictObject({
     ...common,
     target: target.describe('HTTPS file URL or path to decoded x402 offer JSON'),
+    url: z.string().optional().describe('Expected resource URL, required for an offer file'),
     route: z.enum(['near', 'base', '1click']).optional(),
     fromChain: z.string().optional(),
     fromAsset: z.string().optional(),
     refundTo: z.string().optional(),
     recovery: z.string().optional(),
-    maxPrice: price.optional(),
-    moderator: z.string().optional().describe('A moderator the buyer explicitly trusts'),
   }),
   open: z.strictObject({
     ...common,
@@ -79,7 +60,7 @@ const descriptions = {
   recover:
     'Recover purchases with a controlled wallet identity using SDK reopen. Fresh grant secrets are backed up before submission.',
   status:
-    'Read final purchase acceptance from the trusted contract. 1Click SUCCESS alone does not establish acceptance.',
+    'Resume a saved paid Base purchase with unlock and read final acceptance from the trusted contract. 1Click SUCCESS alone does not establish acceptance.',
 };
 const outputSchema = z.object({
   ok: z.boolean(),
@@ -98,9 +79,9 @@ export function createServer(
         inputSchema: schemas[command],
         outputSchema,
         annotations: {
-          readOnlyHint: command === 'verify' || command === 'status',
+          readOnlyHint: command === 'verify',
           destructiveHint: false,
-          idempotentHint: command === 'verify' || command === 'status',
+          idempotentHint: command === 'verify',
           openWorldHint: true,
         },
       },

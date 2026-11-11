@@ -15,6 +15,10 @@ export interface Config {
   network: string;
   stateDir: string;
   relayer?: string;
+  maxPrice?: string;
+  trustContract?: boolean;
+  mpcKey?: string;
+  moderators?: string[];
 }
 export async function loadConfig(o: Input, env: Environment): Promise<Config> {
   try {
@@ -27,9 +31,8 @@ export async function loadConfig(o: Input, env: Environment): Promise<Config> {
     }
     const c: Config = {
       contractId: o.contractId ?? env.ANNON_CONTRACT_ID ?? file.contractId ?? '',
-      nearRpc:
-        o.nearRpc ?? env.ANNON_NEAR_RPC ?? file.nearRpc ?? 'https://rpc.mainnet.fastnear.com',
-      baseRpc: o.baseRpc ?? env.ANNON_BASE_RPC ?? file.baseRpc ?? 'https://mainnet.base.org',
+      nearRpc: o.nearRpc ?? env.ANNON_NEAR_RPC ?? file.nearRpc ?? '',
+      baseRpc: o.baseRpc ?? env.ANNON_BASE_RPC ?? file.baseRpc ?? '',
       network: o.network ?? env.ANNON_NETWORK ?? file.network ?? 'near:mainnet',
       stateDir:
         o.stateDir ??
@@ -37,6 +40,19 @@ export async function loadConfig(o: Input, env: Environment): Promise<Config> {
         file.stateDir ??
         join(homedir(), '.local', 'share', 'annon'),
     };
+    const maxPrice = env.ANNON_MAX_PRICE ?? file.maxPrice;
+    if (maxPrice !== undefined) c.maxPrice = maxPrice;
+    c.trustContract =
+      env.ANNON_TRUST_CONTRACT === undefined
+        ? file.trustContract === true
+        : env.ANNON_TRUST_CONTRACT === 'true';
+    const moderators = env.ANNON_MODERATORS?.split(',') ?? file.moderators;
+    if (moderators) {
+      for (const moderator of moderators) account(moderator);
+      c.moderators = moderators;
+    }
+    const mpcKey = env.ANNON_MPC_KEY ?? file.mpcKey;
+    if (mpcKey) c.mpcKey = mpcKey;
     const relayer = o.relayer ?? env.ANNON_RELAYER ?? file.relayer;
     if (relayer) c.relayer = relayer;
     account(c.contractId);

@@ -117,3 +117,17 @@ it('sends a configured NEAR token only when explicitly pinned for the deployment
     }),
   );
 });
+
+it('offers an explicit prepaid storage helper with a positive human-selected amount', async () => {
+  const { storageDeposit } = await import('./wallet.js');
+  const call = vi.fn(async () => null);
+  await storageDeposit({ call }, 'annon.near', 10000000000000000000000n);
+  expect(call).toHaveBeenCalledWith({
+    receiverId: 'annon.near',
+    method: 'storage_deposit',
+    args: {},
+    deposit: 10000000000000000000000n,
+    gas: 30000000000000n,
+  });
+  await expect(storageDeposit({ call }, 'annon.near', 0n)).rejects.toThrow();
+});
