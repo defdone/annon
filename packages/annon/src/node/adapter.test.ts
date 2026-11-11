@@ -320,6 +320,7 @@ it.each([
           error: {
             code: 'payment_not_safe',
             message: publicError({ code: 'payment_not_safe' }).message,
+            retryAfterSeconds: 30,
           },
         });
         expect(printed.join('')).not.toContain('PRIVATE_UPSTREAM');
@@ -332,6 +333,14 @@ it.each([
         return;
       }
       const result = await adapter(input);
+      // Legacy records have no public payment summary, but retain verified purchase terms.
+      expect(result.payment).toEqual({
+        amountUsdc: '0.2',
+        amountBaseUnits: p.price,
+        asset: { symbol: 'USDC', id: p.asset },
+        network: p.network,
+        route: 'base',
+      });
       expect(wait.mock.calls).toEqual(
         refusals === 0 ? [] : code === 'in_flight' ? [[5000], [5000]] : [[10000], [20000]],
       );

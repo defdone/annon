@@ -40,7 +40,7 @@ const actions: Record<string, string> = {
     'The file or offer differs from its registered commitment. Obtain the correct file or offer.',
   bad_requirements: 'The host offer failed SDK validation. Obtain an updated Annon offer.',
   payment_not_safe:
-    'Base settlement is not safe yet. Keep the saved purchase and retry opening after finality advances.',
+    'Base safety usually takes one to three minutes. Call status again in about 30 seconds. Keep the saved purchase and never pay again.',
   settling:
     'The purchase is still settling. Keep the saved purchase and check status before opening again.',
   not_authorized:
@@ -54,6 +54,7 @@ export function publicError(error: unknown): {
   purchaseId?: string;
   txHash?: string;
   minimumAmountUsdc?: string;
+  retryAfterSeconds?: number;
 } {
   if (error instanceof BaseRpcRateLimited)
     return {
@@ -93,10 +94,21 @@ export function publicError(error: unknown): {
       exitCode: 1,
     };
   if (error instanceof AdapterError)
-    return { code: error.code, message: error.message, exitCode: error.exitCode };
+    return {
+      code: error.code,
+      message: error.message,
+      exitCode: error.exitCode,
+      ...(error.code === 'payment_not_safe' ? { retryAfterSeconds: 30 } : {}),
+    };
   if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
     const message = Object.hasOwn(actions, error.code) ? actions[error.code] : undefined;
-    if (message) return { code: error.code, message, exitCode: 1 };
+    if (message)
+      return {
+        code: error.code,
+        message,
+        exitCode: 1,
+        ...(error.code === 'payment_not_safe' ? { retryAfterSeconds: 30 } : {}),
+      };
   }
   return {
     code: 'operation_failed',

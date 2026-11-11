@@ -1,7 +1,76 @@
 import { expect, it } from 'vitest';
 import type { OneClickQuote } from '../oneclick/oneclick.js';
+import type { PurchaseRecord, SourcePayment } from '../pay/purchase.js';
 import { BASE_USDC, NEAR_USDC } from '../settle-near/terms.js';
-import { humanPaymentTerms, quotedSource, validatePaymentToken } from './payment-terms.js';
+import {
+  humanPaymentTerms,
+  quotedSource,
+  savedPayment,
+  validatePaymentToken,
+} from './payment-terms.js';
+
+const source: SourcePayment = {
+  chain: 'sol',
+  asset: 'nep141:test-token',
+  symbol: 'USDC',
+  contractAddress: 'test-token',
+  decimals: 6,
+  amount: '202064',
+  amountFormatted: '0.202064',
+  depositBefore: '2026-11-11T12:00:00Z',
+};
+const withSource = (value: unknown) =>
+  ({
+    purchase: { route: 'near-usdc' },
+    quote: {},
+    terms: { price: '200000', usdc: 'test-token', network: 'near:sandbox' },
+    payment: { source: value },
+  }) as unknown as PurchaseRecord;
+
+it.each(
+  [
+    null,
+    'invalid',
+    [],
+    { ...source, chain: 1 },
+    { ...source, chain: '' },
+    { ...source, chain: 'x'.repeat(129) },
+    { ...source, asset: {} },
+    { ...source, asset: 'x'.repeat(129) },
+    { ...source, asset: 'unsafe\ntext' },
+    { ...source, symbol: 1 },
+    { ...source, symbol: 'x'.repeat(33) },
+    { ...source, contractAddress: [] },
+    { ...source, contractAddress: 'x'.repeat(129) },
+    { ...source, amount: 1 },
+    { ...source, amount: '-1' },
+    { ...source, amount: '1.5' },
+    { ...source, amount: '01' },
+    { ...source, amount: '0' },
+    { ...source, amount: '9'.repeat(40) },
+    { ...source, amount: String(2n ** 128n) },
+    { ...source, decimals: '6' },
+    { ...source, decimals: -1 },
+    { ...source, decimals: 256 },
+    { ...source, decimals: 1.5 },
+    { ...source, decimals: NaN },
+    { ...source, amountFormatted: {} },
+    { ...source, amountFormatted: '1e6' },
+    { ...source, amountFormatted: '1'.repeat(400) },
+    { ...source, depositBefore: 1 },
+    { ...source, depositBefore: 'invalid' },
+    { ...source, depositBefore: 'x'.repeat(65) },
+  ].map((value) => ({ value })),
+)('drops malformed saved payment source $value without losing the verified price', ({ value }) => {
+  const summary = savedPayment(withSource(value));
+  expect(summary).toMatchObject({ amountUsdc: '0.2', amountBaseUnits: '200000' });
+  expect(summary).not.toHaveProperty('source');
+});
+
+it.each([0, 6, 255])('keeps valid saved source metadata with %s decimals', (decimals) => {
+  const value = { ...source, decimals, amount: String(2n ** 128n - 1n) };
+  expect(savedPayment(withSource(value)).source).toEqual(value);
+});
 
 it('shows a 0.01 USDC NEAR purchase with exact rounded shares and the remainder recipient', () => {
   const text = humanPaymentTerms({

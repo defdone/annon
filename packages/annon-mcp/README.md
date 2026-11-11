@@ -18,11 +18,11 @@ Tools use camelCase versions of CLI flags, with `target` as the positional opera
 | Tool | Required arguments | Result |
 | --- | --- | --- |
 | `annon_sell` | `target` plus `price`, `split` or `resume` | File ID, PAY2 path, public terms |
-| `annon_buy` | `target` | Purchase ID, route, encrypted backup path; 1Click deposit instructions when applicable |
-| `annon_open` | `target`, `output` | Plaintext output path and byte count |
+| `annon_buy` | `target` | Purchase ID, route, payment summary, encrypted backup path; 1Click deposit instructions when applicable |
+| `annon_open` | `target`, `output` | Plaintext output path, byte count, payment summary when saved |
 | `annon_verify` | `target` | Registered file ID, verification scope |
 | `annon_recover` | `recovery` | Purchase IDs, final grant numbers, encrypted backup paths |
-| `annon_status` | `target` | Final NEAR purchase state; pending does not mean payment failed |
+| `annon_status` | `target` | Final NEAR purchase state, payment summary when saved; pending does not mean payment failed |
 
 `annon_buy` accepts `route: "near" | "base" | "1click"`, `origin`, `recovery`, and `url`.
 `origin` names an entry in human config `origins` or JSON `ANNON_ORIGINS`; its `fromChain`,
@@ -30,8 +30,10 @@ Tools use camelCase versions of CLI flags, with `target` as the positional opera
 or the matching wallet address. Tools cannot choose arbitrary source assets or redirect refunds.
 For an offer file, `url` must match both the offer and human config `allowedResources`
 (or comma-separated `ANNON_ALLOWED_RESOURCES`). Two agent-controlled matching strings establish
-consistency only; the allowlist supplies independent authorization. A direct HTTPS target is itself
+consistency only; the allowlist supplies independent authorization. A direct URL target is itself
 the selected resource and must match its advertised offer.
+URLs accept HTTPS, and plain HTTP only for `localhost`, `127.0.0.1` or `[::1]`,
+for example `http://localhost:8790/file`. The same rule applies to `annon_verify`.
 `annon_sell` resumes with `{ target: "original.pdf", resume: "0xFILE_ID", output: "new.pay2" }`;
 price/split are required for new listings and forbidden during resume. Failed saved sells include
 `error.fileId`. Published jobs and current backups retain public metadata, clearing file/CKD/one-time
@@ -46,3 +48,16 @@ Every tool returns `structuredContent: { ok: true, result: ... }` and matching t
 Errors set `isError: true` and return `{ ok: false, error: { code, message } }`.
 Outputs omit keys, signed authorizations and plaintext. 1Click instructions must be funded
 externally; check `annon_status` before opening. Existing output files are never overwritten.
+
+Waiting: after `submitted`, poll `annon_status` (or `annon status`) about every 30 seconds
+until `accepted`, then open. `payment_not_safe` and `pending` mean wait, not failure;
+never pay again. For 1Click, fund the deposit first. Resumable pending status and
+`payment_not_safe` include `retryAfterSeconds: 30`; setup needing human action has no retry hint.
+
+`payment` reports `amountUsdc` (decimal USDC), `amountBaseUnits`, `asset` (`symbol`, `id`),
+`network` and `route` (`near`, `base` or `1click`) from verified purchase terms. For 1Click,
+`payment.source` retains the reviewed source asset and amount. Status/open include this
+summary when the saved purchase and backup secret are available; older records can lack
+source details. Payment summaries contain no deposit address or signed authorization.
+Payment reporting is best-effort: unreadable records or secrets omit `payment` without blocking accepted status or recovery open.
+Top-level `route` is the contract route (`near-usdc`/`base-usdc`); `payment.route` is how the buyer paid (`near`/`base`/`1click`).

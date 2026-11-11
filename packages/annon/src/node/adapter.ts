@@ -9,12 +9,13 @@ import { getConfig, getFile, getPurchase, txOutcome } from '../near/rpc.js';
 import { OneClick, type Origin } from '../oneclick/oneclick.js';
 import {
   type EncryptedRecord,
+  encryptedPurchaseStore,
   encryptedRecoveryStore,
   importPurchase,
   importRecovery,
   type RecoveryRecord,
 } from '../pay/backup.js';
-import { type PurchaseRecord, purchaseKey } from '../pay/purchase.js';
+import { type PaymentSummary, type PurchaseRecord, purchaseKey } from '../pay/purchase.js';
 import { fileStore } from '../pay/store-node.js';
 import { discover, type PaymentRequired, readPaymentRequired } from '../pay/x402.js';
 import { bytes, hex } from '../settle-near/codec.js';
@@ -33,6 +34,7 @@ import {
   quotedSource,
   type SourceAsset,
   type SourcePayment,
+  savedPayment,
   validatePaymentToken,
 } from './payment-terms.js';
 import { assertSignerInput, configuredWallet } from './signer-wallet.js';
@@ -322,6 +324,28 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         },
       };
     };
+    const paymentDetails = async (
+      load: () => Promise<PurchaseRecord | null | undefined>,
+    ): Promise<{ payment?: PaymentSummary }> => {
+      try {
+        const record = await load();
+        if (
+          !record ||
+          record.purchase.contract !== c.contractId ||
+          record.terms.contractId !== c.contractId
+        )
+          return {};
+        return { payment: savedPayment(record) };
+      } catch {
+        // Optional reporting must not block an accepted purchase or a successful open.
+        return {};
+      }
+    };
+    const pendingSetup = (purchaseId: string) => ({
+      purchaseId,
+      state: 'pending',
+      next: 'Check the payment; configure readable saved state and the matching backup secret to resume Base unlock. 1Click SUCCESS alone is not acceptance.',
+    });
     if (o.command === 'verify') {
       if (!o.target) throw usage();
       const remote = /^https?:/.test(o.target);
@@ -354,19 +378,28 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           route: p.route,
           grants: p.grants,
           next: 'open',
+          ...(await paymentDetails(async () =>
+            encryptedPurchaseStore(
+              fileStore<EncryptedRecord>(join(c.stateDir, 'records')),
+              await readBackupSecret(o, env),
+            ).load(purchaseKey(o.target as string)),
+          )),
         };
       if (!o.backupSecretFile && !env.ANNON_BACKUP_SECRET_FILE && !env.ANNON_BACKUP_SECRET)
-        return {
-          purchaseId: o.target,
-          state: 'pending',
-          next: 'Check the payment; configure the saved state and backup secret to resume Base unlock. 1Click SUCCESS alone is not acceptance.',
-        };
+        return pendingSetup(o.target);
     }
-    const secret = await readBackupSecret(o, env);
+    let secret: Uint8Array;
+    try {
+      secret = await readBackupSecret(o, env);
+    } catch (error) {
+      if (o.command === 'status' && o.target) return pendingSetup(o.target);
+      throw error;
+    }
     const storeDir = join(c.stateDir, 'records');
     const resourceDir = join(c.stateDir, 'resources');
-    for (const dir of [storeDir, resourceDir, join(c.stateDir, 'backups')])
-      await mkdir(dir, { recursive: true, mode: 0o700 });
+    if (o.command !== 'status')
+      for (const dir of [storeDir, resourceDir, join(c.stateDir, 'backups')])
+        await mkdir(dir, { recursive: true, mode: 0o700 });
     const rawStore = fileStore<EncryptedRecord>(storeDir);
     const resources = fileStore<Resource>(resourceDir);
     let selected: LocalWallet | undefined;
@@ -487,12 +520,20 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     });
     if (o.command === 'status') {
       if (!o.target) throw usage();
-      const record = await sdk.store.load(purchaseKey(o.target));
+      let record: PurchaseRecord | null;
+      try {
+        record = await sdk.store.load(purchaseKey(o.target));
+      } catch {
+        return pendingSetup(o.target);
+      }
+      if (!record) return pendingSetup(o.target);
       if (o.wallet || env.ANNON_WALLET) await wallet();
       const accepted = await sdk.accept(record ?? undefined, o.target);
       return {
         purchaseId: o.target,
         state: accepted ? 'accepted' : 'pending',
+        ...(await paymentDetails(async () => record)),
+        ...(accepted ? {} : { retryAfterSeconds: 30 }),
         next: accepted
           ? 'open'
           : 'Check the payment and retry status. 1Click SUCCESS alone is not acceptance.',
@@ -684,6 +725,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           },
         );
       }
+      let completed = false;
       try {
         let source: SourcePayment | undefined;
         const bought = await sdk.buy({
@@ -716,11 +758,21 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
               );
           },
         });
+        completed = true;
+        let payment: ReturnType<typeof savedPayment> | undefined;
+        try {
+          payment = savedPayment(bought.record, source);
+          const next = { ...bought.record, revision: bought.record.revision + 1, payment };
+          await sdk.store.compareAndSet(purchaseKey(next.id), bought.record, next);
+        } catch {
+          // The purchase already completed. Its public summary is optional metadata.
+        }
         // Raw purchase records and signed payment payloads never cross the adapter boundary.
         return {
           purchaseId: bought.record.id,
           fileId: found.fileId,
           route: bought.route,
+          ...(payment ? { payment } : {}),
           state: bought.uncertain
             ? 'uncertain'
             : bought.instructions
@@ -733,8 +785,8 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           next: 'Fund the deposit if instructed, then check status and open this purchase.',
         };
       } catch (error) {
-        // A 1Click failure before this return has not handed out a deposit address.
-        if (origin) await refundBudget?.().catch(() => {});
+        // Only failures before the SDK returns can release a 1Click reservation.
+        if (origin && !completed) await refundBudget?.().catch(() => {});
         throw error;
       }
     }
@@ -855,6 +907,9 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       purchaseId: recovery?.purchase_id ?? record?.id,
       output: o.output,
       bytes: opened.data.length,
+      ...(await paymentDetails(
+        async () => record ?? (recovery ? sdk.store.load(purchaseKey(recovery.purchase_id)) : null),
+      )),
     };
   };
 }
