@@ -505,6 +505,21 @@ export interface RelayResult {
   reason?: string;
 }
 
+/** Read an already admitted operation without charging admission limits or sending anything. */
+export function relayStatus(input: unknown, o: CheckOptions): RelayResult | 'pending' | null {
+  try {
+    const assets = { baseUsdc: o.usdc, ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}) };
+    const r = canonicalRequest(input, assets);
+    const operation = `${o.nearRpc}|${o.contractId}|${identity(r, o.contractId)}`;
+    // Cheap miss first: this runs before the IP limiter, so unknown requests never reach a signature check.
+    if ((held.get(operation) ?? 0) <= Date.now()) return null;
+    signedByItsWallet(r, o.contractId, assets);
+    return submitted.get(operation) ?? 'pending';
+  } catch (e) {
+    return asRelayError(e);
+  }
+}
+
 /**
  * Checks the request and sends it with the sender's key, no deposit (storage comes from the
  * sender's prepaid balance on the contract). The checks run again right before signing, one

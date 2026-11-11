@@ -17,6 +17,7 @@ import {
   RelayError,
   type RelayErrorCode,
   relay,
+  relayStatus,
   type Sender,
 } from '../../packages/annon/src/relay/relay.ts';
 import { identityJson, parseIdentity } from '../../packages/annon/src/settle-near/identity.ts';
@@ -25,7 +26,7 @@ export interface Config extends Omit<CheckOptions, 'now'> {
   sender: Sender;
   /** Kill switch: answer 503 and send nothing. */
   disabled: boolean;
-  /** Requests per IP per hour, and transactions per day for everyone. */
+  /** New admission attempts per IP per hour, and transactions per day for everyone. */
   perIpHour: number;
   perDay: number;
   /** The header a trusted proxy puts the client's IP in; without one, the connection's address. */
@@ -83,6 +84,7 @@ export async function handle(
   ip: string,
   body: string,
   send: typeof relay = relay,
+  lookup: typeof relayStatus = relayStatus,
 ): Promise<{ status: number; body: unknown }> {
   if (method === 'GET' && path === '/v1/capabilities') {
     return {
@@ -103,6 +105,29 @@ export async function handle(
     return { status: 404, body: { error: 'not_found' } };
   if (c.disabled)
     return { status: 503, body: { error: 'disabled', message: 'relaying is paused' } };
+  let req: unknown;
+  let validJson = true;
+  try {
+    req = JSON.parse(body);
+  } catch {
+    validJson = false;
+  }
+  // An admitted operation may be polled even when new admissions have spent the budgets.
+  // Invalid requests still go through the IP limiter and the normal relay validation.
+  if (validJson) {
+    try {
+      const admitted = lookup(req, c);
+      if (admitted === 'pending')
+        return { status: 202, body: { pending: true, retryAfterMs: 5000 } };
+      if (admitted)
+        return {
+          status: admitted.uncertain ? 202 : 200,
+          body: { ...admitted, signer: c.sender.accountId },
+        };
+    } catch (e) {
+      if (!(e instanceof RelayError)) throw e;
+    }
+  }
   const now = Date.now();
   if (!allow(`ip:${ip}`, c.perIpHour, 3_600_000, now)) {
     return {
@@ -110,12 +135,8 @@ export async function handle(
       body: { error: 'rate_limited', message: 'too many requests from this address' },
     };
   }
-  let req: unknown;
-  try {
-    req = JSON.parse(body);
-  } catch {
+  if (!validJson)
     return { status: 400, body: { error: 'bad_request', message: 'the body is not JSON' } };
-  }
   // The day's budget is reserved before sending, so concurrent requests can't overrun it, and
   // given back when `relay` throws: it throws only before anything is sent.
   const day = allow('day', c.perDay, 86_400_000, now);

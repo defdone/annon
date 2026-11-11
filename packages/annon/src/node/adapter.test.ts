@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { privateKeyToAccount } from 'viem/accounts';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { purchase as initial, terms as initialTerms, must } from '../../test/fixtures.js';
 import { Annon } from '../api/annon.js';
 import { serveFile } from '../download/host.js';
@@ -18,7 +18,7 @@ import { fileStore } from '../pay/store-node.js';
 import { bytes, hex } from '../settle-near/codec.js';
 import { baseNonceV2, buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import { termsHash } from '../settle-near/terms.js';
-import { createAdapter } from './adapter.js';
+import { createAdapter, retryAfterMs } from './adapter.js';
 
 // Base finality/log discovery has its own real-RPC-fixture tests. Here it supplies a paid
 // result so the real SDK accept(), adapter and grant-enforcing host meet at their boundary.
@@ -213,3 +213,17 @@ it.each(['open', 'status'] as const)(
     }
   },
 );
+
+describe('retryAfterMs', () => {
+  it('reads seconds and dates, defaults to 5 s and refuses waits over a minute', () => {
+    const now = Date.parse('2026-11-11T12:00:00Z');
+    expect(retryAfterMs(null, now)).toBe(5000);
+    expect(retryAfterMs('soon', now)).toBe(5000);
+    expect(retryAfterMs('7', now)).toBe(7000);
+    expect(retryAfterMs('60', now)).toBe(60_000);
+    expect(retryAfterMs('61', now)).toBeNull();
+    expect(retryAfterMs('Wed, 11 Nov 2026 12:00:30 GMT', now)).toBe(30_000);
+    expect(retryAfterMs('Wed, 11 Nov 2026 11:59:00 GMT', now)).toBe(0);
+    expect(retryAfterMs('Wed, 11 Nov 2026 13:00:00 GMT', now)).toBeNull();
+  });
+});
