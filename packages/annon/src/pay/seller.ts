@@ -12,7 +12,7 @@ import {
   parsePurchaseMessage,
   purchaseId,
 } from '../settle-near/purchase.js';
-import { fail, head } from './base.js';
+import { fail, hasCode, head } from './base.js';
 import { digest, signer } from './eip3009.js';
 import { MAX_CLOCK_SKEW_SECONDS, MAX_VALIDITY_SECONDS } from './pay.js';
 import {
@@ -307,12 +307,16 @@ export async function verifyPayment(
   // Time first, registration second: "now" must not be later than the moment the file was seen on
   // sale, or a slow read would stretch the window.
   const local = Math.floor(Date.now() / 1000);
-  const base = (await head(o.baseRpc)).timestamp;
+  const block = await head(o.baseRpc);
+  const base = block.timestamp;
   if (Math.abs(base - local) > MAX_CLOCK_SKEW_SECONDS) {
     fail('transport', 'this server and Base disagree on the time; refusing to settle');
   }
   const pr = await offerFor(o);
-  return checkPayment(header, pr, Math.min(base, local));
+  const checked = checkPayment(header, pr, Math.min(base, local));
+  if (await hasCode(o.baseRpc, checked.payer, block.number))
+    fail('bad_signature', 'payer must be an EOA');
+  return checked;
 }
 
 /** The base64 JSON of `PAYMENT-SIGNATURE`, as an x402 v2 payload. */

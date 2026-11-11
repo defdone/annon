@@ -22,7 +22,7 @@ import { identityJson } from '../settle-near/identity.js';
 import type { NearWallet } from '../wallet/wallet.js';
 import type { Input } from './cli.js';
 import { type Config, loadConfig, type TrustPrompt, trustContract } from './config.js';
-import { AdapterError, usage } from './errors.js';
+import { AdapterError, publicError, usage } from './errors.js';
 import { newOutput, writeBackup } from './io.js';
 import {
   type Environment,
@@ -35,7 +35,7 @@ import {
 export interface Dependencies {
   sdk?: (
     options: AnnonOptions,
-  ) => Pick<Annon, 'sell' | 'buy' | 'open' | 'recover' | 'stop' | 'store'>;
+  ) => Pick<Annon, 'sell' | 'buy' | 'open' | 'recover' | 'stop' | 'store' | 'accept'>;
   wallet?: typeof loadWallet;
   file?: typeof getFile;
   purchase?: typeof getPurchase;
@@ -63,8 +63,8 @@ interface Resource {
   url?: string;
 }
 const backupPath = (c: Config, id: string) => {
-  if (!/^(recovery:)?0x[0-9a-f]{64}$/.test(id)) throw usage();
-  return join(c.stateDir, 'backups', `${id.replace(':', '-')}.json`);
+  if (!/^(recovery:|sell:|seller-key:)?0x[0-9a-f]{64}(:revision:[0-9]+)?$/.test(id)) throw usage();
+  return join(c.stateDir, 'backups', `${id.replaceAll(':', '-')}.json`);
 };
 const requestOptions = { redirect: 'error', credentials: 'omit', cache: 'no-store' } as const;
 async function response(url: string, fetcher: typeof fetch, headers?: Record<string, string>) {
@@ -103,7 +103,13 @@ async function headerAt(
   if (length > MAX_HEADER || length > b.length) throw new Error('bad header length');
   return new Uint8Array(b.subarray(0, length));
 }
-async function offer(target: string, c: Config, fetcher: typeof fetch, provided?: PaymentRequired) {
+async function offer(
+  target: string,
+  c: Config,
+  fetcher: typeof fetch,
+  provided?: PaymentRequired,
+  expectedUrl?: string,
+) {
   let pr: PaymentRequired;
   if (provided) pr = provided;
   else if (/^https?:/.test(target)) {
@@ -120,7 +126,10 @@ async function offer(target: string, c: Config, fetcher: typeof fetch, provided?
   }
   const found = discover(pr, [c.contractId]);
   const url = (pr.resource as { url?: unknown } | undefined)?.url;
-  if (typeof url !== 'string' || (/^https?:/.test(target) && !sameResource(url, target)))
+  if (
+    typeof url !== 'string' ||
+    !sameResource(url, /^https?:/.test(target) ? target : (expectedUrl ?? ''))
+  )
     throw new Error('resource mismatch');
   secureUrl(url);
   const header = pr.extensions?.annon?.info.header;
@@ -204,7 +213,11 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
   const wait = d.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   return async (o: Input): Promise<Record<string, unknown>> => {
     const c = await loadConfig(o, env);
-    await trustContract(c, o.trustContract === true, o.json ? undefined : d.prompt);
+    await trustContract(
+      c,
+      o.trustContract === true || c.trustContract === true,
+      o.json ? undefined : d.prompt,
+    );
     const readListing = async (fileId: string) => {
       const f = await (d.file ?? getFile)(c.nearRpc, c.contractId, fileId);
       if (!f) return fail('unknown_file', 'No registered file exists at this contract.');
@@ -221,18 +234,6 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
         },
       };
     };
-    if (o.command === 'status') {
-      if (!o.target || !isId(o.target)) throw usage();
-      const p = await (d.purchase ?? getPurchase)(c.nearRpc, c.contractId, o.target);
-      return {
-        purchaseId: o.target,
-        state: p ? 'accepted' : 'pending',
-        ...(p ? { fileId: p.file_id, route: p.route, grants: p.grants } : {}),
-        next: p
-          ? 'open'
-          : 'Check the deposit/payment; retry status. 1Click SUCCESS alone is not acceptance.',
-      };
-    }
     if (o.command === 'verify') {
       if (!o.target) throw usage();
       const remote = /^https?:/.test(o.target);
@@ -254,6 +255,25 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
         contractId: c.contractId,
       };
     }
+    if (o.command === 'status') {
+      if (!o.target || !isId(o.target)) throw usage();
+      const p = await (d.purchase ?? getPurchase)(c.nearRpc, c.contractId, o.target);
+      if (p)
+        return {
+          purchaseId: o.target,
+          state: 'accepted',
+          fileId: p.file_id,
+          route: p.route,
+          grants: p.grants,
+          next: 'open',
+        };
+      if (!o.backupSecretFile && !env.ANNON_BACKUP_SECRET_FILE && !env.ANNON_BACKUP_SECRET)
+        return {
+          purchaseId: o.target,
+          state: 'pending',
+          next: 'Check the payment; configure the saved state and backup secret to resume Base unlock. 1Click SUCCESS alone is not acceptance.',
+        };
+    }
     const secret = await readBackupSecret(o, env);
     const storeDir = join(c.stateDir, 'records');
     const resourceDir = join(c.stateDir, 'resources');
@@ -269,6 +289,7 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
     const send: NonNullable<AnnonOptions['send']> = async (method, args, owner) => {
       const signer =
         owner ?? (selected?.identity.kind === 'near' ? (selected as NearWallet) : undefined);
+      let submitted: { txHash: string; signer: string } | undefined;
       const call = async () => {
         if (signer) return signer.call({ receiverId: c.contractId, method, args });
         if (!c.relayer)
@@ -277,21 +298,29 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
             'Configure a relayer URL or select a NEAR wallet for transaction calls.',
             2,
           );
-        const r = await fetcher(new URL('/v1/relay', secureUrl(c.relayer)), {
-          ...requestOptions,
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ method, ...args }),
-          signal: AbortSignal.timeout(60000),
-        });
-        if (![200, 202].includes(r.status)) throw new Error('relayer refused');
-        const tx = (await r.json()) as { txHash: string; signer: string };
+        if (!submitted) {
+          const r = await fetcher(new URL('/v1/relay', secureUrl(c.relayer)), {
+            ...requestOptions,
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(method === 'claim_key' ? { method, args } : { method, ...args }),
+            signal: AbortSignal.timeout(60000),
+          });
+          if (![200, 202].includes(r.status)) throw new Error('relayer refused');
+          submitted = (await r.json()) as { txHash: string; signer: string };
+        }
+        const tx = submitted;
         const result = await txOutcome(c.nearRpc, tx.txHash, tx.signer, c.contractId, 'FINAL', {
           method,
           args,
         });
         if (result.state === 'released') return result.answer;
         if (result.state === 'done') return result.value;
+        if ('reason' in result && /prepaid|storage balance|storage[_ ]deposit/i.test(result.reason))
+          throw new AdapterError(
+            'storage_required',
+            'Prepay Annon storage with the SDK storageDeposit helper, then resume the saved operation.',
+          );
         throw new Error(`transaction ${result.state}`);
       };
       // Only repeat idempotent release requests. Registration and payment are never blindly retried.
@@ -317,6 +346,19 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
       send,
       writeBackup: (id, encrypted) => writeBackup(backupPath(c, id), encrypted),
     });
+    if (o.command === 'status') {
+      if (!o.target) throw usage();
+      const record = await sdk.store.load(purchaseKey(o.target));
+      if (o.wallet || env.ANNON_WALLET) await wallet();
+      const accepted = await sdk.accept(record ?? undefined, o.target);
+      return {
+        purchaseId: o.target,
+        state: accepted ? 'accepted' : 'pending',
+        next: accepted
+          ? 'open'
+          : 'Check the payment and retry status. 1Click SUCCESS alone is not acceptance.',
+      };
+    }
     if (o.command === 'sell') {
       if (!o.target || !o.price || !o.split) throw usage();
       const seller = await wallet();
@@ -367,8 +409,18 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
     }
     if (o.command === 'buy') {
       if (!o.target) throw usage();
+      const cap = o.maxPrice ?? c.maxPrice;
+      if (!cap)
+        return fail(
+          'max_price_required',
+          'Set --max-price, ANNON_MAX_PRICE or maxPrice in human configuration before buying.',
+          2,
+        );
+      const maxPrice = BigInt(amount(cap));
+      if (c.maxPrice && maxPrice > BigInt(amount(c.maxPrice)))
+        return fail('price_above_max', 'The requested cap exceeds the configured maximum.', 2);
       const buyer = await wallet();
-      const found = await offer(o.target, c, fetcher);
+      const found = await offer(o.target, c, fetcher, undefined, o.url);
       const { f, listing } = await readListing(found.fileId);
       await inspectHeader(found.header, listing, c.contractId);
       const route =
@@ -406,14 +458,8 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
         recovery: buyer,
         refund: buyer.identity,
         ...(route === '1click' ? {} : { payer: buyer }),
-        maxPrice: BigInt(
-          o.maxPrice
-            ? amount(o.maxPrice)
-            : route === 'base'
-              ? (f.terms.base?.price ?? f.terms.near.price)
-              : f.terms.near.price,
-        ),
-        moderators: o.moderator ? [o.moderator] : [],
+        maxPrice,
+        moderators: o.moderator ? [o.moderator] : (c.moderators ?? []),
         paymentRequired: found.pr,
         url: found.url,
         ...(origin ? { origin, oneClick: new OneClick({ fetch: fetcher }) } : {}),
@@ -437,11 +483,17 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
     }
     if (o.command === 'recover') {
       if (!o.recovery || (o.purchase && !isId(o.purchase))) throw usage();
+      const errors: { purchaseId: string; code: string; message: string }[] = [];
       const recovered = await sdk.recover({
+        onError: (purchaseId, error) => {
+          const { code, message } = publicError(error);
+          errors.push({ purchaseId, code, message });
+        },
         wallet: await wallet(),
         ...(o.purchase ? { purchaseId: o.purchase } : {}),
       });
       return {
+        errors,
         recovered: recovered.map((r) => ({
           purchaseId: r.purchase_id,
           fileId: r.file_id,
@@ -486,6 +538,9 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
       throw new Error('backup contract mismatch');
     const fileId = recovery?.file_id ?? record?.purchase.file_id;
     if (!fileId) throw usage();
+    if (o.wallet || env.ANNON_WALLET) await wallet();
+    if (!(await sdk.accept(record, recovery?.purchase_id ?? record?.id)))
+      throw new Error('purchase is not accepted; check status and resume');
     const resource = await resources.load(fileId);
     let file: Uint8Array;
     const local = o.file ?? (o.purchase ? o.target : undefined);

@@ -65,12 +65,21 @@ export async function listDeliveries(
   contract: string,
   from = 0,
   limit = 50,
+  onError?: (error: unknown) => void,
 ): Promise<DeliveryInfo[]> {
   integer(from);
   integer(limit, 50);
   const ds = await view(url, contract, 'list_deliveries', { from, limit });
   if (!Array.isArray(ds) || ds.length > limit) throw new TypeError('invalid deliveries');
-  return ds.map(delivery);
+  return ds.flatMap((d) => {
+    try {
+      return [delivery(d)];
+    } catch (error) {
+      if (!onError) throw error;
+      onError(error);
+      return [];
+    }
+  });
 }
 /** How many delivery ids exist; some have no record yet (refund leaves), so scan them all. */
 export async function deliveryCount(url: string, contract: string): Promise<number> {

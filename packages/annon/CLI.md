@@ -16,14 +16,15 @@ Create a public configuration file and name it with `--config /path/config.json`
   "nearRpc": "https://rpc.mainnet.fastnear.com",
   "baseRpc": "https://mainnet.base.org",
   "stateDir": "/absolute/private/annon-state",
-  "relayer": "https://your-reviewed-relayer.example"
+  "relayer": "https://your-reviewed-relayer.example",
+  "maxPrice": "0.2"
 }
 ```
 
-No deployment is implicitly trusted. The first interactive command asks whether you trust
+Contract ID and both RPC URLs must be supplied by human configuration or CLI flags; there are no implicit RPC endpoints. No deployment is implicitly trusted. The first interactive command asks whether you trust
 the configured contract to release file keys. `--trust-contract` records explicit trust
 without a prompt. Trust is keyed by network, NEAR RPC and contract; changing any requires
-new trust. An offer cannot select a different contract. MCP shares the trust store.
+new trust. An offer cannot select a different contract. MCP shares the trust store. For a server, human configuration may set `trustContract: true` or `ANNON_TRUST_CONTRACT=true`; tool calls cannot grant trust.
 
 Flags override environment variables, which override config. Config fields have matching
 `ANNON_CONTRACT_ID`, `ANNON_NETWORK`, `ANNON_NEAR_RPC`, `ANNON_BASE_RPC`,
@@ -31,7 +32,7 @@ Flags override environment variables, which override config. Config fields have 
 only on localhost. Endpoint URLs cannot contain credentials or query parameters.
 The relayer is optional when a NEAR wallet submits transactions. Direct register/reopen
 calls use the caller's prepaid contract storage balance; fund it using the deployment's
-storage interface before selling or recovering.
+storage interface before selling or recovering. The SDK exports `storageDeposit(wallet, contractId, amountYocto)`; choose the amount explicitly. Insufficient storage is reported as `storage_required`.
 
 ## Keys and saved purchases
 
@@ -55,7 +56,7 @@ Sell, buy, open, recover and stop also require a user-held random 32-byte backup
 encoded as 64 lowercase hex characters in `ANNON_BACKUP_SECRET`, or in the file named by
 `--backup-secret-file` / `ANNON_BACKUP_SECRET_FILE`. Create it with a cryptographic random
 generator and keep it outside the repository. It is never derived from a wallet signature.
-Read-only verify/status need neither a wallet nor this secret.
+`verify` and accepted/read-only `status` need neither a wallet nor this secret. A pending Base `status` with saved state and a backup secret may send `unlock` through the configured relayer or NEAR wallet.
 
 State directories are created with mode 0700 and records/outputs with 0600. Keep existing
 state directories private. Purchases and recovery grants are encrypted by the SDK; portable
@@ -75,7 +76,7 @@ totaling 10000. The first split recipient gets the rounding remainder.
 annon sell report.pdf --price 0.2 --split near:alice.near:10000 --wallet near --output report.pay2
 annon sell report.pdf --price 0.2 --split evm:0x1111111111111111111111111111111111111111:10000 --wallet evm --base
 annon buy https://host.example/report --route near --wallet near
-annon buy offer.json --route base --wallet evm --max-price 0.2
+annon buy offer.json --url https://host.example/report --route base --wallet evm --max-price 0.2
 annon buy https://host.example/report --route 1click --wallet solana --from-chain solana
 annon status 0xPURCHASE_ID --json
 annon open 0xPURCHASE_ID --output report.pdf
@@ -89,8 +90,8 @@ annon stop 0xFILE_ID --wallet near
 
 IDs in these commands are placeholders for full `0x` plus 64 lowercase hex digits.
 `sell` creates a PAY2 file; arrange hosting separately. `buy` accepts the HTTPS resource URL
-or a named file containing decoded x402 `PAYMENT-REQUIRED` JSON. It checks the public header
-and registered terms before the SDK authorizes payment. The default route is direct NEAR for
+or a named file containing decoded x402 `PAYMENT-REQUIRED` JSON. An offer file requires `--url` with the independently selected resource URL; it must match the offer. It checks the public header
+and registered terms before the SDK authorizes payment. Every buy requires `--max-price`, `ANNON_MAX_PRICE` or config `maxPrice` (decimal USDC); the offer never supplies the cap. A configured cap also bounds an explicit flag. The default route is direct NEAR for
 a NEAR wallet, 1Click when `--from-chain` is given, otherwise Base for an EVM wallet.
 Explicit Base fails if that route or a funded EOA is unavailable; it never silently chooses
 another payment route. Each invocation of buy creates a purchase: after an uncertain reply,
@@ -104,7 +105,7 @@ chain; it defaults to the selected wallet's address only when the chain family m
 These also have `ANNON_FROM_CHAIN`, `ANNON_FROM_ASSET`, `ANNON_REFUND_TO` equivalents.
 The result includes `instructions.address`, `amount` in source token base units, `asset`,
 `chain`, optional `memo`, and `qrData`. Fund these externally with the wallet you already use.
-Never omit a required memo. `status` checks final NEAR acceptance; 1Click SUCCESS alone
+Never omit a required memo. `status` resumes a saved paid Base purchase by requesting unlock, then checks final NEAR acceptance; 1Click SUCCESS alone
 does not grant access.
 
 The signing wallet is also the recovery identity. `--recovery kind:id` on buy explicitly
@@ -119,7 +120,7 @@ and authenticated decryption. New-device recovery may require `--url` or a local
 Existing output files are never overwritten. `verify` checks a local file's header and body;
 a URL checks only its public header. Verification does not prove future host availability.
 
-Opening a Base purchase resends its saved signed payload with the download when present;
+Opening a Base purchase requests unlock before the grant-proved download. It also resends its saved signed payload with the download when present;
 it does not create a fresh payment authorization after a lost reply.
 
 Key release timeout retries are bounded to three attempts with backoff, using the same
@@ -133,3 +134,21 @@ blindly retried. Raw upstream errors are intentionally suppressed to avoid leaki
 | 2 | Invalid arguments, configuration, wallet source or missing local input |
 | 3 | First-use contract trust required or declined |
 | 4 | `status` reports pending; acceptance has not been observed (not proof of payment failure) |
+
+## SDK seller resume and CKD configuration
+
+`sell` saves an encrypted sell job and portable backup before registration. Retain the original
+plaintext and its file ID; `sdk.resumeSell({ fileId, data, seller, publish })` reconstructs the
+same ciphertext, checks the registered commitment, and completes header publication/hosting.
+It uses `reopenSeller` if registration landed without a usable CKD response, and retains the
+CKD secret in the encrypted job for publication retries. `sdk.reopenSeller({ fileId, seller })`
+also works on a fresh device and backs up its new one-time key before the call. These are SDK
+methods; the CLI does not expose seller resume yet. Base split creation occurs before the
+saved registration job, so a failed split deployment still needs separate reconciliation.
+
+The SDK reads `get_config.mpc` and `ckd_domain`, then that account's `public_key` at finality.
+An optional human `mpcKey` / `ANNON_MPC_KEY` pins the observed value and fails closed on a
+mismatch. The low-level `openAnswer` requires this key explicitly; it has no mainnet default.
+Recovery isolates failures per purchase in batch mode and returns safe `errors` in CLI/MCP.
+An expired pending reopen without a final grant gets a new backed-up key, nonce and deadline;
+the preceding revision remains in an encrypted revision backup.

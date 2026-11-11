@@ -87,6 +87,10 @@ describe('keep', () => {
       ['pay_slot', { delivery_id: 3, slot: 0 }],
     ]);
     expect(r.sent.every((s) => s.result.txHash)).toBe(true);
+    expect(created.mock.calls.map(([tx]) => tx.actions[0].functionCall.gas)).toEqual([
+      150000000000000n,
+      80000000000000n,
+    ]);
   });
 
   it('does not send the same call again while it is held', async () => {
@@ -110,5 +114,49 @@ describe('keep', () => {
     near([...all.filter((d) => d.id !== 5), delivery(5, 0, [0])]);
     await keep(o);
     expect(calls()).toEqual([['fund_delivery', { delivery_id: 5 }]]);
+  });
+  it('isolates a malformed delivery and a signing failure, then backs off repeated pending slots', async () => {
+    near([{ ...delivery(0, 0, [0]), amount: 'bad' }, delivery(1, 0, [0]), delivery(2, 2, [0])]);
+    created.mockRejectedValueOnce(new Error('unavailable'));
+    const first = await keep(o);
+    expect(first.sent).toHaveLength(1);
+    expect(first.errors).toHaveLength(2);
+    const time = Date.now();
+    vi.setSystemTime(time + 60001);
+    await keep(o);
+    const n = created.mock.calls.length;
+    vi.setSystemTime(time + 120002);
+    await keep(o);
+    expect(created).toHaveBeenCalledTimes(n);
+    vi.useRealTimers();
+  });
+
+  it('bounds each scan and revisits old ids across passes', async () => {
+    near([delivery(0, 0, [0]), delivery(100, 0, [0])]);
+    await keep({ ...o, maxPages: 1 });
+    expect(calls()).toEqual([['fund_delivery', { delivery_id: 0 }]]);
+    await keep({ ...o, maxPages: 1 });
+    expect(calls()).toHaveLength(1);
+    await keep({ ...o, maxPages: 1 });
+    expect(calls()[1]).toEqual(['fund_delivery', { delivery_id: 100 }]);
+  });
+  it('continues with the next page when one view fails', async () => {
+    near([delivery(100, 0, [0])]);
+    const original = globalThis.fetch;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, init) => {
+        const q = JSON.parse(String(init?.body));
+        if (
+          q.params?.method_name === 'list_deliveries' &&
+          JSON.parse(Buffer.from(q.params.args_base64, 'base64').toString()).from === 0
+        )
+          throw new Error('failed page');
+        return original(url, init);
+      }),
+    );
+    const result = await keep(o);
+    expect(result.errors).toHaveLength(1);
+    expect(result.sent).toHaveLength(1);
   });
 });

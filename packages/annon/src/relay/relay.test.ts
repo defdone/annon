@@ -112,7 +112,8 @@ describe('relay purchase arguments and authorization', () => {
     expect(must(created.mock.calls[0])[0].actions[0].functionCall.methodName).toBe('register');
     const sent = must(created.mock.calls[0])[0].actions[0].functionCall.args;
     expect(JSON.parse(new TextDecoder().decode(sent))).toEqual(contractArgs(r));
-    await expect(relay(r, o)).rejects.toMatchObject({ code: 'duplicate' });
+    expect(await relay(r, o)).toEqual(result);
+    expect(created).toHaveBeenCalledTimes(1);
   });
   it('uses flat claim_key/unlock args and validates grants', () => {
     const r = canonicalRequest({

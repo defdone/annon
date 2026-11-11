@@ -96,7 +96,9 @@ async function harness() {
     if (String(url).endsWith('/header')) return new Response(header);
     if (String(url).endsWith('/quote'))
       return Response.json({
+        quoteRequest: JSON.parse(String(init?.body)),
         quote: {
+          deadline: JSON.parse(String(init?.body)).deadline,
           amountIn: '210000',
           amountOut: '200000',
           depositAddress: 'deposit-address',
@@ -108,6 +110,7 @@ async function harness() {
     throw new Error('Unexpected network access');
   });
   const env = {
+    ANNON_MAX_PRICE: '0.2',
     ANNON_BACKUP_SECRET: 'ab'.repeat(32),
     ANNON_EVM_PRIVATE_KEY: `0x${'42'.repeat(32)}`,
   };
@@ -189,6 +192,7 @@ async function harness() {
         await args.submitBase?.('SIGNED_PAYMENT_PAYLOAD');
         return { route: p.route, record, payment: 'SIGNED_PAYMENT_PAYLOAD' };
       });
+      vi.spyOn(sdk, 'accept').mockResolvedValue(true);
       vi.spyOn(sdk, 'open').mockImplementation(async (args) => {
         calls.push({ command: 'open', args });
         return { meta: { name: 'file.txt', mime: 'text/plain', size: data.length }, data };
@@ -217,10 +221,12 @@ async function harness() {
   const defaults = {
     contractId: terms.contract,
     nearRpc: 'https://rpc.example',
+    baseRpc: 'https://base.example',
     config: join(dir, 'config.json'),
     stateDir: dir,
     trustContract: true,
     wallet: 'evm' as const,
+    url: 'https://files.example/file',
   };
   return {
     dir,
@@ -264,7 +270,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     const h = await harness();
     const log = vi.spyOn(console, 'log');
     const error = vi.spyOn(console, 'error');
-    const connection = await connect(h.adapter);
+    const connection = await connect((o) => h.adapter({ ...h.defaults, ...o }));
     const { client } = connection;
     try {
       const tools = (await client.listTools()).tools;
@@ -283,7 +289,10 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       }
       const results: unknown[] = [];
       const call = async (name: string, args: object) => {
-        const result = await client.callTool({ name, arguments: { ...h.defaults, ...args } });
+        const result = await client.callTool({
+          name,
+          arguments: { ...args, ...(name === 'annon_buy' ? { url: h.defaults.url } : {}) },
+        });
         expect(result.isError, JSON.stringify(result)).not.toBe(true);
         results.push(result);
         return result.structuredContent as { result: Record<string, unknown> };
@@ -354,11 +363,11 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
   });
   it('submits Base via the SDK without returning the authorization, and enforces tool schemas', async () => {
     const h = await harness();
-    const connection = await connect(h.adapter);
+    const connection = await connect((o) => h.adapter({ ...h.defaults, ...o }));
     try {
       const result = await connection.client.callTool({
         name: 'annon_buy',
-        arguments: { ...h.defaults, target: h.offerFile, route: 'base', maxPrice: '0.2' },
+        arguments: { target: h.offerFile, url: h.defaults.url, route: 'base' },
       });
       expect(result.isError).not.toBe(true);
       expect(JSON.stringify(result)).not.toContain('SIGNED_PAYMENT_PAYLOAD');
@@ -368,7 +377,6 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       const invalid = await connection.client.callTool({
         name: 'annon_buy',
         arguments: {
-          ...h.defaults,
           target: h.offerFile,
           route: 'invalid',
           privateKey: 'SECRET_VALUE',
@@ -515,5 +523,54 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       'SIGNED_PAYMENT_PAYLOAD',
     ])
       expect(out.mock.calls.flat().join('')).not.toContain(value);
+  });
+  it.each([
+    'contractId',
+    'nearRpc',
+    'baseRpc',
+    'relayer',
+    'network',
+    'stateDir',
+    'trustContract',
+    'config',
+    'maxPrice',
+    'backupSecretFile',
+    'moderator',
+    'evmKeyFile',
+  ])('rejects tool-controlled configuration: %s', async (field) => {
+    const execute = vi.fn(async () => ({}));
+    const c = await connect(execute);
+    try {
+      const r = await c.client.callTool({
+        name: 'annon_buy',
+        arguments: {
+          target: 'https://files.example/file',
+          [field]: field === 'trustContract' ? true : field === 'maxPrice' ? '999999' : 'attacker',
+        },
+      });
+      expect(r.isError).toBe(true);
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      await c.close();
+    }
+  });
+  it('requires a human-configured price cap and independently checks an offer-file resource URL', async () => {
+    const h = await harness();
+    const noCap = createAdapter(
+      { ANNON_BACKUP_SECRET: h.env.ANNON_BACKUP_SECRET },
+      { wallet: vi.fn() },
+    );
+    await expect(
+      noCap({ ...h.defaults, command: 'buy', target: h.offerFile }),
+    ).rejects.toMatchObject({ code: 'max_price_required' });
+    await expect(
+      h.adapter({
+        ...h.defaults,
+        command: 'buy',
+        target: h.offerFile,
+        url: 'https://other.example/file',
+      }),
+    ).rejects.toThrow(/resource mismatch/);
+    expect(h.calls).toEqual([]);
   });
 });

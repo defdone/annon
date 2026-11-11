@@ -134,6 +134,16 @@ export class OneClick {
       (q.minAmountOut !== undefined && uint(q.minAmountOut as string, 128) < BigInt(p.price))
     )
       throw new Error('1Click quote has wrong output');
+    const echo = response.quoteRequest as Record<string, unknown> | undefined;
+    if (!echo || Object.entries(request).some(([key, value]) => echo[key] !== value))
+      throw new Error('1Click quoteRequest echo mismatch');
+    const deadline = typeof q.deadline === 'string' ? Date.parse(q.deadline) : NaN;
+    if (
+      !Number.isFinite(deadline) ||
+      deadline <= now * 1000 ||
+      deadline > Number(p.expires_at) * 1000
+    )
+      throw new Error('1Click quote deadline exceeds purchase expiry or has expired');
     if (typeof q.amountIn !== 'string' || uint(q.amountIn, 128) === 0n)
       throw new Error('invalid quote input amount');
     if (typeof q.depositAddress !== 'string' || !q.depositAddress || q.depositAddress.length > 256)

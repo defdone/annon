@@ -35,11 +35,11 @@ Buy directly with NEAR USDC, via Base x402 with an EVM wallet, or through 1Click
 ```sh
 annon buy https://host.example/report --route near --wallet near --json
 annon buy https://host.example/report --route base --wallet evm --json
-annon buy offer.json --route 1click --wallet solana --from-chain solana --json
+annon buy offer.json --url https://host.example/report --route 1click --wallet solana --from-chain solana --json
 ```
 
-`offer.json` is decoded x402 PAYMENT-REQUIRED JSON. Optional `--max-price 0.2` is a decimal
-USDC quote bound. A moderated offer requires an explicitly accepted `--moderator account.near`.
+`offer.json` is decoded x402 PAYMENT-REQUIRED JSON. Every buy requires a human-approved `--max-price 0.2`, `ANNON_MAX_PRICE`, or config
+`maxPrice` in decimal USDC. Never derive the cap from the offer or choose it on the user's behalf. An offer file also requires `--url` with the independently selected resource URL. A moderated offer requires an explicitly accepted `--moderator account.near`.
 The selected signing wallet is the recovery identity; `--recovery kind:id` checks it.
 1Click selects the unique source-chain USDC by default. For other tokens or ambiguous
 entries, add `--from-asset nep141:EXACT_ASSET_ID`. If the source chain differs from the wallet
@@ -55,7 +55,10 @@ annon open report.pay2 --purchase /private/purchase-backup.json --output report.
 
 Wait for final acceptance. A 1Click SUCCESS is only delivery, and a submitted Base payment
 is not acceptance. After a timeout, preserve encrypted state and check status; another buy
-creates another purchase. Key-release retries reuse saved requests, with bounded backoff.
+creates another purchase. Status/open resume a saved paid Base purchase with unlock before its grant-proved download.
+Key-release retries reuse saved requests, with bounded backoff. Configure MCP deployment,
+trust, wallet sources, moderator trust and price caps in the server environment/config; tools
+cannot set or override these.
 Never infer payment failure from a lost reply. Outputs name files; plaintext is not printed.
 
 Recover on a fresh device using the same recovery wallet and a new local backup secret:

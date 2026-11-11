@@ -19,7 +19,13 @@ import { blockHeader } from './base.js';
 import { digest, signer, toHex, typedData } from './eip3009.js';
 import { authorize, preflight } from './pay.js';
 import { purchaseKey } from './purchase.js';
-import { checkPayment, checkTerms, forFacilitator, paymentRequired } from './seller.js';
+import {
+  checkPayment,
+  checkTerms,
+  forFacilitator,
+  paymentRequired,
+  verifyPayment,
+} from './seller.js';
 import { memoryStore } from './store.js';
 import { discover, paymentSignature } from './x402.js';
 
@@ -382,4 +388,19 @@ it('caps the buyer authorization at purchase expiry and rejects longer signed pa
       termsHash: termsHash(terms),
     }),
   ).toThrow();
+});
+
+it('the seller refuses an EVM contract payer before handing the payment to a facilitator', async () => {
+  rpc();
+  const { header } = await payload();
+  const original = globalThis.fetch;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url, init) => {
+      const q = JSON.parse(String(init?.body));
+      if (q.method === 'eth_getCode') return { json: async () => ({ id: q.id, result: '0x6000' }) };
+      return original(url, init);
+    }),
+  );
+  await expect(verifyPayment(header, options)).rejects.toMatchObject({ code: 'bad_signature' });
 });

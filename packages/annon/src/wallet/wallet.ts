@@ -11,7 +11,7 @@ import {
   type RecoveryProofContext,
 } from '../near/nep413.js';
 import type { TypedData } from '../pay/eip3009.js';
-import { hex } from '../settle-near/codec.js';
+import { hex, account as nearAccount } from '../settle-near/codec.js';
 import {
   type Authorization,
   type Identity,
@@ -239,4 +239,20 @@ export function nearKeyPairWallet(
         });
       }),
   );
+}
+
+/** Prepay Annon storage explicitly before zero-deposit register/reopen calls. */
+export async function storageDeposit(
+  wallet: Pick<NearWallet, 'call'>,
+  contract: string,
+  amount: bigint,
+): Promise<unknown> {
+  if (amount <= 0n) throw new RangeError('storage deposit must be positive');
+  return wallet.call({
+    receiverId: nearAccount(contract),
+    method: 'storage_deposit',
+    args: {},
+    deposit: amount,
+    gas: 30000000000000n,
+  });
 }

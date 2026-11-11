@@ -23,7 +23,14 @@ const origin = {
 describe('1Click with synthetic response fixtures', () => {
   it('quotes EXACT_OUTPUT to the contract with a byte-identical message', async () => {
     const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
-      Response.json(fixture('quote'), { status: 201 }),
+      Response.json(
+        {
+          ...fixture('quote'),
+          quoteRequest: { ...fixture('quote').quoteRequest, ...JSON.parse(String(_init?.body)) },
+          quote: { ...fixture('quote').quote, deadline: JSON.parse(String(_init?.body)).deadline },
+        },
+        { status: 201 },
+      ),
     );
     const c = new OneClick({ fetch: fetcher as typeof fetch, now: () => 1800000000 });
     const result = await c.quote(message, origin);
@@ -44,7 +51,11 @@ describe('1Click with synthetic response fixtures', () => {
   });
   it('uses INTENTS for a NEAR origin/refund; refuses malformed messages without HTTP', async () => {
     const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
-      Response.json(fixture('quote')),
+      Response.json({
+        ...fixture('quote'),
+        quoteRequest: { ...fixture('quote').quoteRequest, ...JSON.parse(String(_init?.body)) },
+        quote: { ...fixture('quote').quote, deadline: JSON.parse(String(_init?.body)).deadline },
+      }),
     );
     const c = new OneClick({ fetch: fetcher as typeof fetch, now: () => 1800000000 });
     await c.quote(message, { asset: `nep141:${NEAR_USDC}`, chain: 'near', refundTo: 'buyer.near' });
@@ -86,5 +97,49 @@ describe('1Click with synthetic response fixtures', () => {
     const abort = new AbortController();
     abort.abort();
     await expect(c.poll('address', { signal: abort.signal })).rejects.toThrow();
+  });
+  it.each([
+    'recipient',
+    'customRecipientMsg',
+    'refundTo',
+    'refundType',
+    'destinationAsset',
+    'originAsset',
+    'amount',
+  ])('refuses a changed quoteRequest echo: %s', async (field) => {
+    const c = new OneClick({
+      now: () => 1800000000,
+      fetch: (async (_u, init) => {
+        const request = JSON.parse(String(init?.body));
+        return Response.json({
+          ...fixture('quote'),
+          quoteRequest: { ...request, [field]: 'wrong' },
+        });
+      }) as typeof fetch,
+    });
+    await expect(c.quote(message, origin)).rejects.toThrow(/echo/);
+  });
+  it('refuses a quote deadline outside the purchase expiry', async () => {
+    const c = new OneClick({
+      now: () => 1800000000,
+      fetch: (async (_u, init) =>
+        Response.json({
+          ...fixture('quote'),
+          quoteRequest: JSON.parse(String(init?.body)),
+          quote: { ...fixture('quote').quote, deadline: '2030-01-01T00:00:00Z' },
+        })) as typeof fetch,
+    });
+    await expect(c.quote(message, origin)).rejects.toThrow(/deadline/);
+  });
+
+  it('retains the complete recorded echo and rejects the recorded service extension beyond its request deadline', async () => {
+    const full = fixture('quote');
+    expect(full.quoteRequest.customRecipientMsg).toContain('"annon":1');
+    expect(Date.parse(full.quote.deadline)).toBeGreaterThan(Date.parse(full.quoteRequest.deadline));
+    const c = new OneClick({
+      now: () => 1800000000,
+      fetch: (async () => Response.json(full)) as typeof fetch,
+    });
+    await expect(c.quote(message, origin)).rejects.toThrow(/echo/);
   });
 });

@@ -56,7 +56,16 @@ const common = [
 ];
 const perCommand: Record<Command, string[]> = {
   sell: ['price', 'split', 'base', 'moderator', 'output'],
-  buy: ['route', 'from-chain', 'from-asset', 'refund-to', 'recovery', 'max-price', 'moderator'],
+  buy: [
+    'route',
+    'from-chain',
+    'from-asset',
+    'refund-to',
+    'recovery',
+    'max-price',
+    'moderator',
+    'url',
+  ],
   open: ['purchase', 'file', 'url', 'output'],
   recover: ['recovery', 'purchase'],
   stop: [],
@@ -99,7 +108,7 @@ export function parseCli(argv: string[]): Input {
 }
 export const HELP = `annon <command> [options]
 sell <file> --price <USDC> --split <kind:id:bps,...> [--base] [--moderator <account>] [--output <PAY2>]
-buy <url|offer.json> [--route near|base|1click] [--from-chain <chain>] [--from-asset <1Click asset>] [--refund-to <address>] [--recovery <kind:id>] [--max-price <USDC>] [--moderator <trusted account>]
+buy <url|offer.json> [--route near|base|1click] [--from-chain <chain>] [--from-asset <1Click asset>] [--refund-to <address>] [--recovery <kind:id>] [--max-price <USDC> or configured cap] [--url <expected resource for offer.json>] [--moderator <trusted account>]
 open <purchase-id|backup|PAY2> [--purchase <id|backup>] [--file <PAY2> | --url <url>] --output <file>
 recover --recovery <kind:id> [--purchase <id>]
 stop <file-id>
