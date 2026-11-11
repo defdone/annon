@@ -550,3 +550,115 @@ fn the_point_at_infinity_is_refused_for_a_seller_reopen() {
     let auth = seller.auth(&c.reopen_seller_text(r.clone()));
     c.reopen_seller(r, auth);
 }
+
+// Re-verification (11 Nov): the ten mutations still alive after the first round.
+
+// register.rs reopen_seller storage charge (- -> /)
+#[test]
+fn a_seller_reopen_keeps_its_marker_cost_and_refunds_the_rest() {
+    let mut c = contract();
+    let seller = Seller::new(1);
+    registered(&mut c, &seller);
+    as_caller(RELAYER, NearToken::from_millinear(10));
+    let r = SellerArgs {
+        file_id: FILE.into(),
+        key: Some(G1X2.into()),
+        deadline: NOW_S + 600,
+    };
+    let auth = seller.auth(&c.reopen_seller_text(r.clone()));
+    c.reopen_seller(r, auth);
+    let back = sent_to(RELAYER, 0);
+    let kept = NearToken::from_millinear(10).as_yoctonear() - back;
+    let byte = env::storage_byte_cost().as_yoctonear();
+    assert!(
+        back > 0 && kept >= 40 * byte && kept <= 400 * byte,
+        "kept {kept}"
+    );
+}
+
+// storage.rs entry cost (- -> /)
+#[test]
+fn the_first_storage_deposit_pays_for_its_own_entry() {
+    let mut c = contract();
+    let deposit = NearToken::from_millinear(100).as_yoctonear();
+    as_caller(RELAYER, NearToken::from_yoctonear(deposit));
+    let balance = c.storage_deposit(None).0;
+    let byte = env::storage_byte_cost().as_yoctonear();
+    assert!(
+        balance <= deposit - 40 * byte && balance >= deposit - 400 * byte,
+        "{balance}"
+    );
+}
+
+// register.rs publish_text (the public method itself)
+#[test]
+fn the_publish_text_method_names_the_contract_file_and_header() {
+    let c = contract();
+    let header = format!("0x{}", "ab".repeat(32));
+    assert_eq!(
+        c.publish_text(FILE.into(), header.clone()),
+        format!("Annon: publish a file\ncontract: {CONTRACT}\nfile: {FILE}\nheader: {header}")
+    );
+}
+
+// storage.rs storage_withdraw return value (- -> + or /), zero balance entry, zero transfer
+#[test]
+fn storage_withdraw_returns_what_is_left() {
+    let mut c = contract();
+    as_caller(RELAYER, NearToken::from_millinear(100));
+    let have = c.storage_deposit(None).0;
+    as_caller(RELAYER, NearToken::from_yoctonear(1));
+    assert_eq!(c.storage_withdraw(Some(U128(1_000))).0, have - 1_000);
+    as_caller(RELAYER, NearToken::from_yoctonear(1));
+    assert_eq!(c.storage_withdraw(None).0, 0);
+}
+
+#[test]
+fn withdrawing_with_no_balance_creates_no_entry() {
+    let mut c = contract();
+    as_caller("nobody.near", NearToken::from_yoctonear(1));
+    assert_eq!(c.storage_withdraw(None).0, 0);
+    assert_eq!(c.storage_balance_of("nobody.near".parse().unwrap()), None);
+}
+
+#[test]
+fn nothing_to_refund_sends_no_transfer() {
+    let mut c = selling();
+    let id = buy(&mut c, Seller::new(7).id(), G1);
+    as_caller(RELAYER, NearToken::from_yoctonear(0));
+    let r = reopen_args(&id, G1); // the purchase key: nothing to store, nothing attached
+    let auth = Seller::new(7).auth(&c.reopen_text(r.clone()));
+    c.reopen(r, auth);
+    let transfers = get_created_receipts()
+        .iter()
+        .flat_map(|r| r.actions.clone())
+        .filter(|a| matches!(a, near_sdk::mock::MockAction::Transfer { .. }))
+        .count();
+    assert_eq!(transfers, 0);
+}
+
+// receive.rs exact boundaries (> vs >=, < vs <=)
+#[test]
+fn a_purchase_is_still_accepted_at_its_expiry_second() {
+    let mut c = selling();
+    let p = near_purchase();
+    at_time(NEAR_USDC, NearToken::from_yoctonear(0), p.expires_at);
+    c.ft_on_transfer("buyer.near".parse().unwrap(), U128(10_000), message(&p));
+    assert_eq!(
+        c.get_delivery(0).unwrap().reason,
+        crate::receive::reason::ACCEPTED
+    );
+}
+
+#[test]
+fn a_reserve_of_exactly_4096_bytes_records_the_delivery() {
+    let mut c = contract();
+    registered(&mut c, &Seller::new(1));
+    as_caller(
+        "anyone.near",
+        NearToken::from_yoctonear(env::storage_byte_cost().as_yoctonear() * 4096),
+    );
+    c.fund_receiver_reserve();
+    deliver(&mut c, 10_000, &message(&near_purchase()));
+    assert!(c.get_delivery(0).is_some(), "a full reserve made a leaf");
+}

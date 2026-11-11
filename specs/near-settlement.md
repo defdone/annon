@@ -283,8 +283,9 @@ Leaf indexes start at 0 and are appended left to right. A proof lists siblings f
 child. The empty root is `zero[32]`.
 
 `materialize_refund(leaf_fields, index, proof: Vec<[u8;32]>)`, payable (the caller funds storage):
-checks inclusion under the current root or one of the last 32 roots (so appends after the proof
-was built do not void it) and a one-time marker, then creates an ordinary refund
+checks inclusion under one of the last 32 roots, the current one included (a proof stays valid
+while up to 31 more leaves are appended, so build it right before sending) and a one-time marker,
+then creates an ordinary refund
 obligation (§7). Events carry every leaf so anyone (the keeper) can build proofs.
 
 ## 9. Key release and recovery

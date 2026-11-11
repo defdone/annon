@@ -41,8 +41,9 @@ fn zeros() -> [[u8; 32]; DEPTH + 1] {
     z
 }
 
-/// How many recent roots a proof may name: a proof made against a root stays valid while up to
-/// this many leaves are appended after it, so new deliveries can't keep invalidating a refund.
+/// How many roots a proof may name, the current one included: a proof made against a root stays
+/// valid while up to 31 more leaves are appended. A keeper builds its proof right before sending,
+/// so voiding it means landing 32 deliveries in between, every time.
 pub const RECENT_ROOTS: usize = 32;
 /// Leaves the tree can hold (2^32).
 pub const CAPACITY: u64 = 1 << DEPTH;
