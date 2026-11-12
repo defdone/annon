@@ -1,9 +1,32 @@
 {
   "name": "@defdone/annon-mcp",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0-beta.0",
   "description": "Local stdio MCP tools for selling, buying, opening and verifying Annon files.",
   "license": "Apache-2.0",
+  "homepage": "https://annon.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/defdone/annon.git",
+    "directory": "packages/annon-mcp"
+  },
+  "bugs": {
+    "url": "https://github.com/defdone/annon/issues"
+  },
+  "keywords": [
+    "mcp",
+    "near",
+    "x402",
+    "agents",
+    "payments",
+    "encryption"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  },
   "type": "module",
   "bin": {
     "annon-mcp": "./dist/main.js"
@@ -16,7 +39,10 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc --noEmit && tsc -p tsconfig.build.json",

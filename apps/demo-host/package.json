@@ -1,6 +1,6 @@
 {
   "name": "@defdone/annon-demo-host",
-  "version": "0.0.0",
+  "version": "0.1.0-beta.0",
   "private": true,
   "description": "A public demo host for Annon files: x402 offers, buyer-proof downloads and an optional Base facilitator.",
   "license": "Apache-2.0",

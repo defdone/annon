@@ -1,9 +1,35 @@
 {
   "name": "@defdone/annon",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0-beta.0",
   "description": "Files only the buyer can open: encrypted on the client, the key released by NEAR once the payment is verified.",
   "license": "Apache-2.0",
+  "homepage": "https://annon.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/defdone/annon.git",
+    "directory": "packages/annon"
+  },
+  "bugs": {
+    "url": "https://github.com/defdone/annon/issues"
+  },
+  "keywords": [
+    "near",
+    "x402",
+    "encryption",
+    "payments",
+    "usdc",
+    "mpc",
+    "files",
+    "agents",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta"
+  },
   "type": "module",
   "bin": {
     "annon": "./dist/node/main.js"
@@ -24,7 +50,11 @@
   },
   "files": [
     "dist",
-    "CLI.md"
+    "CLI.md",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsc --noEmit && tsc -p tsconfig.build.json && node scripts/build-browser.ts",

@@ -1,8 +1,12 @@
+import { createRequire } from 'node:module';
 import { createAdapter } from '@defdone/annon/node/adapter';
 import type { Input } from '@defdone/annon/node/cli';
 import { publicError } from '@defdone/annon/node/errors';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod/v4';
+
+// src/ and dist/ both sit one level below the package root.
+const { version } = createRequire(import.meta.url)('../package.json') as { version: string };
 
 // Secret values have no tool argument. Only explicitly selected files or server env supply keys.
 // Deployment, trust, wallets, storage and spend limits belong to the server operator.
@@ -118,7 +122,7 @@ export function createServer(
     agent: true,
   }),
 ) {
-  const server = new McpServer({ name: 'annon', version: '0.0.0' });
+  const server = new McpServer({ name: 'annon', version });
   for (const command of ['sell', 'buy', 'open', 'verify', 'recover', 'status', 'budget'] as const) {
     server.registerTool(
       `annon_${command}`,
