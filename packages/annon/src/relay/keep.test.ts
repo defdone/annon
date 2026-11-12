@@ -328,7 +328,7 @@ describe('durable settle keeper', () => {
     expect(created).not.toHaveBeenCalled();
     await keep({ ...o });
     expect(created).toHaveBeenCalledTimes(1);
-  }, 30000);
+  });
 });
 
 it('recovers a crash before the durable signed hash without allowing an older signer to send', async () => {

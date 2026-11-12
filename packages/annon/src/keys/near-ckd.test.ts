@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 import { base58 } from '@scure/base';
 import { describe, expect, it } from 'vitest';
+import { bitCases } from '../../test/sampling.js';
 import { open, seal } from '../envelope/pay2.js';
 import {
   appId,
@@ -172,11 +173,11 @@ describe('openAnswer', () => {
     ).toBe('ckd_invalid');
   });
 
-  it('refuses every single-bit change of big_y and big_c', () => {
+  it('refuses single-bit changes (boundary sample, or every bit with ANNON_EXHAUSTIVE=1) of big_y and big_c', () => {
     const wrong: string[] = [];
     for (const field of ['big_y', 'big_c'] as const) {
       const bytes = base58.decode(answer[field].slice('bls12381g1:'.length));
-      for (let bit = 0; bit < bytes.length * 8; bit++) {
+      for (const bit of bitCases(bytes.length, [0, 1, bytes.length])) {
         const f = bytes.slice();
         f[bit >> 3] = (f[bit >> 3] ?? 0) ^ (1 << (bit & 7));
         const got = code(() =>
@@ -186,7 +187,7 @@ describe('openAnswer', () => {
       }
     }
     expect(wrong).toEqual([]);
-  }, 120_000);
+  });
 
   it('gives the seller and every buyer the same key, so the file opens for both', async () => {
     const seller = oneTimeKey();

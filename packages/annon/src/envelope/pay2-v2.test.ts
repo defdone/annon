@@ -1,6 +1,8 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { privateKeyToAccount } from 'viem/accounts';
 import { describe, expect, it } from 'vitest';
+import { pay2Boundaries } from '../../test/pay2-boundaries.js';
+import { bitCases } from '../../test/sampling.js';
 import type { Identity } from '../settle-near/identity.js';
 import {
   inspect,
@@ -153,9 +155,9 @@ for (const authKind of [0, 1, 2] as const)
         'seller_signature_invalid',
       );
     });
-    it('refuses every single-bit change before asking for a key', async () => {
+    it('refuses single-bit changes (boundary sample, or every bit with ANNON_EXHAUSTIVE=1) before asking for a key', async () => {
       const { file, openOpts } = await make();
-      for (let bit = 0; bit < file.length * 8; bit++) {
+      for (const bit of bitCases(file.length, pay2Boundaries(file))) {
         const b = file.slice();
         b[bit >> 3] = (b[bit >> 3] ?? 0) ^ (1 << (bit & 7));
         await expect(inspect(b, openOpts.listing, contractId)).rejects.toHaveProperty(
@@ -163,7 +165,7 @@ for (const authKind of [0, 1, 2] as const)
           'Pay2Error',
         );
       }
-    }, 120000);
+    });
     it('requires the registered identity and exact Solana wallet signed message', async () => {
       const s = await sealWithKey(K, data, opts);
       await expect(

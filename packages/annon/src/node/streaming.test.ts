@@ -282,20 +282,15 @@ async function roundTrip(size: number, remote: boolean) {
   }
 }
 
-it.each([false, true])(
-  'CLI streams a multi-chunk file (download %s)',
-  async (remote) => {
-    await roundTrip(9 * 1024 * 1024 + 3, remote);
-  },
-  120000,
-);
+it.each([false, true])('CLI streams a multi-chunk file (download %s)', async (remote) => {
+  await roundTrip(9 * 1024 * 1024 + 3, remote);
+});
 
 it.runIf(process.env.ANNON_LARGE_FILES === '1').each([100, 1024, 3072])(
   'CLI large random file: %i MiB',
   async (mib) => {
     await roundTrip(mib * 1024 * 1024, true);
   },
-  900000,
 );
 
 it('CLI removes provisional plaintext when the final encrypted chunk is tampered', async () => {
@@ -335,7 +330,7 @@ it('CLI removes provisional plaintext when the final encrypted chunk is tampered
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-}, 120000);
+});
 
 it.each(['contents', 'shorter', 'longer'])(
   'CLI reports source_changed and keeps sell resumable when plaintext becomes %s between passes',

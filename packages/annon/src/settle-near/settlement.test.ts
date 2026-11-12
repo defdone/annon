@@ -4,6 +4,7 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { base58 } from '@scure/base';
 import { privateKeyToAccount } from 'viem/accounts';
 import { describe, expect, it } from 'vitest';
+import { bitCases } from '../../test/sampling.js';
 import {
   encodeIdentity,
   identityJson,
@@ -303,14 +304,21 @@ describe('purchase wire protocol', () => {
     ).toThrow();
     expect(() => parsePurchaseMessage(msg.replace(sol.id, sol.id.toUpperCase()))).toThrow();
   });
-  it('rejects every single-bit change of the canonical message', () => {
+  it('rejects single-bit changes (boundary sample, or every bit with ANNON_EXHAUSTIVE=1) of the canonical message', () => {
     const raw = new TextEncoder().encode(buildPurchaseMessage(purchase));
-    for (let bit = 0; bit < raw.length * 8; bit++) {
+    // JSON punctuation brackets every key and value, including identity subfields.
+    const boundaries = [...raw.keys()].filter((i) =>
+      '"{}[],:'.includes(String.fromCharCode(raw[i] ?? 0)),
+    );
+    for (const bit of bitCases(
+      raw.length,
+      boundaries.flatMap((i) => [i, i + 1]),
+    )) {
       const bad = raw.slice();
       bad[bit >> 3] = (bad[bit >> 3] ?? 0) ^ (1 << (bit & 7));
       expect(() => parsePurchaseMessage(new TextDecoder().decode(bad))).toThrow();
     }
-  }, 30000);
+  });
   it('bounds oversized UTF-8 messages while preserving the refund destination', () => {
     const msg = buildPurchaseMessage(purchase);
     const oversized = msg.replace('"network":"near:mainnet"', `"network":"${'ż'.repeat(512)}"`);

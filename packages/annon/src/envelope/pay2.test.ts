@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { describe, expect, it } from 'vitest';
+import { pay2Boundaries } from '../../test/pay2-boundaries.js';
+import { bitCases } from '../../test/sampling.js';
 import {
   inspect,
   type Listing,
@@ -266,20 +268,20 @@ describe('PAY2 attacks beyond the vectors', () => {
 });
 
 // Checks that don't assume which error a change causes: they hold for every possible change.
-describe('PAY2 against every single-bit change', () => {
-  const flips = (bytes: Uint8Array) =>
-    Array.from({ length: bytes.length * 8 }, (_, bit) => {
+describe('PAY2 against single-bit changes (boundary sample, or every bit with ANNON_EXHAUSTIVE=1)', () => {
+  const flips = (bytes: Uint8Array, boundaries: number[]) =>
+    bitCases(bytes.length, boundaries).map((bit) => {
       const f = bytes.slice();
       f[bit >> 3] = (f[bit >> 3] ?? 0) ^ (1 << (bit & 7));
       return { bit, f };
     });
 
   for (const id of ['empty', 'small']) {
-    it(`refuses every flipped bit of ${id} with a Pay2Error`, async () => {
+    it(`refuses flipped bits (boundary sample, or every bit with ANNON_EXHAUSTIVE=1) of ${id} with a Pay2Error`, async () => {
       const v = vectors.valid.find((x) => x.id === id) as (typeof vectors.valid)[number];
       const listing = listingOf(v.input.fileId, v.cipherHash);
       const wrong: string[] = [];
-      for (const { bit, f } of flips(b64(v.file))) {
+      for (const { bit, f } of flips(b64(v.file), pay2Boundaries(b64(v.file)))) {
         const got = await open(f, opts(listing)).then(
           () => 'opened',
           (e: Error) => (e.name === 'Pay2Error' ? 'refused' : `crashed: ${e.message}`),
@@ -287,10 +289,10 @@ describe('PAY2 against every single-bit change', () => {
         if (got !== 'refused') wrong.push(`bit ${bit}: ${got}`);
       }
       expect(wrong).toEqual([]);
-    }, 120_000); // thousands of opens; CI runners are slower than a laptop
+    });
   }
 
-  it('refuses every flipped bit of the preview package', async () => {
+  it('refuses flipped bits (boundary sample, or every bit with ANNON_EXHAUSTIVE=1) of the preview package', async () => {
     const src = vectors.valid.find(
       (x) => x.id === vectors.preview.of,
     ) as (typeof vectors.valid)[number];
@@ -329,7 +331,14 @@ describe('PAY2 against every single-bit change', () => {
       ),
     ];
     for (const [name, at] of fields) {
-      for (const { bit, f } of flips(b64(at(pkg).get()))) {
+      for (const { bit, f } of flips(
+        b64(at(pkg).get()),
+        name === 'header'
+          ? pay2Boundaries(b64(pkg.header), true)
+          : name.endsWith('data')
+            ? [0, b64(at(pkg).get()).length - 16, b64(at(pkg).get()).length]
+            : [0, 32],
+      )) {
         const p = structuredClone(pkg);
         at(p).set(Buffer.from(f).toString('base64'));
         const got = await verifyPreview(p, listing).then(
@@ -340,7 +349,7 @@ describe('PAY2 against every single-bit change', () => {
       }
     }
     expect(wrong).toEqual([]);
-  }, 60_000);
+  });
 });
 
 describe('EIP-191 against a signature made by another library', () => {

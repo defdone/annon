@@ -429,7 +429,7 @@ describe.runIf(process.env.ANNON_TEST_CONTAINER === '1')(
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
-    }, 150000);
+    });
   },
 );
 

@@ -4,6 +4,8 @@ import { runInNewContext } from 'node:vm';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import { describe, expect, it } from 'vitest';
+import { pay2Boundaries } from '../../test/pay2-boundaries.js';
+import { bitCases, sampleCases } from '../../test/sampling.js';
 import { type Listing, open, Pay2Error, sealWithKey } from './pay2.js';
 import { blobSource, openTo, prepareOpen, prepareSeal } from './replay.js';
 import { openStream, sealStream, sealStreamWithKey } from './stream.js';
@@ -408,7 +410,7 @@ describe('streaming authentication and framing', () => {
     }
   });
 
-  it('rejects EVERY flipped bit of a small three-chunk file without releasing the failed chunk', async () => {
+  it('rejects flipped bits (boundary sample, or every bit with ANNON_EXHAUSTIVE=1) of a small three-chunk file without releasing the failed chunk', async () => {
     // Metadata, preview and final data are three independently authenticated wire chunks.
     const data = pattern(20);
     const s = await sealWithKey(hex(first.K), data, { ...options, previewLen: 2 });
@@ -416,7 +418,7 @@ describe('streaming authentication and framing', () => {
     const listing = listingOf(s.cipherHash);
     const header = headerLen(file);
     const ends = [header, header + 272, header + 272 + 18, file.length];
-    for (let bit = 0; bit < file.length * 8; bit++) {
+    for (const bit of bitCases(file.length, pay2Boundaries(file))) {
       const changed = file.slice();
       const byte = bit >> 3;
       changed[byte] = (changed[byte] ?? 0) ^ (1 << (bit & 7));
@@ -427,14 +429,14 @@ describe('streaming authentication and framing', () => {
       }
       expect(received).toEqual(Buffer.from(data.subarray(0, received.length)));
     }
-  }, 120_000);
+  });
 
-  it('rejects truncation at every byte of a small file including its preview and tags', async () => {
+  it('rejects truncation at byte boundaries (sample, or every byte with ANNON_EXHAUSTIVE=1) of a small file including its preview and tags', async () => {
     const data = pattern(20);
     const s = await sealWithKey(hex(first.K), data, { ...options, previewLen: 2 });
     const file = await s.finish(finishOpts);
     const previewEnd = headerLen(file) + 272 + 18;
-    for (let cut = 0; cut < file.length; cut++) {
+    for (const cut of sampleCases(file.length, pay2Boundaries(file))) {
       const { error, data: received } = await outcome(
         file.subarray(0, cut),
         listingOf(s.cipherHash),
@@ -489,7 +491,7 @@ describe('streaming authentication and framing', () => {
       expect(received).toEqual(Buffer.from(data.subarray(0, received.length)));
       expect(received.length).toBeLessThan(data.length);
     }
-  }, 30_000);
+  });
 
   it('releases earlier authenticated chunks, but holds the final chunk until EOF', async () => {
     const C = 65536;
@@ -640,7 +642,7 @@ it('round-trips 100 MiB with sampled peak live heap + external growth below 32 M
   console.info(
     `PAY2 100 MiB sampled peak growth: heap + external ${(peak / 1024 ** 2).toFixed(2)} MiB; ArrayBuffers ${(peakBuffers / 1024 ** 2).toFixed(2)} MiB`,
   );
-}, 120_000);
+});
 
 it('binds the open replay to the exact first-pass header before requesting a key or writing', async () => {
   const data = pattern(65540);

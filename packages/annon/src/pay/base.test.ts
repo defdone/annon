@@ -18,6 +18,7 @@ import {
 import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { purchase as sample } from '../../test/fixtures.js';
+import { bitCases } from '../../test/sampling.js';
 import { baseNonceV2, purchaseId } from '../settle-near/purchase.js';
 import { blockHeader, type Expected, type PayError, paymentLogs } from './base.js';
 import { type Authorization, digest, signer, typedData } from './eip3009.js';
@@ -64,7 +65,7 @@ describe('EIP-3009 typed data against viem', () => {
     expect(signer(d, sig)).toBe(BUYER);
     const bytes = Buffer.from(sig.slice(2), 'hex');
     const wrong: number[] = [];
-    for (let bit = 0; bit < 65 * 8; bit++) {
+    for (const bit of bitCases(65, [0, 32, 64, 65])) {
       const f = Buffer.from(bytes);
       f[bit >> 3] = (f[bit >> 3] ?? 0) ^ (1 << (bit & 7));
       if (signer(d, `0x${f.toString('hex')}`) === BUYER) wrong.push(bit);

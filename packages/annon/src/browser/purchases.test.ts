@@ -764,7 +764,7 @@ it('keeps 350 purchases in separate encrypted records with a small index and lat
   const raw = await storage.rawStore.load('annon/browser/entry/synthetic-349');
   expect(raw).not.toBeNull();
   expect(JSON.stringify(raw)).not.toContain('abababab');
-}, 20000);
+});
 
 it('retries index contention with fresh metadata and bounds repeated CAS misses', async () => {
   const h = setup();

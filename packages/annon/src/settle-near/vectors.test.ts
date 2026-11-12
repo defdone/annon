@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { bitCases } from '../../test/sampling.js';
 import {
   inspectHeader,
   open,
@@ -205,7 +206,7 @@ describe('independent near-settlement wire vectors', () => {
       if (x.identity.kind !== 'near') {
         expect(verifyAuthorization(x.identity, `${x.text}!`, x.auth ?? undefined)).toBe(false);
         const raw = bytes(x.auth?.sig as string);
-        for (let bit = 0; bit < raw.length * 8; bit++) {
+        for (const bit of bitCases(raw.length, [0, 32, 64, raw.length])) {
           const bad = raw.slice();
           bad[bit >> 3] = (bad[bit >> 3] ?? 0) ^ (1 << (bit & 7));
           expect(
