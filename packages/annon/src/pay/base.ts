@@ -48,6 +48,11 @@ export type PayErrorCode =
   | 'payment_id_conflict'
   /** A seller: the settlement of this purchase is under way or unclear; send the same payload later. */
   | 'settlement_processing'
+  | 'settlement_pending'
+  | 'not_sponsored'
+  | 'relayer_unavailable'
+  | 'facilitator_busy'
+  | 'unavailable'
   /** A seller: this purchase can no longer be paid (expired or canceled, finalized). */
   | 'payment_expired';
 
@@ -58,6 +63,7 @@ export class PayError extends Error {
    * still be settled. The purchase stays open: follow `nextStep`.
    */
   purchase?: PurchaseRecord;
+  retryAfterSeconds?: number;
   constructor(code: PayErrorCode, message: string = code) {
     super(message);
     this.code = code;

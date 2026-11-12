@@ -7,7 +7,16 @@
  */
 import { sha256 } from '@noble/hashes/sha2.js';
 import { getConfig, getFile } from '../near/rpc.js';
-import { block, fail, head, PayError, type PaymentStatus, paymentStatus } from './base.js';
+import {
+  authorizationState,
+  balanceOf,
+  block,
+  fail,
+  head,
+  PayError,
+  type PaymentStatus,
+  paymentStatus,
+} from './base.js';
 import { toHex } from './eip3009.js';
 import {
   type CheckedPayment,
@@ -26,6 +35,7 @@ export interface IdBinding extends Versioned {
   fingerprint: string;
   /** The payload's `validBefore`: after it, at a finalized block, the payload can't settle. */
   keepUntil: string;
+  purchaseKey?: string;
 }
 
 /** A purchase and its settlement. */
@@ -39,6 +49,7 @@ export interface SellerPurchase extends Versioned {
   transaction?: string;
   /** Unix seconds: until then a facilitator call may be in flight and nobody calls again. */
   leaseUntil: number;
+  submissionAttempted?: boolean;
 }
 
 export type SellerRecord = IdBinding | SellerPurchase;
@@ -46,10 +57,13 @@ export type SellerRecord = IdBinding | SellerPurchase;
 /** What a facilitator's `/settle` answers (x402 v2 `SettleResponse`). */
 export interface SettleResponse {
   success: boolean;
+  retryAfterSeconds?: number;
   transaction?: string;
   network?: string;
   errorReason?: string;
   payer?: string;
+  /** Trusted local facilitator evidence that no broadcast was attempted. */
+  submissionAttempted?: boolean;
 }
 
 /**
@@ -72,6 +86,7 @@ export interface SettleOptions extends OfferOptions {
    * the contract, the file and `url`.
    */
   scope?: string;
+  settlementPollSeconds?: number;
   /** How long a facilitator call may take before it is aborted; default 50 s. */
   facilitatorTimeoutMs?: number;
   /**
@@ -79,6 +94,8 @@ export interface SettleOptions extends OfferOptions {
    * new-payment checks, or once Base shows the payment), so an index of it is never behind the
    * record. May run more than once for one purchase.
    */
+  /** Admission for a new, unpaid settlement, after verification and before any write. */
+  beforeSettle?: (file: import('../near/rpc.js').FileInfo) => Promise<void>;
   beforeRecord?: (key: string, payer: string) => Promise<void>;
 }
 
@@ -99,7 +116,7 @@ export type Settlement =
 const FACILITATOR_TIMEOUT_MS = 50_000;
 const LEASE_MARGIN_SECONDS = 10;
 /** After a facilitator call that did not settle, the next one waits this long. */
-export const RETRY_SECONDS = 5;
+export const RETRY_SECONDS = 10;
 /** The longest window a payload this seller accepts can have (profile section 4). */
 const MAX_WINDOW_SECONDS = 240;
 
@@ -160,7 +177,16 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
     termsHash: file.termsHash,
   });
   const scope = o.scope ?? `${o.contractId}/${o.fileId}/${o.url}`;
-  if (c.paymentId) await bind(o, `annon/seller/id/${scope}/${c.paymentId}`, header, c);
+  const bindId = async () => {
+    if (c.paymentId)
+      await bind(
+        o,
+        `annon/seller/id/${scope}/${c.paymentId}`,
+        header,
+        c,
+        purchaseRecordKey(usdc, c.payer, c.nonce),
+      );
+  };
   const timeout = o.facilitatorTimeoutMs ?? FACILITATOR_TIMEOUT_MS;
   const lease = Math.ceil(timeout / 1000) + LEASE_MARGIN_SECONDS;
   const key = purchaseRecordKey(usdc, c.payer, c.nonce);
@@ -221,6 +247,7 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
     }
     next = { ...next, revision: r ? r.revision + 1 : 0, leaseUntil: base.leaseUntil };
     // A purchase first seen already on Base is recorded here: indexed first, as in the loop.
+    if (s.state === 'paid') await bindId();
     if (!r) await o.beforeRecord?.(key, c.payer);
     if (!(await o.store.compareAndSet(key, r, next))) return null;
     if (next.state === 'unpaid') fail('payment_expired', 'this purchase can no longer be paid');
@@ -229,7 +256,9 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
 
   for (let tries = 0; tries < 4; tries++) {
     const r = (await o.store.load(key)) as SellerPurchase | null;
+    if (r) await bindId();
     if (r?.state === 'settled') return answerOf(r);
+    if (r?.state === 'submitted' && r.leaseUntil > now()) return answerOf(r);
     if (r?.state === 'unpaid')
       return fail('payment_expired', 'this purchase can no longer be paid');
     // A purchase already recorded is settled with its recorded payload, never another one: another
@@ -245,9 +274,11 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
         r?.searchFromBlock ??
         (await blockAt(o.baseRpc, Number(c.validBefore) - MAX_WINDOW_SECONDS)),
       leaseUntil: 0,
+      submissionAttempted: r?.submissionAttempted ?? false,
       ...(r?.transaction ? { transaction: r.transaction } : {}),
     };
     const s = await onBase(base);
+    if (!r && s.state !== 'paid' && s.state !== 'pending') fail('payment_expired');
     if (s.state !== 'pending') {
       const answer = await fromChain(r, s, { ...base, leaseUntil: r?.leaseUntil ?? 0 });
       if (answer) return answer;
@@ -258,6 +289,13 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
     // A purchase never seen before is a new payment: every check of section 4.
     if (!r) {
       await verifyPayment(header, o);
+      const checkedHead = await head(o.baseRpc);
+      if ((await balanceOf(o.baseRpc, usdc, c.payer, checkedHead.number)) < price)
+        fail('insufficient_balance');
+      if (await authorizationState(o.baseRpc, usdc, c.payer, c.nonce, checkedHead.number))
+        fail('payment_rejected');
+      await o.beforeSettle?.(file);
+      await bindId();
       await o.beforeRecord?.(key, c.payer);
     }
     const claimed: SellerPurchase = {
@@ -276,6 +314,9 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
   return winner();
 
   async function submit(r: SellerPurchase, budget: number): Promise<Settlement> {
+    const attempted = { ...r, revision: r.revision + 1, submissionAttempted: true };
+    if (!(await o.store.compareAndSet(key, r, attempted))) return winner();
+    r = attempted;
     let res: SettleResponse | undefined;
     // The recorded payload with its own offer, exactly as it was accepted.
     const offer = readPayload(r.header).accepted as Offer;
@@ -299,6 +340,7 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
         ...r,
         revision: r.revision + 1,
         state: 'submitted',
+        leaseUntil: now() + (o.settlementPollSeconds ?? RETRY_SECONDS),
         transaction: hash,
       };
       if (!(await o.store.compareAndSet(key, r, submitted))) return winner();
@@ -310,8 +352,33 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
     // again only after RETRY_SECONDS, the Retry-After a host sends, so retries and repeated downloads can't
     // turn one purchase into a call per request. A purchase already broadcast keeps its answer:
     // pending, with its hash.
-    const released = { ...r, revision: r.revision + 1, leaseUntil: now() + RETRY_SECONDS };
+    const released = {
+      ...r,
+      revision: r.revision + 1,
+      leaseUntil: now() + RETRY_SECONDS,
+      submissionAttempted:
+        res?.submissionAttempted === false ? false : (r.submissionAttempted ?? true),
+    };
     if (!(await o.store.compareAndSet(key, r, released))) return winner();
+    if (res?.errorReason === 'facilitator_busy' || res?.errorReason === 'payer_busy')
+      fail('facilitator_busy');
+    if (res?.errorReason === 'unavailable' || res?.errorReason === 'gas_price_too_high') {
+      const error = new PayError('unavailable');
+      if (
+        typeof res.retryAfterSeconds === 'number' &&
+        Number.isSafeInteger(res.retryAfterSeconds) &&
+        res.retryAfterSeconds >= 0
+      )
+        error.retryAfterSeconds = res.retryAfterSeconds;
+      throw error;
+    }
+    if (res?.errorReason === 'payment_expired') fail('payment_expired');
+    if (
+      res?.errorReason === 'payment_rejected' ||
+      res?.errorReason === 'invalid_authorization' ||
+      res?.errorReason === 'authorization_used'
+    )
+      fail('payment_rejected');
     return answerFrom(
       released,
       `the facilitator did not settle it${res?.errorReason ? ` (${res.errorReason})` : ''}`,
@@ -320,7 +387,13 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
 }
 
 /** The payment id bound to this payload, or `payment_id_conflict` if it came with another. */
-async function bind(o: SettleOptions, key: string, header: string, c: CheckedPayment) {
+async function bind(
+  o: SettleOptions,
+  key: string,
+  header: string,
+  c: CheckedPayment,
+  purchaseKey: string,
+) {
   const fp = fingerprint(header);
   for (;;) {
     const b = (await o.store.load(key)) as IdBinding | null;
@@ -336,6 +409,7 @@ async function bind(o: SettleOptions, key: string, header: string, c: CheckedPay
       revision: 0,
       fingerprint: fp,
       keepUntil: c.validBefore.toString(),
+      purchaseKey,
     };
     if (await o.store.compareAndSet(key, null, created)) return;
   }

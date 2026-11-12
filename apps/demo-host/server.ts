@@ -4,7 +4,7 @@
  * the `annon` CLI or MCP server.
  *
  *   GET /                  the demo files and how to buy them (HTML)
- *   GET /files.json        the same list for scripts and agents
+ *   GET /files.json        the same list for clients
  *   GET /f/<name>          the PAY2 file (402 with the offer until paid)
  *   GET /f/<name>/header   its public header (checked by the buyer before paying)
  *   GET /healthz
@@ -12,24 +12,42 @@
  * Settings: apps/demo-host/README.md.
  */
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readFile, stat } from 'node:fs/promises';
+import { open, readFile, stat, statfs, unlink } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { isIP } from 'node:net';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import {
   type FileHostOptions,
   type HostResponse,
   serveFile,
 } from '../../packages/annon/src/download/host.ts';
+import type { CorsPolicy } from '../../packages/annon/src/download/http.ts';
+import {
+  corsHeaders,
+  corsPolicy,
+  hasContentType,
+  preflight,
+} from '../../packages/annon/src/download/http.ts';
 import { sha256 } from '../../packages/annon/src/envelope/pay2.ts';
-import { authorizationCall } from '../../packages/annon/src/pay/base.ts';
+import { type FileInfo, getFile } from '../../packages/annon/src/near/rpc.ts';
+import { clientKey, fixedWindowLimiter } from '../../packages/annon/src/net/ip.ts';
 import type { Facilitator, SellerRecord } from '../../packages/annon/src/pay/settle.ts';
 import type { Store } from '../../packages/annon/src/pay/store.ts';
 import { fileStore } from '../../packages/annon/src/pay/store-node.ts';
-import { BASE_USDC } from '../../packages/annon/src/settle-near/terms.ts';
+import { type Alert, emit, hostAlerts } from './alerts.ts';
+import { hostCapacity } from './capacity.ts';
+import { hostSettings } from './config.ts';
+import { downloadLedger } from './downloads.ts';
+import { requireEligibility } from './eligibility.ts';
+import { baseFacilitator, initFacilitatorState } from './facilitator.ts';
+import { sweepSellerRecords } from './maintenance.ts';
+import { StartupError, type StartupReason } from './startup-errors.ts';
+import { hostStorage } from './storage.ts';
+import { sendBody } from './stream.ts';
+
+export { clientKey, limiter } from '../../packages/annon/src/net/ip.ts';
+export type { Chain } from './facilitator.ts';
+export { facilitatorFor } from './facilitator.ts';
 
 export interface DemoFile {
   /** URL path segment: lowercase letters, digits and dashes. */
@@ -45,6 +63,7 @@ export interface Loaded extends DemoFile {
   size: number;
   header: Uint8Array;
   headerHash: string;
+  plaintextSize: number;
 }
 export interface HostConfig {
   contractId: string;
@@ -55,6 +74,15 @@ export interface HostConfig {
   store: Store<SellerRecord>;
   /** Absent: Base payments are refused with 501 before any settlement work. */
   facilitator?: Facilitator;
+  cors?: CorsPolicy;
+  capacity?: Awaited<ReturnType<typeof hostCapacity>>;
+  downloads?: FileHostOptions['downloads'];
+  relayerOrigin?: string;
+  alert?: Alert;
+  settlementPollSeconds?: number;
+  paymentMinValiditySeconds?: number;
+  active?: Map<string, number>;
+  getFile?: (fileId: string) => Promise<FileInfo | null>;
   perIpMinute: number;
   /** Requests carrying PAYMENT-SIGNATURE per client per minute. */
   paymentsPerClientMinute: number;
@@ -83,7 +111,11 @@ const optional = (v: unknown, what: string, max: number) =>
   v === undefined ? undefined : text(v, what, max);
 
 /** Reads `files.json` and each PAY2 file's header (its length is the u32 at byte 8). */
-export async function loadFiles(dir: string): Promise<Loaded[]> {
+export async function loadFiles(
+  dir: string,
+  expired?: (id: string) => Promise<boolean>,
+  limits: { maxFileBytes?: number; maxPay2Bytes?: number; maxHeaderBytes?: number } = {},
+): Promise<Loaded[]> {
   const list = JSON.parse(await readFile(join(dir, 'files.json'), 'utf8')) as unknown;
   if (!Array.isArray(list)) throw new Error('files.json must be a list');
   const out: Loaded[] = [];
@@ -103,22 +135,29 @@ export async function loadFiles(dir: string): Promise<Loaded[]> {
       ...(description ? { description } : {}),
       ...(priceUsdc ? { priceUsdc } : {}),
     };
+    if (await expired?.(fileId)) continue;
     const path = join(dir, `${name}.pay2`);
     const size = (await stat(path)).size;
+    if (size > (limits.maxPay2Bytes ?? 50_086_016)) throw new Error('file is too large');
     const fh = await open(path, 'r');
     try {
       const fixed = Buffer.alloc(12);
       await fh.read(fixed, 0, 12, 0);
       const len = fixed.readUInt32BE(8);
-      if (len < 65 || len > size || len > MAX_HEADER)
+      if (len < 65 || len > size || len > (limits.maxHeaderBytes ?? MAX_HEADER))
         throw new Error(`bad header length in ${name}`);
       const header = new Uint8Array(len);
       await fh.read(header, 0, len, 0);
+      const framing = new DataView(header.buffer, header.byteOffset, header.byteLength);
+      const plaintextSize = size - len - framing.getUint16(44) - 16 * framing.getUint32(50);
+      if (plaintextSize < 0 || plaintextSize > (limits.maxFileBytes ?? 50_000_000))
+        throw new Error('file is too large');
       // On chain: SHA-256 of the header without its 65-byte signature.
       out.push({
         ...f,
         path,
         size,
+        plaintextSize,
         header,
         headerHash: hex(await sha256(header.subarray(0, len - 65))),
       });
@@ -127,47 +166,6 @@ export async function loadFiles(dir: string): Promise<Loaded[]> {
     }
   }
   return out;
-}
-
-/** The client's rate-limit key: IPv4 as is, IPv6 by /64, anything else by the socket address. */
-export function clientKey(
-  header: string | string[] | undefined,
-  socket: string | undefined,
-): string {
-  const v = typeof header === 'string' && !header.includes(',') ? header.trim() : socket;
-  const ip = (v ?? '').replace(/^::ffff:/, '');
-  if (isIP(ip) === 4) return ip;
-  if (isIP(ip) === 6) {
-    const [head = '', tail = ''] = ip.split('::');
-    const a = head ? head.split(':') : [];
-    const b = tail ? tail.split(':') : [];
-    const full = ip.includes('::') ? [...a, ...Array(8 - a.length - b.length).fill('0'), ...b] : a;
-    return `${full
-      .slice(0, 4)
-      .map((g) => g.toLowerCase().replace(/^0+(?=.)/, ''))
-      .join(':')}::/64`;
-  }
-  return 'unknown';
-}
-
-/**
- * Fixed-window limit per key; cleared each window, and while full, unknown keys share one bucket,
- * so the map stays bounded.
- */
-export function limiter(perMinute: number, now = () => Date.now(), maxKeys = 50_000) {
-  let window = 0;
-  let hits = new Map<string, number>();
-  return (key: string) => {
-    const w = Math.floor(now() / 60_000);
-    if (w !== window) {
-      window = w;
-      hits = new Map();
-    }
-    const k = hits.has(key) || hits.size < maxKeys ? key : '*';
-    const n = (hits.get(k) ?? 0) + 1;
-    hits.set(k, n);
-    return n <= perMinute;
-  };
 }
 
 function page(c: HostConfig): string {
@@ -191,11 +189,37 @@ Pay with the <code>annon</code> CLI or the Annon MCP server, then <code>annon op
 }
 
 export function handler(c: HostConfig, serve: Serve = serveFile) {
-  const perIp = limiter(c.perIpMinute);
+  const perIp = fixedWindowLimiter(c.perIpMinute);
+  const cors = c.cors ?? corsPolicy();
+  const active = c.active ?? new Map<string, number>();
+  const checked = async () =>
+    Promise.all(
+      c.files.map(async (f) => {
+        if (await c.capacity?.expired(f.fileId)) return null;
+        const info = await (c.getFile?.(f.fileId) ?? getFile(c.nearRpc, c.contractId, f.fileId));
+        if (!info || info.takenDown !== null || info.salesStoppedAt !== null) return null;
+        const life = await c.capacity?.info(`operator:${f.fileId}`);
+        return { f, info, life };
+      }),
+    );
   // The SDK resends its payment about every 3 s while it waits, so a buyer makes ~20 a minute.
-  const paymentsPerClient = limiter(c.paymentsPerClientMinute);
+  const paymentsPerClient = fixedWindowLimiter(c.paymentsPerClientMinute);
   return async (req: IncomingMessage, res: ServerResponse) => {
     const started = Date.now();
+    const requestHeaders = {
+      get: (name: string) => (req.headers[name.toLowerCase()] as string | undefined) ?? null,
+    };
+    for (const [name, value] of Object.entries(
+      corsHeaders(requestHeaders.get('Origin'), cors.origins, cors.expose),
+    ))
+      res.setHeader(name, value);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    );
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Cache-Control', 'no-store');
     const path = (req.url ?? '/').split('?')[0] as string;
     res.on('close', () =>
       console.log(
@@ -211,35 +235,102 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
       res.writeHead(code, { 'Cache-Control': 'no-store', ...headers }).end(body);
     };
     try {
+      if (req.method === 'OPTIONS') {
+        const result = preflight(requestHeaders, cors);
+        if (result.status === 403) res.removeHeader('Access-Control-Allow-Origin');
+        return send(result.status, result.headers);
+      }
+      if (
+        (req.method === 'POST' || req.method === 'PUT') &&
+        !hasContentType(requestHeaders.get('Content-Type'), 'application/json')
+      )
+        return send(415, {});
       if (path === '/healthz')
         return send(200, { 'Content-Type': 'application/json' }, '{"ok":true}');
       const key = clientKey(
         c.ipHeader ? req.headers[c.ipHeader.toLowerCase()] : undefined,
         req.socket.remoteAddress,
       );
-      if (!perIp(key)) return send(429, { 'Retry-After': '60' });
+      const admission = perIp(key);
+      if (!admission.allowed)
+        return send(
+          429,
+          {
+            'Retry-After': String(admission.retryAfterSeconds),
+            'Content-Type': 'application/json',
+          },
+          JSON.stringify({
+            error: 'rate_limited',
+            message: 'Too many requests. Try again later.',
+            retryAfterSeconds: admission.retryAfterSeconds,
+          }),
+        );
       // GET only: HEAD would run settlement without reading the body.
       if (req.method !== 'GET') return send(405, { Allow: 'GET' });
-      if (path === '/') return send(200, { 'Content-Type': 'text/html; charset=utf-8' }, page(c));
-      if (path === '/files.json') {
-        const list = c.files.map(({ name, fileId, title, description, priceUsdc }) => ({
-          name,
-          fileId,
-          title,
-          description,
-          priceUsdc,
-          url: `${c.publicUrl}/f/${name}`,
-          header: `${c.publicUrl}/f/${name}/header`,
+      if (path === '/' || path === '/files.json') {
+        const entries = (await checked()).filter((entry) => entry !== null);
+        if (path === '/')
+          return send(
+            200,
+            { 'Content-Type': 'text/html; charset=utf-8' },
+            page({
+              ...c,
+              files: entries.map(({ f, info }) => ({
+                ...f,
+                priceUsdc: `${info.price / 1_000_000n}.${String(info.price % 1_000_000n).padStart(6, '0')}`,
+              })),
+            }),
+          );
+        const list = entries.map(({ f, info, life }) => ({
+          name: f.name,
+          fileId: f.fileId,
+          title: f.title,
+          description: f.description ?? '',
+          url: `${c.publicUrl}/f/${f.name}`,
+          header: `${c.publicUrl}/f/${f.name}/header`,
+          byteSize: f.size,
+          plaintextSize: f.plaintextSize,
+          createdAt: life?.createdAt,
+          expiresAt: life?.expiresAt,
+          termsHash: info.termsHash,
+          terms: info.terms,
+          salesStopped: info.salesStoppedAt !== null,
+          takenDown: info.takenDown !== null,
         }));
         return send(200, { 'Content-Type': 'application/json' }, JSON.stringify(list));
       }
       const m = /^\/f\/([a-z0-9-]+)(\/header)?$/.exec(path);
+      if (m && (await c.capacity?.expiredSlug(m[1] as string)))
+        return send(
+          410,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({ error: 'file_expired', message: 'This hosted file has expired.' }),
+        );
       const f = m ? c.files.find((x) => x.name === m[1]) : undefined;
       if (!m || !f) return send(404, {});
+      if (await c.capacity?.expired(f.fileId))
+        return send(
+          410,
+          { 'Content-Type': 'application/json' },
+          JSON.stringify({ error: 'file_expired', message: 'This hosted file has expired.' }),
+        );
       if (m[2]) return send(200, { 'Content-Type': 'application/octet-stream' }, f.header);
       if (req.headers['payment-signature']) {
         if (!c.facilitator) return send(501, {});
-        if (!paymentsPerClient(key)) return send(503, { 'Retry-After': '30' });
+        const paymentAdmission = paymentsPerClient(key);
+        if (!paymentAdmission.allowed)
+          return send(
+            429,
+            {
+              'Retry-After': String(paymentAdmission.retryAfterSeconds),
+              'Content-Type': 'application/json',
+            },
+            JSON.stringify({
+              error: 'rate_limited',
+              message: 'Too many requests. Try again later.',
+              retryAfterSeconds: paymentAdmission.retryAfterSeconds,
+            }),
+          );
       }
       const r = await serve(
         { headers: { get: (n) => (req.headers[n.toLowerCase()] as string | undefined) ?? null } },
@@ -252,263 +343,246 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
           header: `${c.publicUrl}/f/${f.name}/header`,
           headerHash: f.headerHash,
           store: c.store,
+          ...(c.downloads ? { downloads: c.downloads } : {}),
+          settlementPollSeconds: c.settlementPollSeconds ?? 10,
+          paymentMinValiditySeconds: c.paymentMinValiditySeconds ?? 60,
+          beforeSettle: (file) =>
+            requireEligibility(file, {
+              origin: c.relayerOrigin ?? '',
+              contract: c.contractId,
+              fileId: f.fileId,
+            }),
           facilitator: c.facilitator ?? noFacilitator,
           file: {
             size: f.size,
+            headerLength: f.header.length,
             read: (start) =>
               Readable.toWeb(createReadStream(f.path, { start })) as ReadableStream<Uint8Array>,
           },
-          // Operator only: the buyer gets the unchanged status. Codes and messages carry no URLs.
-          onPaymentError: (e) =>
+          // Diagnostics contain only the checked code and public file slug.
+          onPaymentError: (e) => {
+            if (e.code === 'transport') emit(c.alert, { type: 'base_rpc_unhealthy' });
+            if (e.code === 'relayer_unavailable') emit(c.alert, { type: 'relayer_unavailable' });
+            if (e.code === 'facilitator_busy') emit(c.alert, { type: 'facilitator_busy' });
             console.log(
               JSON.stringify({
                 payment_error: e.code,
                 file: f.name,
-                message: e.message.slice(0, 300),
               }),
-            ),
+            );
+          },
         },
       );
       res.writeHead(r.status, r.headers);
-      if (!r.body) return void res.end();
-      // pipeline cancels the file stream when the client goes and turns read errors into a cut
-      // response instead of an unhandled error.
-      await pipeline(Readable.fromWeb(r.body as NodeReadableStream<Uint8Array>), res).catch(
-        () => {},
-      );
+      active.set(f.fileId, (active.get(f.fileId) ?? 0) + 1);
+      try {
+        await sendBody(r, res);
+      } finally {
+        active.set(f.fileId, (active.get(f.fileId) ?? 1) - 1);
+      }
     } catch (e) {
+      emit(c.alert, { type: 'store_busy' });
       console.log(JSON.stringify({ error: (e as Error).name, path: path.slice(0, 120) }));
-      if (!res.headersSent) send(500, {});
+      if (!res.headersSent)
+        send(
+          path === '/' || path === '/files.json' ? 503 : 500,
+          path === '/' || path === '/files.json' ? { 'Retry-After': '30' } : {},
+        );
       else res.destroy();
     }
   };
-}
-
-export interface Authorization {
-  from: string;
-  to: string;
-  value: bigint;
-  validAfter: bigint;
-  validBefore: bigint;
-  nonce: string;
-}
-export interface Chain {
-  /** USDC `authorizationState(from, nonce)`: true when the nonce is used or canceled. */
-  used(from: string, nonce: string): Promise<boolean>;
-  /**
-   * Runs the call against USDC without sending it (balance, signature, nonce, validity window,
-   * blacklist, all by USDC's own code); false when USDC would revert.
-   */
-  simulate(a: Authorization, signature: string): Promise<boolean>;
-  /** Prepares and signs the call; null when the fee would exceed the cap. */
-  sign(to: string, data: string): Promise<string | null>;
-  send(signed: string): Promise<string>;
-}
-
-/**
- * The Base facilitator: submits a buyer's EIP-3009 authorization from a hot wallet, which pays the
- * gas. `settle` has already checked the payload against the registered terms; this pins Base USDC,
- * keeps one send per authorization (a repeat call gets the same hash), sends one transaction at a
- * time so wallet nonces never collide, skips authorizations USDC already marks as used, and
- * answers `settlement_pending` right after broadcast: `settle` records the hash and watches Base.
- * It simulates the call first, so a payer without the USDC costs no gas, and sends at most
- * `sendsPerMinute` transactions. A send whose answer was lost blocks its authorization for a minute,
- * then goes again only if USDC still shows the nonce unused. Entries expire after `validBefore`.
- */
-export function facilitatorFor(
-  chain: Chain,
-  sendsPerMinute = 10,
-  now = () => Date.now(),
-): Facilitator {
-  /** (from, nonce) → the hash sent, or '' while a lost send is unresolved; with its expiry. */
-  const sent = new Map<string, { hash: string; at: number; until: number }>();
-  const sends = limiter(sendsPerMinute, now);
-  /** Last send per payer: one payer's authorizations go one at a time, 30 s apart. */
-  const lastByPayer = new Map<string, number>();
-  let queue: Promise<unknown> = Promise.resolve();
-  type Auth = {
-    from: string;
-    to: string;
-    value: string;
-    validAfter: string;
-    validBefore: string;
-    nonce: string;
-  };
-  return async (body, o) => {
-    const req = body.paymentRequirements as {
-      payTo: string;
-      amount: string;
-      asset: string;
-      network: string;
-    };
-    const p = (
-      body.paymentPayload as unknown as { payload: { authorization: Auth; signature: string } }
-    ).payload;
-    const a = p.authorization;
-    const fail = (errorReason: string, transaction = '') =>
-      ({
-        success: false,
-        errorReason,
-        transaction,
-        network: 'eip155:8453',
-        payer: a.from,
-      }) as const;
-    if (
-      req.network !== 'eip155:8453' ||
-      req.asset.toLowerCase() !== BASE_USDC ||
-      a.to.toLowerCase() !== req.payTo.toLowerCase() ||
-      BigInt(a.value) !== BigInt(req.amount)
-    )
-      return fail('invalid_authorization');
-    const key = `${a.from.toLowerCase()}:${a.nonce.toLowerCase()}`;
-    const auth: Authorization = {
-      from: a.from,
-      to: a.to,
-      value: BigInt(a.value),
-      validAfter: BigInt(a.validAfter),
-      validBefore: BigInt(a.validBefore),
-      nonce: a.nonce,
-    };
-    const run = async () => {
-      const t = now();
-      for (const [k, v] of sent) if (v.until * 1000 < t) sent.delete(k);
-      for (const [k, v] of lastByPayer) if (t - v > 30_000) lastByPayer.delete(k);
-      const known = sent.get(key);
-      if (known?.hash) return fail('settlement_pending', known.hash);
-      if (known && t - known.at < 60_000) return fail('settlement_pending');
-      o.signal.throwIfAborted();
-      if (await chain.used(a.from, a.nonce)) return fail('authorization_used');
-      if (!(await chain.simulate(auth, p.signature))) return fail('invalid_authorization');
-      // A payer racing many authorizations against one balance would only burn our gas on reverts.
-      if (lastByPayer.has(a.from.toLowerCase())) return fail('payer_busy');
-      if (!sends('all')) return fail('facilitator_busy');
-      const signed = await chain.sign(BASE_USDC, authorizationCall(auth, p.signature));
-      if (!signed) return fail('gas_price_too_high');
-      o.signal.throwIfAborted();
-      // Marked before sending: if the answer is lost, a retry waits instead of sending again.
-      sent.set(key, { hash: '', at: t, until: Number(auth.validBefore) });
-      lastByPayer.set(a.from.toLowerCase(), t);
-      const hash = await chain.send(signed);
-      sent.set(key, { hash, at: t, until: Number(auth.validBefore) });
-      console.log(JSON.stringify({ facilitator: 'submitted', hash }));
-      return fail('settlement_pending', hash);
-    };
-    const next = queue.then(run, run);
-    queue = next.catch(() => {});
-    try {
-      return await next;
-    } catch (e) {
-      // The name only: viem messages can contain the RPC URL and its key.
-      console.log(JSON.stringify({ facilitator: 'error', error: (e as Error).name }));
-      throw e;
-    }
-  };
-}
-
-/** `facilitatorFor` on Base mainnet through viem, with a fee cap and a 120k gas cap. */
-export async function baseFacilitator(
-  key: string,
-  baseRpc: string,
-  maxFeeGwei: number,
-  sendsPerMinute: number,
-): Promise<Facilitator> {
-  const { createPublicClient, createWalletClient, http, parseGwei } = await import('viem');
-  const { privateKeyToAccount } = await import('viem/accounts');
-  const { base } = await import('viem/chains');
-  const { authorizationState, dryRun, PayError } = await import(
-    '../../packages/annon/src/pay/base.ts'
-  );
-  const account = privateKeyToAccount((key.startsWith('0x') ? key : `0x${key}`) as `0x${string}`);
-  const transport = http(baseRpc);
-  const wallet = createWalletClient({ account, chain: base, transport });
-  const pub = createPublicClient({ chain: base, transport });
-  const cap = parseGwei(String(maxFeeGwei));
-  return facilitatorFor(
-    {
-      used: async (from, nonce) =>
-        authorizationState(baseRpc, BASE_USDC, from, nonce, Number(await pub.getBlockNumber())),
-      simulate: async (a, signature) => {
-        try {
-          await dryRun(baseRpc, BASE_USDC, a, signature);
-          return true;
-        } catch (e) {
-          if (e instanceof PayError && e.code === 'payment_rejected') return false;
-          throw e;
-        }
-      },
-      sign: async (to, data) => {
-        const r = await wallet.prepareTransactionRequest({
-          to: to as `0x${string}`,
-          data: data as `0x${string}`,
-          gas: 120_000n,
-        });
-        if ((r.maxFeePerGas ?? 0n) > cap) return null;
-        return wallet.signTransaction(r);
-      },
-      send: (signed) =>
-        wallet.sendRawTransaction({ serializedTransaction: signed as `0x${string}` }),
-    },
-    sendsPerMinute,
-  );
 }
 
 const noFacilitator: Facilitator = async () => {
   throw new Error('this host has no Base facilitator');
 };
 
-async function main() {
-  const e = process.env;
-  const need = (k: string) => {
-    const v = e[k]?.trim();
-    if (!v) throw new Error(`${k} is required`);
-    return v;
-  };
-  const int = (k: string, d: number) => {
-    const n = Number(e[k] ?? d);
-    if (!Number.isSafeInteger(n) || n < 1) throw new Error(`${k} must be a positive integer`);
-    return n;
-  };
-  const publicUrl = need('PUBLIC_URL').replace(/\/$/, '');
-  if (
-    !/^https:\/\//.test(publicUrl) &&
-    !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(publicUrl)
-  )
-    throw new Error('PUBLIC_URL must be https (or http on localhost)');
-  const baseRpc = need('BASE_RPC');
-  const dataDir = join(need('DATA_DIR'), 'seller');
-  await mkdir(dataDir, { recursive: true, mode: 0o700 });
-  const key = e.FACILITATOR_KEY?.trim();
-  const maxFeeGwei = Number(e.MAX_FEE_GWEI ?? 0.5);
-  if (!(maxFeeGwei > 0)) throw new Error('MAX_FEE_GWEI must be positive');
-  const c: HostConfig = {
-    contractId: need('CONTRACT_ID'),
-    nearRpc: need('NEAR_RPC'),
-    baseRpc,
-    publicUrl,
-    files: await loadFiles(need('FILES_DIR')),
-    store: fileStore<SellerRecord>(dataDir),
-    ...(key
-      ? {
-          facilitator: await baseFacilitator(key, baseRpc, maxFeeGwei, int('SENDS_PER_MINUTE', 10)),
-        }
-      : {}),
-    perIpMinute: int('PER_IP_MINUTE', 120),
-    paymentsPerClientMinute: int('PAYMENTS_PER_CLIENT_MINUTE', 30),
-    ...(e.IP_HEADER?.trim() ? { ipHeader: e.IP_HEADER.trim() } : {}),
-  };
-  const server = createServer(handler(c));
-  server.requestTimeout = 30_000;
-  server.headersTimeout = 10_000;
-  // Inactivity on a socket, sending included: a buyer cannot hold a download open by reading slowly.
-  server.timeout = 120_000;
-  server.maxConnections = 1_000;
-  const port = int('PORT', 8080);
-  server.listen(port, () =>
-    console.log(
-      `annon demo host on :${port}, ${c.files.length} files, Base facilitator ${key ? 'on' : 'off'}`,
-    ),
-  );
-  process.on('SIGTERM', () => server.close(() => process.exit(0)));
+export async function main(e: Record<string, string | undefined> = process.env) {
+  let reason: StartupReason = 'config_invalid';
+  let ownership: Awaited<ReturnType<typeof hostStorage>> | undefined;
+  try {
+    const settings = hostSettings(e);
+    const port = settings.int('PORT', 8080, 1, 65535);
+    const need = (name: string) => {
+      const value = e[name]?.trim();
+      if (!value) throw new Error(`${name} is required`);
+      return value;
+    };
+    const dataDir = need('DATA_DIR');
+    const alert = hostAlerts(need('DEMO_ALERT_WEBHOOK'));
+    reason = 'storage_uninitialized';
+    ownership = await hostStorage(dataDir);
+    reason = 'state_invalid';
+    await initFacilitatorState(fileStore(join(dataDir, 'facilitator')), true);
+    const store = fileStore<SellerRecord>(join(dataDir, 'seller'));
+    const capacity = await hostCapacity(join(dataDir, 'capacity'), {
+      ...settings.capacity,
+      requireState: true,
+    });
+    const downloads = await downloadLedger(join(dataDir, 'downloads'), settings.downloads);
+    const files = await loadFiles(need('FILES_DIR'), (id) => capacity.expired(id), settings);
+    const active = new Map<string, number>();
+    for (const f of files)
+      await capacity.importFile({
+        id: `operator:${f.fileId}`,
+        fileId: f.fileId,
+        slug: f.name,
+        seller: 'operator',
+        ip: 'operator',
+        listed: true,
+        byteSize: f.size,
+        bodyBytes: f.size - f.header.length,
+        plaintextSize: f.plaintextSize,
+      });
+    const key = e.FACILITATOR_KEY?.trim();
+    const baseRpc = need('BASE_RPC');
+    const facilitator = key
+      ? await baseFacilitator(key, baseRpc, settings.maxFeeGwei, settings.sendsPerMinute, {
+          ...settings.facilitator,
+          store: fileStore(join(dataDir, 'facilitator')),
+          alert,
+          requireState: true,
+          rpcTimeout: settings.rpcTimeout,
+          rpcRetries: settings.rpcRetries,
+          gasLimit: settings.gasLimit,
+        })
+      : undefined;
+    const c: HostConfig = {
+      contractId: need('CONTRACT_ID'),
+      nearRpc: need('NEAR_RPC'),
+      baseRpc,
+      publicUrl: settings.publicUrl,
+      files,
+      store,
+      capacity,
+      downloads,
+      active,
+      alert,
+      cors: settings.cors,
+      relayerOrigin: settings.relayerOrigin,
+      settlementPollSeconds: settings.pollSeconds,
+      paymentMinValiditySeconds: settings.facilitator.minValiditySeconds,
+      perIpMinute: settings.perIpMinute,
+      paymentsPerClientMinute: settings.paymentsPerClientMinute,
+      ...(facilitator ? { facilitator } : {}),
+      ...(e.IP_HEADER?.trim() ? { ipHeader: e.IP_HEADER.trim() } : {}),
+    };
+    const cleanup = async () => {
+      for (const id of await capacity.sweep()) {
+        const record = await capacity.info(id);
+        if (
+          !record ||
+          !id.startsWith('operator:') ||
+          !NAME.test(record.slug) ||
+          (active.get(record.fileId) ?? 0) > 0
+        )
+          continue;
+        await unlink(join(need('FILES_DIR'), `${record.slug}.pay2`)).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        });
+        await capacity.removed(id);
+      }
+      await sweepSellerRecords(join(dataDir, 'seller'), store, Date.now(), settings.graceSeconds);
+    };
+    const sample = async () => {
+      if (facilitator && (await facilitator.selfCheck())) await facilitator.sample();
+      for (const path of [dataDir, need('FILES_DIR')]) {
+        const fs = await statfs(path);
+        const percent = Math.ceil((100 * (fs.blocks - fs.bavail)) / Math.max(1, fs.blocks));
+        const inodes = Math.ceil((100 * (fs.files - fs.ffree)) / Math.max(1, fs.files));
+        if (percent >= settings.diskPercent) emit(alert, { type: 'disk', percent });
+        if (inodes >= settings.diskPercent) emit(alert, { type: 'inodes', percent: inodes });
+      }
+    };
+    await cleanup();
+
+    emit(alert, { type: 'restart' });
+    const handle = handler(c);
+    const requests = new Set<Promise<void>>();
+    const server = createServer((req, res) => {
+      const task = handle(req, res);
+      requests.add(task);
+      void task.then(
+        () => requests.delete(task),
+        () => requests.delete(task),
+      );
+    });
+    server.requestTimeout = 30_000;
+    server.headersTimeout = 10_000;
+    server.timeout = 120_000;
+    server.maxConnections = 1_000;
+    let maintenance = Promise.resolve();
+    const enqueue = (job: () => Promise<void>, type: 'store_busy' | 'base_rpc_unhealthy') => {
+      maintenance = maintenance.then(job).catch(() => {
+        emit(alert, { type });
+      });
+    };
+    const schedule = (
+      job: () => Promise<void>,
+      seconds: number,
+      type: 'store_busy' | 'base_rpc_unhealthy',
+    ) => setInterval(() => enqueue(job, type), seconds * 1000);
+    const timers = [
+      schedule(cleanup, settings.sweepSeconds, 'store_busy'),
+      schedule(sample, settings.sampleSeconds, 'base_rpc_unhealthy'),
+    ];
+    reason = 'config_invalid';
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(port, () => {
+          server.removeListener('error', reject);
+          resolve();
+        });
+      });
+    } catch (error) {
+      for (const timer of timers) clearInterval(timer);
+      throw error;
+    }
+    enqueue(sample, 'base_rpc_unhealthy');
+    const close = async () => {
+      for (const timer of timers) clearInterval(timer);
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await Promise.allSettled([...requests, maintenance]);
+      await ownership?.close();
+      process.removeListener('SIGTERM', shutdown);
+      process.removeListener('SIGINT', shutdown);
+    };
+    const shutdown = () => {
+      void close().then(() => process.exit(0));
+    };
+    process.once('SIGTERM', shutdown);
+    process.once('SIGINT', shutdown);
+    return { server, close };
+  } catch (error) {
+    await ownership?.close();
+    if (error instanceof StartupError) throw error;
+    throw new StartupError(reason);
+  }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) await main();
+export async function reportStartupFailure(
+  error: unknown,
+  env: Record<string, string | undefined>,
+) {
+  const reason = error instanceof StartupError ? error.reason : 'config_invalid';
+  console.error(JSON.stringify({ error: 'host_startup_failed', reason }));
+  if (env.DEMO_ALERT_WEBHOOK) {
+    try {
+      await hostAlerts(env.DEMO_ALERT_WEBHOOK)({ type: 'host_startup_failed', reason });
+    } catch {
+      /* Invalid webhook configuration cannot expose diagnostics. */
+    }
+  }
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  try {
+    await main();
+  } catch (error) {
+    await reportStartupFailure(error, process.env);
+    process.exitCode = 1;
+  }
+}
