@@ -46,6 +46,14 @@ async function start(c: Partial<HostConfig>, serve?: Parameters<typeof handler>[
     baseRpc: 'https://base.invalid',
     publicUrl: 'https://demo.example',
     files: [],
+    getFile: async () =>
+      ({
+        price: 100000n,
+        takenDown: null,
+        salesStoppedAt: null,
+        termsHash: `0x${'11'.repeat(32)}`,
+        terms: { network: 'near:mainnet' },
+      }) as never,
     store: memoryStore(),
     facilitator: async () => {
       throw new Error('unused');
@@ -99,6 +107,12 @@ function fakeChain(
 ) {
   const calls = { used: 0, simulate: 0, sign: 0, send: 0, inFlight: 0, maxInFlight: 0 };
   const chain: Chain = {
+    timestamp: async () => Math.floor(Date.now() / 1000),
+    balance: async () => 100000n,
+    ethBalance: async () => 10n ** 18n,
+    nonceClear: async () => true,
+    receipt: async () => ({ reverted: false, costWei: 1n }),
+    transaction: async () => true,
     used: async () => {
       calls.used++;
       return o.used ?? false;
@@ -109,7 +123,7 @@ function fakeChain(
     },
     sign: async () => {
       calls.sign++;
-      return o.cap ? null : '0xsigned';
+      return o.cap ? null : { serialized: '0xsigned', hash: `0xhash${calls.sign}`, maxCostWei: 1n };
     },
     send: async () => {
       calls.send++;
@@ -200,7 +214,14 @@ describe('demo host routes', () => {
       (await fetch(`${url}/f/hello`, { method: 'HEAD', headers: { 'PAYMENT-SIGNATURE': 'x' } }))
         .status,
     ).toBe(405);
-    expect((await fetch(`${url}/f/hello`, { method: 'POST' })).status).toBe(405);
+    expect(
+      (
+        await fetch(`${url}/f/hello`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        })
+      ).status,
+    ).toBe(405);
     expect(served).toBe(0);
   });
 
@@ -298,7 +319,7 @@ describe('demo host routes', () => {
       402,
     );
     expect((await fetch(`${url}/f/hello`, { headers: { 'PAYMENT-SIGNATURE': 'y' } })).status).toBe(
-      503,
+      429,
     );
     expect((await fetch(`${url}/f/hello`)).status).toBe(402);
   });
@@ -318,14 +339,14 @@ describe('demo host limits', () => {
     expect((await fetch(`${url}/healthz`)).status).toBe(200);
   });
 
-  it('keys clients by a single-value header, IPv6 by /64', () => {
+  it('keys clients by a single-value header, IPv6 by /48', () => {
     expect(clientKey('203.0.113.7', '10.0.0.1')).toBe('203.0.113.7');
     expect(clientKey('203.0.113.7, 10.0.0.9', '10.0.0.1')).toBe('10.0.0.1');
     expect(clientKey(['a', 'b'], '10.0.0.1')).toBe('10.0.0.1');
     expect(clientKey(undefined, '::ffff:10.0.0.1')).toBe('10.0.0.1');
-    expect(clientKey('2001:db8:1:2:3:4:5:6', undefined)).toBe('2001:db8:1:2::/64');
-    expect(clientKey('2001:db8:1:2::9', undefined)).toBe('2001:db8:1:2::/64');
-    expect(clientKey('2001:db8::1', undefined)).toBe('2001:db8:0:0::/64');
+    expect(clientKey('2001:db8:1:2:3:4:5:6', undefined)).toBe('2001:db8:1::/48');
+    expect(clientKey('2001:db8:1:2::9', undefined)).toBe('2001:db8:1::/48');
+    expect(clientKey('2001:db8::1', undefined)).toBe('2001:db8:0::/48');
     expect(clientKey('x'.repeat(20_000), undefined)).toBe('unknown');
   });
 });
@@ -400,7 +421,7 @@ describe('demo host facilitator', () => {
       f(other('2'), { signal: signal() }),
       f(other('3'), { signal: signal() }),
     ]);
-    expect(calls.send).toBe(3);
+    expect(calls.send).toBe(1);
     expect(calls.maxInFlight).toBe(1);
   });
 
@@ -434,32 +455,32 @@ describe('demo host facilitator', () => {
     expect(calls.send).toBe(1);
   });
 
-  it('after a lost send waits a minute, then sends again only while USDC shows the nonce unused', async () => {
+  it('after a lost send preserves the signed hash for reconciliation', async () => {
     let t = 1_000_000;
     const { chain, calls } = fakeChain({ lose: 1 });
     const f = facilitatorFor(chain, 10, () => t);
     await expect(f(body(), { signal: signal() })).rejects.toThrow('answer lost');
     await expect(f(body(), { signal: signal() })).resolves.toMatchObject({
       errorReason: 'settlement_pending',
-      transaction: '',
+      transaction: '0xhash1',
     });
     expect(calls.send).toBe(1);
     t += 61_000;
     await expect(f(body(), { signal: signal() })).resolves.toMatchObject({
       errorReason: 'settlement_pending',
-      transaction: '0xhash2',
+      transaction: '0xhash1',
     });
-    expect(calls.send).toBe(2);
+    expect(calls.send).toBe(1);
   });
 
-  it('forgets authorizations after validBefore', async () => {
+  it('retains authorization evidence until reconciliation', async () => {
     let t = 0;
     const { chain, calls } = fakeChain();
     const f = facilitatorFor(chain, 10, () => t);
     await f(body(), { signal: signal() });
-    t = (Number(AUTH.validBefore) + 1) * 1000;
+    t = 86_000_000;
     await f(body(), { signal: signal() });
-    expect(calls.send).toBe(2);
+    expect(calls.send).toBe(1);
   });
 
   it('sends one authorization per payer at a time', async () => {
@@ -487,5 +508,200 @@ describe('demo host facilitator', () => {
       errorReason: 'settlement_pending',
     });
     expect(calls.send).toBe(2);
+  });
+});
+
+it('sets browser security headers and CORS on success, errors and preflight before admission', async () => {
+  const url = await start({ perIpMinute: 1 });
+  const headers = { Origin: 'https://annon.dev' };
+  const page = await fetch(`${url}/`, { headers });
+  expect(page.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'");
+  expect(page.headers.get('X-Content-Type-Options')).toBe('nosniff');
+  expect(page.headers.get('Access-Control-Allow-Origin')).toBe(headers.Origin);
+  const busy = await fetch(`${url}/missing`, { headers });
+  expect(busy.status).toBe(429);
+  expect(Number(busy.headers.get('Retry-After'))).toBeGreaterThan(0);
+  expect(await busy.json()).toMatchObject({ error: 'rate_limited', message: expect.any(String) });
+  expect(busy.headers.get('Access-Control-Allow-Origin')).toBe(headers.Origin);
+  const preflight = await fetch(`${url}/f/missing`, {
+    method: 'OPTIONS',
+    headers: {
+      ...headers,
+      'Access-Control-Request-Method': 'GET',
+      'Access-Control-Request-Headers': 'Range, Annon-Buyer-Proof',
+    },
+  });
+  expect(preflight.status).toBe(204);
+  expect(
+    (await fetch(`${url}/f/missing`, { method: 'POST', headers: { 'Content-Type': 'text/plain' } }))
+      .status,
+  ).toBe(415);
+});
+it('rejects files exceeding encrypted or inferred plaintext size limits', async () => {
+  const { truncate } = await import('node:fs/promises');
+  dir = await mkdtemp(join(tmpdir(), 'host-size-'));
+  await writeFile(
+    join(dir, 'files.json'),
+    JSON.stringify([{ name: 'large', fileId: FILE_ID, title: 'Large' }]),
+  );
+  await writeFile(join(dir, 'large.pay2'), pay2(100, 1));
+  await truncate(join(dir, 'large.pay2'), 50_086_017);
+  await expect(loadFiles(dir)).rejects.toThrow();
+  await truncate(join(dir, 'large.pay2'), 50_000_101);
+  await expect(loadFiles(dir)).rejects.toThrow();
+});
+it('records successful writes, prepares completion before end, and bills only after response finish', async () => {
+  const files = await setup([{ name: 'hello', fileId: FILE_ID, title: 'Hello' }], {
+    hello: pay2(100, 10),
+  });
+  const calls: string[] = [];
+  const url = await start({ files }, async (_req, o) => ({
+    status: 206,
+    headers: { 'Content-Length': '10', 'Content-Range': 'bytes 100-109/110' },
+    body: o.file.read(100),
+    delivery: {
+      wrote: async (offset) => {
+        calls.push(`wrote:${offset}`);
+      },
+      prepare: async () => {
+        calls.push('prepare');
+      },
+      finish: async () => {
+        calls.push('finish');
+      },
+      interrupt: async () => {
+        calls.push('interrupt');
+      },
+    },
+  }));
+  const r = await fetch(`${url}/f/hello`);
+  await r.arrayBuffer();
+  for (let i = 0; i < 20 && !calls.includes('finish'); i++)
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(calls).toEqual(['wrote:110', 'prepare', 'finish']);
+});
+it('uses final terms for the catalog, omits stopped sales and fails closed on chain failure', async () => {
+  const files = await setup(
+    [{ name: 'hello', fileId: FILE_ID, title: 'Hello', priceUsdc: '999' }],
+    { hello: pay2(100, 10) },
+  );
+  let state = 'active';
+  const url = await start({
+    files,
+    getFile: async () => {
+      if (state === 'error') throw new Error('private');
+      return {
+        price: 100000n,
+        terms: { network: 'near:mainnet' },
+        termsHash: 'final',
+        takenDown: null,
+        salesStoppedAt: state === 'stopped' ? 1 : null,
+      } as never;
+    },
+  });
+  const r = await fetch(`${url}/files.json`);
+  const catalog = await r.json();
+  expect(catalog[0]).toMatchObject({
+    termsHash: 'final',
+    terms: { network: 'near:mainnet' },
+    byteSize: 110,
+    plaintextSize: 10,
+  });
+  expect(catalog[0]).not.toHaveProperty('priceUsdc');
+  state = 'stopped';
+  expect(await (await fetch(`${url}/files.json`)).json()).toEqual([]);
+  state = 'error';
+  expect((await fetch(`${url}/files.json`)).status).toBe(503);
+});
+it('interrupts accounting on a client disconnect while the source is waiting', async () => {
+  const files = await setup([{ name: 'hello', fileId: FILE_ID, title: 'Hello' }], {
+    hello: pay2(100, 10),
+  });
+  const events: string[] = [];
+  let canceled = false;
+  const url = await start({ files }, async () => ({
+    status: 200,
+    headers: {},
+    body: new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((r) => setTimeout(r, 20));
+        if (!canceled) controller.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        canceled = true;
+      },
+    }),
+    delivery: {
+      async wrote() {
+        events.push('write');
+      },
+      async prepare() {
+        events.push('prepare');
+      },
+      async finish() {
+        events.push('finish');
+      },
+      async interrupt() {
+        events.push('interrupt');
+      },
+    },
+  }));
+  await new Promise<void>((resolve) => {
+    const req = request(`${url}/f/hello`, (res) => {
+      res.once('data', () => {
+        req.destroy();
+        resolve();
+      });
+    });
+    req.end();
+  });
+  for (let i = 0; i < 50 && !events.includes('interrupt'); i++)
+    await new Promise((r) => setTimeout(r, 10));
+  expect(events).toContain('interrupt');
+  expect(events).not.toContain('finish');
+  expect(events).not.toContain('prepare');
+});
+it('reports startup failures without stack traces or upstream diagnostics', async () => {
+  const { execFile } = await import('node:child_process');
+  const result = await new Promise<{ code: number; stderr: string }>((resolve) => {
+    execFile(
+      process.execPath,
+      ['--import', './ts-hook.mjs', 'server.ts'],
+      { cwd: import.meta.dirname, env: { PATH: process.env.PATH ?? '', NODE_NO_WARNINGS: '1' } },
+      (error, _stdout, stderr) => resolve({ code: error?.code as number, stderr }),
+    );
+  });
+  expect(result.code).toBe(1);
+  expect(result.stderr.trim()).toBe('{"error":"host_startup_failed","reason":"config_invalid"}');
+});
+
+it('removes allow-origin on a forbidden preflight from an allowed origin', async () => {
+  const url = await start({});
+  const res = await fetch(url, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: 'https://annon.dev',
+      'Access-Control-Request-Method': 'DELETE',
+    },
+  });
+  expect(res.status).toBe(403);
+  expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull();
+});
+
+it('includes a safe message when the payment admission limit is reached', async () => {
+  const files = await setup([{ name: 'hello', fileId: FILE_ID, title: 'Hello' }], {
+    hello: pay2(100, 10),
+  });
+  const url = await start({ files, paymentsPerClientMinute: 1 }, async () => ({
+    status: 402,
+    headers: {},
+  }));
+  const headers = { 'PAYMENT-SIGNATURE': 'payload' };
+  expect((await fetch(`${url}/f/hello`, { headers })).status).toBe(402);
+  const blocked = await fetch(`${url}/f/hello`, { headers });
+  expect(blocked.status).toBe(429);
+  expect(await blocked.json()).toMatchObject({
+    error: 'rate_limited',
+    message: expect.any(String),
   });
 });

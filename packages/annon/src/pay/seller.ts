@@ -46,6 +46,7 @@ export interface OfferOptions {
   public?: boolean;
   /** At most this long for the buyer's authorization; the Annon client signs for at most 180. */
   maxTimeoutSeconds?: number;
+  paymentMinValiditySeconds?: number;
   /** The seller app's x402 builder code (`^[a-z0-9_]{1,32}$`), declared as `builder-code`. */
   appCode?: string;
   /** Describes the file for x402 discovery (`bazaar`, profile section 11). */
@@ -314,6 +315,8 @@ export async function verifyPayment(
   }
   const pr = await offerFor(o);
   const checked = checkPayment(header, pr, Math.min(base, local));
+  if (checked.validBefore < BigInt(base + (o.paymentMinValiditySeconds ?? 60)))
+    fail('payment_expired', 'authorization expires too soon');
   if (await hasCode(o.baseRpc, checked.payer, block.number))
     fail('bad_signature', 'payer must be an EOA');
   return checked;
