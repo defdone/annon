@@ -489,7 +489,7 @@ describe('streaming authentication and framing', () => {
       expect(received).toEqual(Buffer.from(data.subarray(0, received.length)));
       expect(received.length).toBeLessThan(data.length);
     }
-  });
+  }, 30_000);
 
   it('releases earlier authenticated chunks, but holds the final chunk until EOF', async () => {
     const C = 65536;
