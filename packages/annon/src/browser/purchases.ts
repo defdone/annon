@@ -1,5 +1,7 @@
 /** Durable SDK orchestration. Storage belongs to the embedding origin; no UI or wallet connector. */
 import { Annon, type AnnonOptions, type BuyOptions, type BuyRoute } from '../api/annon.js';
+import { DownloadError } from '../download/download.js';
+import { sha256 } from '../envelope/pay2.js';
 import {
   type Deposit,
   OneClick,
@@ -38,6 +40,12 @@ import {
 } from '../pay/store.js';
 import { bytes, hex } from '../settle-near/codec.js';
 import type { IdentityWallet } from '../wallet/wallet.js';
+import {
+  BROWSER_DOWNLOAD_LIMIT,
+  type BrowserDownloadOptions,
+  browserDownload,
+  downloadProgress,
+} from './download.js';
 
 export type { BrowserPurchaseRecord, BrowserPurchaseState } from '../pay/browser-record.js';
 export type PurchaseSdk = Pick<Annon, 'buy' | 'accept' | 'open' | 'recover' | 'proveRecovery'>;
@@ -354,7 +362,13 @@ export interface PurchaseProgress {
   revision: number;
   /** A safe status code; raw upstream details stay in the encrypted record. */
   swapStatus?: string;
+  /** Unix seconds when another tab or a crashed owner releases this checkout. */
+  leaseWaitUntil?: number;
 }
+export type BrowserOpenOptions = Pick<
+  BrowserDownloadOptions,
+  'fetch' | 'signal' | 'size' | 'onProgress' | 'retries' | 'settleTries' | 'wait'
+>;
 export interface ControllerOptions {
   storage: BrowserPurchaseStorage;
   sdk: PurchaseSdk;
@@ -381,6 +395,17 @@ export function browserAnnon(
     backupSecret: storage.backupSecret,
     writeBackup: storage.writeBackup,
   });
+}
+export class PurchaseLeaseBusy extends Error {
+  readonly code = 'lease_busy';
+  constructor(readonly waitUntil: number) {
+    super('Another tab holds this purchase; wait for its lease to expire.');
+    this.name = 'PurchaseLeaseBusy';
+  }
+}
+interface LeaseSession {
+  record: BrowserPurchaseRecord;
+  change(patch: Partial<BrowserPurchaseRecord>): Promise<BrowserPurchaseRecord>;
 }
 export class BrowserPurchaseController {
   readonly storage: BrowserPurchaseStorage;
@@ -426,11 +451,79 @@ export class BrowserPurchaseController {
       fileId: record.fileId,
       route: record.route,
       resourceUrl: record.resourceUrl,
+      ...this.waiting(record),
       ...(record.checkpoint?.lastStatus ? { swapStatus: record.checkpoint.lastStatus.status } : {}),
     };
   }
   private now() {
     return (this.options.now ?? (() => Math.floor(Date.now() / 1000)))();
+  }
+  private waiting(record: BrowserPurchaseRecord): { leaseWaitUntil?: number } {
+    return record.lease && record.lease.expiresAt > this.now()
+      ? { leaseWaitUntil: record.lease.expiresAt }
+      : {};
+  }
+  private emit(event: PurchaseProgress) {
+    for (const listener of this.listeners) {
+      try {
+        listener(event);
+      } catch {
+        /* Observers cannot interrupt the workflow. */
+      }
+    }
+  }
+  private busy(record: BrowserPurchaseRecord): PurchaseLeaseBusy | undefined {
+    if (!record.lease || record.lease.expiresAt <= this.now()) return;
+    this.emit({
+      id: record.id,
+      state: record.state,
+      revision: record.revision,
+      ...this.waiting(record),
+    });
+    return new PurchaseLeaseBusy(record.lease.expiresAt);
+  }
+  /** Every asynchronous operation owns a renewable lease, with revision CAS on every write. */
+  private async withLease<T>(run: (session: LeaseSession) => Promise<T>): Promise<T> {
+    const before = await this.read();
+    const busy = this.busy(before);
+    if (busy) throw busy;
+    const lease = () => ({ owner: this.owner, expiresAt: this.now() + 120 });
+    const session: LeaseSession = {
+      record: await this.change(before, { lease: lease() }),
+      change: (patch) =>
+        enqueue(async () => {
+          if (heartbeatError) throw heartbeatError;
+          if (
+            session.record.lease?.owner !== this.owner ||
+            session.record.lease.expiresAt <= this.now()
+          )
+            throw new Error('purchase lease expired; resume the saved purchase');
+          session.record = await this.change(session.record, { ...patch, lease: lease() });
+          return session.record;
+        }),
+    };
+    let queue: Promise<unknown> = Promise.resolve();
+    let heartbeatError: unknown;
+    function enqueue<R>(fn: () => Promise<R>): Promise<R> {
+      const next = queue.then(fn);
+      queue = next.catch(() => {});
+      return next;
+    }
+    const heartbeat = setInterval(() => {
+      void session.change({}).catch((error) => {
+        heartbeatError = error;
+      });
+    }, 30000);
+    try {
+      const result = await run(session);
+      await session.change({});
+      return result;
+    } finally {
+      clearInterval(heartbeat);
+      await queue;
+      // A stale owner must never release a newer owner's lease.
+      await this.change(session.record, { lease: undefined }).catch(() => {});
+    }
   }
   private async change(before: BrowserPurchaseRecord, patch: Partial<BrowserPurchaseRecord>) {
     const next = { ...before, ...patch, id: before.id, revision: before.revision + 1 };
@@ -441,13 +534,7 @@ export class BrowserPurchaseController {
       revision: next.revision,
       ...(next.checkpoint?.lastStatus ? { swapStatus: next.checkpoint.lastStatus.status } : {}),
     };
-    for (const listener of this.listeners) {
-      try {
-        listener(event);
-      } catch {
-        /* A UI observer cannot interrupt durable payment checkpoints. */
-      }
-    }
+    this.emit(event);
     return next;
   }
   async start(
@@ -465,6 +552,8 @@ export class BrowserPurchaseController {
     >,
   ): Promise<void> {
     let saved = await this.read();
+    const busy = this.busy(saved);
+    if (busy) throw busy;
     if (saved.state !== 'terms_review')
       throw new Error('purchase already started; resume the saved purchase');
     if (saved.route === 'base-usdc' && typeof options.submitBase !== 'function')
@@ -579,95 +668,98 @@ export class BrowserPurchaseController {
   }
   async resume(options: { recovery?: IdentityWallet } = {}): Promise<void> {
     let saved = await this.read();
+    if (this.busy(saved)) return;
     if (
       ['terms_review', 'refunded', 'failed', 'file_ready', 'accepted', 'abandoned'].includes(
         saved.state,
       )
     )
       return;
-    if (saved.lease && saved.lease.expiresAt > this.now()) return;
     if (saved.state === 'recovering') {
       if (options.recovery) await this.recover(options.recovery);
       return;
     }
-    if (!saved.purchase) {
-      await this.change(saved, { state: 'terms_review', lease: undefined });
-      return;
-    }
-    const purchase = saved.purchase;
-    const signed = purchase.attempts.some((attempt) => !!attempt.payload);
-    if (
-      saved.route !== 'oneclick' &&
-      saved.submission === 'not_submitted' &&
-      !signed &&
-      !saved.paymentStarted &&
-      !saved.purchase.nearSubmission
-    ) {
-      await this.change(saved, { state: 'abandoned', lease: undefined });
-      return;
-    }
-    if (saved.lease || (signed && saved.submission === 'not_submitted'))
-      saved = await this.change(saved, {
-        lease: undefined,
-        ...(signed ? { submission: 'uncertain' as const } : {}),
-      });
-    const restored = await this.storage.restorePurchase(purchase);
-    if (JSON.stringify(restored) !== JSON.stringify(saved.purchase))
-      saved = await this.change(saved, { purchase: restored });
-    if (await this.options.sdk.accept(restored)) {
-      await this.change(saved, { state: 'accepted' });
-      return;
-    }
-    const status = saved.checkpoint?.lastStatus?.status;
-    const progress =
-      status === 'SUCCESS' || saved.state === 'accepting'
-        ? 'accepting'
-        : status === 'PROCESSING' || status === 'KNOWN_DEPOSIT_TX' || saved.state === 'processing'
-          ? 'processing'
-          : null;
-    if (saved.route === 'oneclick' && progress) {
-      await this.change(saved, { state: progress });
-      return;
-    }
-    if (saved.state === 'expired') return;
-    if (saved.route !== 'oneclick') {
-      await this.change(saved, {
-        state:
-          this.now() >= Number(restored.purchase.expires_at)
-            ? 'expired'
-            : saved.submission === 'submitted'
-              ? 'accepting'
-              : 'payment_uncertain',
-      });
-      return;
-    }
-    const deposit = this.deposit(saved);
-    if (
-      !deposit ||
-      !Number.isFinite(Date.parse(deposit.depositBefore)) ||
-      Date.parse(deposit.depositBefore) - this.now() * 1000 < 600000
-    ) {
-      await this.change(saved, { state: 'expired' });
-      return;
-    }
-    if (saved.needsProof || !saved.purchase?.recoveryProved) {
-      if (!options.recovery) return;
-      const purchase = await this.options.sdk.proveRecovery(restored, options.recovery);
-      saved = await this.change(saved, { purchase, needsProof: false });
-      if (Date.parse(deposit.depositBefore) - this.now() * 1000 < 600000) {
-        await this.change(saved, { state: 'expired' });
+    const interrupted = saved.lease !== undefined;
+    return this.withLease(async (session) => {
+      saved = session.record;
+      if (!saved.purchase) {
+        await session.change({ state: 'terms_review' });
         return;
       }
-    }
-    await this.change(saved, {
-      state:
-        status === 'SUCCESS'
+      const purchase = saved.purchase;
+      const signed = purchase.attempts.some((attempt) => !!attempt.payload);
+      if (
+        saved.route !== 'oneclick' &&
+        saved.submission === 'not_submitted' &&
+        !signed &&
+        !saved.paymentStarted &&
+        !saved.purchase.nearSubmission
+      ) {
+        await session.change({ state: 'abandoned' });
+        return;
+      }
+      if (interrupted || (signed && saved.submission === 'not_submitted'))
+        saved = await session.change({
+          ...(signed ? { submission: 'uncertain' as const } : {}),
+        });
+      const restored = await this.storage.restorePurchase(purchase);
+      if (JSON.stringify(restored) !== JSON.stringify(saved.purchase))
+        saved = await session.change({ purchase: restored });
+      if (await this.options.sdk.accept(restored)) {
+        await session.change({ state: 'accepted' });
+        return;
+      }
+      const status = saved.checkpoint?.lastStatus?.status;
+      const progress =
+        status === 'SUCCESS' || saved.state === 'accepting'
           ? 'accepting'
-          : status === 'INCOMPLETE_DEPOSIT'
-            ? 'incomplete_deposit'
-            : status === 'PROCESSING'
-              ? 'processing'
-              : 'awaiting_deposit',
+          : status === 'PROCESSING' || status === 'KNOWN_DEPOSIT_TX' || saved.state === 'processing'
+            ? 'processing'
+            : null;
+      if (saved.route === 'oneclick' && progress) {
+        await session.change({ state: progress });
+        return;
+      }
+      if (saved.state === 'expired') return;
+      if (saved.route !== 'oneclick') {
+        await session.change({
+          state:
+            this.now() >= Number(restored.purchase.expires_at)
+              ? 'expired'
+              : saved.submission === 'submitted'
+                ? 'accepting'
+                : 'payment_uncertain',
+        });
+        return;
+      }
+      const deposit = this.deposit(saved);
+      if (
+        !deposit ||
+        !Number.isFinite(Date.parse(deposit.depositBefore)) ||
+        Date.parse(deposit.depositBefore) - this.now() * 1000 < 600000
+      ) {
+        await session.change({ state: 'expired' });
+        return;
+      }
+      if (saved.needsProof || !saved.purchase?.recoveryProved) {
+        if (!options.recovery) return;
+        const purchase = await this.options.sdk.proveRecovery(restored, options.recovery);
+        saved = await session.change({ purchase, needsProof: false });
+        if (Date.parse(deposit.depositBefore) - this.now() * 1000 < 600000) {
+          await session.change({ state: 'expired' });
+          return;
+        }
+      }
+      await session.change({
+        state:
+          status === 'SUCCESS'
+            ? 'accepting'
+            : status === 'INCOMPLETE_DEPOSIT'
+              ? 'incomplete_deposit'
+              : status === 'PROCESSING'
+                ? 'processing'
+                : 'awaiting_deposit',
+      });
     });
   }
   /** Polling remains available after the deposit cutoff to track late deposits and refunds. */
@@ -676,80 +768,118 @@ export class BrowserPurchaseController {
       oneClick?: Pick<OneClick, 'poll'>;
     } = {},
   ): Promise<void> {
-    let saved = await this.read();
-    const deposit = this.deposit(saved);
-    if (
-      saved.route !== 'oneclick' ||
-      !deposit ||
-      [
-        'terms_review',
-        'accepted',
-        'recovering',
-        'file_ready',
-        'refunded',
-        'failed',
-        'abandoned',
-      ].includes(saved.state)
-    )
-      throw new Error('no pollable 1Click deposit in this state');
-    const { oneClick = new OneClick(), ...pollOptions } = options;
-    await oneClick.poll(deposit.address, {
-      ...pollOptions,
-      ...(deposit.memo === undefined ? {} : { memo: deposit.memo }),
-      ...(saved.checkpoint ? { checkpoint: saved.checkpoint } : {}),
-      onProgress: async (checkpoint) => {
-        const status = checkpoint.lastStatus?.status;
-        const states: Record<string, BrowserPurchaseState> = {
-          PENDING_DEPOSIT: 'awaiting_deposit',
-          KNOWN_DEPOSIT_TX: 'processing',
-          PROCESSING: 'processing',
-          INCOMPLETE_DEPOSIT: 'incomplete_deposit',
-          SUCCESS: 'accepting',
-          REFUNDED: 'refunded',
-          FAILED: 'failed',
-        };
-        let state = status ? (states[status] ?? saved.state) : saved.state;
-        if (
-          ['awaiting_deposit', 'incomplete_deposit'].includes(state) &&
-          (saved.state === 'expired' || Date.parse(deposit.depositBefore) <= this.now() * 1000)
-        )
-          state = 'expired';
-        saved = await this.change(saved, { checkpoint, state });
-      },
+    return this.withLease(async (session) => {
+      let saved = session.record;
+      const deposit = this.deposit(saved);
+      if (
+        saved.route !== 'oneclick' ||
+        !deposit ||
+        [
+          'terms_review',
+          'accepted',
+          'recovering',
+          'file_ready',
+          'refunded',
+          'failed',
+          'abandoned',
+        ].includes(saved.state)
+      )
+        throw new Error('no pollable 1Click deposit in this state');
+      const { oneClick = new OneClick(), ...pollOptions } = options;
+      await oneClick.poll(deposit.address, {
+        ...pollOptions,
+        ...(deposit.memo === undefined ? {} : { memo: deposit.memo }),
+        ...(saved.checkpoint ? { checkpoint: saved.checkpoint } : {}),
+        onProgress: async (checkpoint) => {
+          const status = checkpoint.lastStatus?.status;
+          const states: Record<string, BrowserPurchaseState> = {
+            PENDING_DEPOSIT: 'awaiting_deposit',
+            KNOWN_DEPOSIT_TX: 'processing',
+            PROCESSING: 'processing',
+            INCOMPLETE_DEPOSIT: 'incomplete_deposit',
+            SUCCESS: 'accepting',
+            REFUNDED: 'refunded',
+            FAILED: 'failed',
+          };
+          let state = status ? (states[status] ?? saved.state) : saved.state;
+          if (
+            ['awaiting_deposit', 'incomplete_deposit'].includes(state) &&
+            (saved.state === 'expired' || Date.parse(deposit.depositBefore) <= this.now() * 1000)
+          )
+            state = 'expired';
+          saved = await session.change({ checkpoint, state });
+        },
+      });
+      if (
+        saved.state === 'accepting' &&
+        saved.purchase &&
+        (await this.options.sdk.accept(saved.purchase))
+      )
+        await session.change({ state: 'accepted' });
     });
-    if (
-      saved.state === 'accepting' &&
-      saved.purchase &&
-      (await this.options.sdk.accept(saved.purchase))
-    )
-      await this.change(saved, { state: 'accepted' });
   }
   async recover(wallet: IdentityWallet): Promise<void> {
-    let saved = await this.read();
-    if (!saved.purchase) throw new Error('saved purchase required');
-    const purchase = await this.storage.restorePurchase(saved.purchase);
-    saved = await this.change(saved, { state: 'recovering', purchase });
-    const recovered = await this.options.sdk.recover({ wallet, purchaseId: purchase.id });
-    const recovery = recovered[0];
-    if (!recovery || recovery.grant === null)
-      throw new Error('recovery not final; resume recovery');
-    await this.change(saved, { recovery, state: 'accepted' });
-  }
-  /** Delegates a caller-supplied PAY2 file. Downloading and browser saving are separate integrations. */
-  async open(file: Uint8Array): ReturnType<Annon['open']> {
-    let saved = await this.read();
-    if (!['accepted', 'file_ready'].includes(saved.state) || !saved.purchase)
-      throw new Error('purchase is not accepted');
-    const restored = await this.storage.restorePurchase(saved.purchase);
-    if (JSON.stringify(restored) !== JSON.stringify(saved.purchase))
-      saved = await this.change(saved, { purchase: restored });
-    const result = await this.options.sdk.open({
-      file,
-      record: restored,
-      ...(saved.recovery ? { recovery: saved.recovery } : {}),
+    return this.withLease(async (session) => {
+      let saved = session.record;
+      if (!saved.purchase) throw new Error('saved purchase required');
+      const purchase = await this.storage.restorePurchase(saved.purchase);
+      saved = await session.change({ state: 'recovering', purchase });
+      const recovered = await this.options.sdk.recover({ wallet, purchaseId: purchase.id });
+      const recovery = recovered[0];
+      if (!recovery || recovery.grant === null)
+        throw new Error('recovery not final; resume recovery');
+      await session.change({ recovery, state: 'accepted' });
     });
-    await this.change(saved, { state: 'file_ready' });
-    return result;
+  }
+  /** Open supplied ciphertext, or download with the saved grant. Returns plaintext only in memory. */
+  async open(input: Uint8Array | BrowserOpenOptions = {}): ReturnType<Annon['open']> {
+    return this.withLease(async (session) => {
+      let saved = session.record;
+      if (!['accepted', 'file_ready'].includes(saved.state) || !saved.purchase)
+        throw new Error('purchase is not accepted');
+      const restored = await this.storage.restorePurchase(saved.purchase);
+      if (JSON.stringify(restored) !== JSON.stringify(saved.purchase))
+        saved = await session.change({ purchase: restored });
+      const options = input instanceof Uint8Array ? {} : input;
+      if (input instanceof Uint8Array && input.length > BROWSER_DOWNLOAD_LIMIT)
+        throw new DownloadError('too_large', 'File exceeds 50 MiB. Use the CLI for larger files.');
+      const header = bytes(saved.header, (saved.header.length - 2) / 2);
+      if (saved.recovery?.grant === null) throw new Error('recovery grant is not final');
+      const file =
+        input instanceof Uint8Array
+          ? input
+          : await browserDownload({
+              ...options,
+              url: saved.resourceUrl,
+              contractId: restored.terms.contractId,
+              fileId: saved.fileId,
+              header,
+              checkedHeaderHash: restored.checkedHeaderHash,
+              listing: {
+                fileId: saved.fileId,
+                cipherHash: restored.terms.cipherHash,
+                seller: restored.terms.seller,
+                // The complete header digest was pinned before payment. Annon.open also checks final terms.
+                publishedHeaderHash: hex(await sha256(header.subarray(0, -65))),
+              },
+              proof: {
+                secret: bytes(saved.recovery?.buyerSecret ?? restored.buyerSecret, 32),
+                purchase_id: restored.id,
+                grant: saved.recovery?.grant ?? 0,
+              },
+            });
+      if (options.signal?.aborted) throw new DownloadError('cancelled');
+      downloadProgress(options.onProgress, { phase: 'decrypting', received: file.length });
+      const result = await this.options.sdk.open({
+        file,
+        record: restored,
+        ...(saved.recovery ? { recovery: saved.recovery } : {}),
+      });
+      if (options.signal?.aborted) throw new DownloadError('cancelled');
+      await session.change({ state: 'file_ready' });
+      downloadProgress(options.onProgress, { phase: 'ready', received: file.length });
+      return result;
+    });
   }
   exportReceipt(secret: Uint8Array): Promise<string> {
     return this.storage.exportReceipt(this.options.id, secret);
