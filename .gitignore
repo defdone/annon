@@ -153,6 +153,10 @@ CLAUDE.md
 CLAUDE.local.md
 .claude/
 .env*
+.codex/
+.mcp.json
+*.pem
+.DS_Store
 
 # Rust
 target/

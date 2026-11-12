@@ -18,7 +18,7 @@ jobs:
         run: |
           git ls-files -z | python3 -c '
           import re, sys
-          pattern = re.compile(rb"(^|/)(internal/|claude(\.local)?\.md$|\.claude/|\.env)", re.I)
+          pattern = re.compile(rb"(^|/)(internal/|claude(\.local)?\.md$|\.claude/|\.env|\.codex/|\.mcp\.json$|\.ds_store$|[^/]*\.pem$)", re.I)
           paths = [path for path in sys.stdin.buffer.read().split(b"\0") if pattern.search(path)]
           for path in paths:
               print("Private tracked path: " + repr(path))
