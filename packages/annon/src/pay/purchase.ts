@@ -72,6 +72,8 @@ export interface PaymentSummary {
 
 export interface PurchaseRecord extends Versioned {
   schemaVersion: 2;
+  /** Durable ownership proof checkpoint. Missing on older receipts. */
+  recoveryProved?: boolean;
   /** Optional for older records. Source details are the reviewed 1Click quote. */
   payment?: PaymentSummary;
   nearSubmission?: { state: 'uncertain'; txHash: string };

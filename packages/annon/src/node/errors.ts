@@ -91,7 +91,11 @@ export function publicError(error: unknown): {
       exitCode: 4,
     };
   if (error instanceof BudgetError)
-    return { code: error.code, message: error.message, exitCode: 1 };
+    return {
+      code: error.code,
+      message: error.message,
+      exitCode: 1,
+    };
   if (error instanceof SellError)
     return {
       code: error.code && Object.hasOwn(actions, error.code) ? error.code : 'sell_incomplete',

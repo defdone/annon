@@ -38,3 +38,18 @@ it.each(['setTimeout(`run(${value})`, 1)', 'setInterval(`run(${value})`, 1)'])(
     ).rejects.toThrow(/CSP/);
   },
 );
+
+it('bundles the purchase SDK as browser ESM with the existing CSP scan and no Node imports', async () => {
+  const result = await build({
+    ...browserBuildOptions,
+    entryPoints: ['src/browser/index.ts'],
+    format: 'esm',
+    write: false,
+    metafile: true,
+  });
+  expect(result.outputFiles[0]?.text).toContain('BrowserPurchaseController');
+  expect(Object.keys(result.metafile.inputs).some((path) => /(^|\/)src\/node\//.test(path))).toBe(
+    false,
+  );
+  expect(result.outputFiles[0]?.text).not.toMatch(/(?:from|import\s*\()\s*["']node:/);
+});

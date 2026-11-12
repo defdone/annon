@@ -1839,7 +1839,7 @@ it.each(['missing', 'ambiguous'])(
         target: h.defaults.url,
         route: '1click',
         fromChain: 'solana',
-        refundTo: 'test-refund',
+        refundTo: '2'.repeat(44),
       }),
     ).rejects.toMatchObject({ code: 'origin_asset_required' });
     expect(h.calls).toEqual([]);
@@ -1867,7 +1867,7 @@ it.each([true, false])(
       target: h.defaults.url,
       route: '1click',
       fromChain: 'solana',
-      refundTo: 'test-refund',
+      refundTo: '2'.repeat(44),
     });
     if (accepted)
       await expect(operation).resolves.toMatchObject({
@@ -1914,7 +1914,7 @@ it('keeps human JSON 1Click mode non-interactive and does not create a quote wit
       target: h.defaults.url,
       route: '1click',
       fromChain: 'solana',
-      refundTo: 'test-refund',
+      refundTo: '2'.repeat(44),
       json: true,
     }),
   ).rejects.toMatchObject({ code: 'confirmation_required' });
@@ -1938,7 +1938,7 @@ it('passes the exact quote into browser approval terms without a terminal prompt
     target: h.defaults.url,
     route: '1click',
     fromChain: 'solana',
-    refundTo: 'test-refund',
+    refundTo: '2'.repeat(44),
   });
   expect(h.reviews.at(-1)).toMatchObject({ source: result.source });
   expect(result.source).toMatchObject({
@@ -1964,7 +1964,7 @@ it.each(['\u001b[2J', '\n', '\r', '\t', '\0', '\u202e', '/', ' ', 'x'.repeat(129
       target: h.defaults.url,
       route: '1click',
       fromChain: 'solana',
-      refundTo: 'test-refund',
+      refundTo: '2'.repeat(44),
     });
     expect(result.source).not.toHaveProperty('contractAddress');
     expect(h.notify.mock.calls.at(-1)?.[0]).toContain('Source asset: USDC\n');
@@ -1990,7 +1990,7 @@ it.each([
       target: h.defaults.url,
       route: '1click',
       fromChain: 'solana',
-      refundTo: 'test-refund',
+      refundTo: '2'.repeat(44),
     }),
   ).rejects.toMatchObject({ code: 'origin_asset_required' });
   expect(h.calls).toEqual([]);
@@ -2058,7 +2058,7 @@ it('refuses a human purchase without a prompt before creating a quote or purchas
       target: h.defaults.url,
       route: '1click',
       fromChain: 'solana',
-      refundTo: 'test-refund',
+      refundTo: '2'.repeat(44),
     }),
   ).rejects.toMatchObject({ code: 'confirmation_required' });
   expect(h.calls).toEqual([]);

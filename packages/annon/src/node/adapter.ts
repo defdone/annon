@@ -6,7 +6,7 @@ import { download, secureUrl } from '../download/download.js';
 import { sameResource } from '../download/proof.js';
 import { inspect, inspectHeader, MAX_HEADER, parseHeader } from '../envelope/pay2.js';
 import { fileStorageBalance, getConfig, getFile, getPurchase, txOutcome } from '../near/rpc.js';
-import { OneClick, type Origin } from '../oneclick/oneclick.js';
+import { OneClick, type Origin, originFamily } from '../oneclick/oneclick.js';
 import {
   type EncryptedRecord,
   encryptedPurchaseStore,
@@ -237,29 +237,7 @@ async function originFor(
   }
   if (!tokenIdentifier(asset))
     return fail('origin_asset_required', 'Specify --from-asset with a valid 1Click asset ID.', 2);
-  const kind: Origin['chain'] =
-    chain === 'sol'
-      ? 'solana'
-      : chain === 'near'
-        ? 'near'
-        : [
-              'eth',
-              'base',
-              'arb',
-              'pol',
-              'op',
-              'avax',
-              'bsc',
-              'gnosis',
-              'bera',
-              'scroll',
-              'monad',
-              'xlayer',
-              'abs',
-              'plasma',
-            ].includes(chain)
-          ? 'evm'
-          : 'other';
+  const kind = originFamily(chain);
   let refundTo = o.refundTo ?? env.ANNON_REFUND_TO;
   if (!refundTo && kind === wallet.identity.kind) {
     refundTo = wallet.identity.id;

@@ -1,0 +1,9 @@
+[
+  { "assetId": "nep141:synthetic", "blockchain": "base", "symbol": "SYN", "decimals": 6 },
+  { "assetId": "nep245:synthetic:1", "blockchain": "near", "symbol": "NFT", "decimals": 0 },
+  null,
+  {},
+  7,
+  { "assetId": "nep141:malformed", "blockchain": "base", "symbol": "BAD", "decimals": -1 },
+  { "assetId": "nep141:malformed", "blockchain": "base", "decimals": 6 }
+]

@@ -3,6 +3,7 @@ export {
   type AnnonOptions,
   type Bought,
   type BuyOptions,
+  type BuyRoute,
   SellError,
   type SellOptions,
 } from './api/annon.js';
@@ -13,7 +14,13 @@ export {
   OneClick,
   type OneClickQuote,
   type Origin,
+  originFromToken,
+  type PollCheckpoint,
+  type PollOptions,
+  type QuotePreview,
   type SwapStatus,
+  type Token,
+  validateRefundAddress,
 } from './oneclick/oneclick.js';
 export {
   type EncryptedRecord,

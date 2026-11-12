@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { base58 } from '@scure/base';
 import { describe, expect, it, vi } from 'vitest';
 import { purchase as base } from '../../test/fixtures.js';
 import { buildPurchaseMessage } from '../settle-near/purchase.js';
@@ -45,7 +46,12 @@ describe('1Click with synthetic response fixtures', () => {
       const result = await c.quote(
         perQuoteMessage,
         name === 'quote-solana'
-          ? { ...origin, chain: 'solana', asset: 'nep141:solana-usdc', refundTo: 'solana-wallet' }
+          ? {
+              ...origin,
+              chain: 'solana',
+              asset: 'nep141:solana-usdc',
+              refundTo: base58.encode(new Uint8Array(32).fill(3)),
+            }
           : origin,
       );
       const sent = JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body));

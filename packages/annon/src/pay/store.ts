@@ -20,6 +20,16 @@ export interface Store<T extends Versioned> {
   compareAndSet(key: string, expected: Versioned | null, next: T | null): Promise<boolean>;
 }
 
+export interface StoreWrite<T extends Versioned> {
+  key: string;
+  expected: Versioned | null;
+  next: T | null;
+}
+export interface AtomicStore<T extends Versioned> extends Store<T> {
+  /** All comparisons and writes commit together, or none do. */
+  compareAndSetMany(writes: readonly StoreWrite<T>[]): Promise<boolean>;
+}
+
 /** `next` must be `expected`'s next revision: a create starts at 0, an update adds 1. */
 export function checkNext(expected: Versioned | null, next: Versioned | null) {
   if (next === null) {
@@ -94,7 +104,7 @@ export function fromKeyValue<T extends Versioned>(
  */
 export function indexedDbStore<T extends Versioned>(
   o: { name?: string; factory?: IDBFactory } = {},
-): Store<T> {
+): AtomicStore<T> {
   const factory = o.factory ?? globalThis.indexedDB;
   if (!factory) throw new TypeError('no IndexedDB here: pass a factory or use another store');
   const name = o.name ?? 'annon';
@@ -110,6 +120,39 @@ export function indexedDbStore<T extends Versioned>(
   };
   const tx = async (mode: IDBTransactionMode) =>
     (await open()).transaction('records', mode, { durability: 'strict' }).objectStore('records');
+  const compareAndSetMany = async (writes: readonly StoreWrite<T>[]): Promise<boolean> => {
+    if (!writes.length || new Set(writes.map((w) => w.key)).size !== writes.length)
+      throw new TypeError('empty or duplicate CAS keys');
+    for (const write of writes) checkNext(write.expected, write.next);
+    const s = await tx('readwrite');
+    return new Promise((resolve, reject) => {
+      let remaining = writes.length;
+      let matches = true;
+      let wrote = false;
+      for (const write of writes) {
+        const r = s.get(write.key);
+        r.onsuccess = () => {
+          try {
+            if (!holds(read<T>(r.result as string | undefined), write.expected)) matches = false;
+            if (--remaining !== 0 || !matches) return;
+            for (const item of writes) {
+              if (item.next === null) s.delete(item.key);
+              else s.put(JSON.stringify(item.next), item.key);
+            }
+            wrote = true;
+          } catch (error) {
+            reject(error);
+            s.transaction.abort();
+          }
+        };
+      }
+      s.transaction.oncomplete = () => resolve(wrote);
+      const failed = () =>
+        reject(s.transaction.error ?? new Error('the IndexedDB transaction was aborted'));
+      s.transaction.onerror = failed;
+      s.transaction.onabort = failed;
+    });
+  };
   return {
     load: async (key) => {
       const s = await tx('readonly');
@@ -119,25 +162,7 @@ export function indexedDbStore<T extends Versioned>(
         r.onerror = () => reject(r.error);
       });
     },
-    compareAndSet: async (key, expected, next) => {
-      checkNext(expected, next);
-      const s = await tx('readwrite');
-      return new Promise((resolve, reject) => {
-        let wrote = false;
-        const r = s.get(key);
-        r.onsuccess = () => {
-          if (!holds(read<T>(r.result as string | undefined), expected)) return;
-          wrote = true;
-          if (next === null) s.delete(key);
-          else s.put(JSON.stringify(next), key);
-        };
-        s.transaction.oncomplete = () => resolve(wrote);
-        // An abort carries no error of its own: the write still failed.
-        const failed = () =>
-          reject(s.transaction.error ?? new Error('the IndexedDB transaction was aborted'));
-        s.transaction.onerror = failed;
-        s.transaction.onabort = failed;
-      });
-    },
+    compareAndSet: (key, expected, next) => compareAndSetMany([{ key, expected, next }]),
+    compareAndSetMany,
   };
 }
