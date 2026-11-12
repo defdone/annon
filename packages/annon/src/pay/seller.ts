@@ -36,8 +36,8 @@ export interface OfferOptions {
   contractId: string;
   fileId: string;
   /**
-   * The PAY2 file (x402 `resource.url`): the paid request returns it, and buyers sign in there to
-   * get it again (specs/download.md). https only.
+   * The PAY2 file (x402 `resource.url`): the paid request returns it, and buyers prove a purchase
+   * grant there to get it again (specs/download.md). https only.
    */
   url: string;
   /** URL of the complete PAY2 header, public (profile section 7): the client checks it first. */
@@ -147,7 +147,7 @@ export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
 
 /**
  * The `PaymentRequired` for a registration already read: the offer while sales are open, none once
- * they are stopped (profile section 2: buyers still sign in to download).
+ * they are stopped (profile section 2: buyers still prove their purchase grant to download).
  */
 export function paymentRequired(o: OfferOptions, file: FileInfo, usdc: string): PaymentRequired {
   // An Annon client won't sign without the header, and the file itself goes over https only

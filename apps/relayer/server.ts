@@ -91,7 +91,7 @@ const STATUS: Record<RelayErrorCode, number> = {
 
 const MAX_BODY = 64 * 1024;
 
-// ponytail: counters in memory, reset on restart; one machine. Shared store if it ever scales out.
+// Note: counters in memory, reset on restart; one machine. Shared store if it ever scales out.
 export const hits = new Map<string, { n: number; until: number }>();
 /** Expired counters are swept; oldest client counters are evicted at capacity. */
 const SWEEP_AT = 10_000;

@@ -69,7 +69,7 @@ struct Body {
 }
 
 /// What a delivery's message says.
-// ponytail: short-lived return value, never stored; boxing would only add an allocation.
+// Note: short-lived return value, never stored; boxing would only add an allocation.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq)]
 pub enum Parsed {

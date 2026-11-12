@@ -362,8 +362,8 @@ commitment format changes are made here.
 Storage options were measured with the actual SDK collection and storage accounting. A readable
 map indexed by leaf index, storing `(delivery_id, refund, amount)` with network/contract implicit,
 adds 94 bytes for EVM, 106 for Solana, and 78 + account-length bytes for NEAR (88 for `buyer.near`,
-142 at the 64-byte maximum). At the current storage-byte constant that is 0.00088–0.00142 NEAR
-per leaf for these NEAR examples, or 880–1,420 NEAR per million. Keeping all preimages enables
+142 at the 64-byte maximum). At the current storage-byte constant that is 0.00088 to 0.00142 NEAR
+per leaf for these NEAR examples, or 880 to 1,420 NEAR per million. Keeping all preimages enables
 proof reconstruction by RPC, but someone must pay **when appended**, exactly when the delivery
 reserve is empty. Silently charging the contract creates an unbounded storage-exhaustion vector.
 Deleting materialized preimages alone also loses proof data for other leaves; hashes/nodes must

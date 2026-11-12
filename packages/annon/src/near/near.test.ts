@@ -1,9 +1,22 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { must } from '../../test/fixtures.js';
+import { must, purchase, terms } from '../../test/fixtures.js';
+import { canonicalRequest, contractArgs } from '../relay/relay.js';
+import { utc } from '../settle-near/codec.js';
 import type { Identity } from '../settle-near/identity.js';
 import type { ReopenV2 } from '../settle-near/purchase.js';
-import { getConfig, NearError, readOutcome, rpcReply, txOutcome, view } from './rpc.js';
+import { buildPurchaseMessage, encodePurchase } from '../settle-near/purchase.js';
+import { encodeTerms, termsHash } from '../settle-near/terms.js';
+import {
+  getConfig,
+  getFile,
+  getPurchase,
+  NearError,
+  readOutcome,
+  rpcReply,
+  txOutcome,
+  view,
+} from './rpc.js';
 import {
   type RegisterArgs,
   registerText,
@@ -392,4 +405,118 @@ it('binds a single register action while allowing only a valid relayer budget in
     args: { ...args.args, file_budget: '5', deadline: 2 },
   });
   expect(() => readOutcome(result, CONTRACT, expected)).toThrow();
+});
+
+const rpc = (value: unknown) => {
+  const fetch = vi.fn(async (_url, init) => {
+    const q = JSON.parse(init.body);
+    return {
+      json: async () => ({
+        id: q.id,
+        result:
+          q.params.request_type === 'view_access_key'
+            ? value
+            : { result: [...new TextEncoder().encode(JSON.stringify(value))] },
+      }),
+    };
+  });
+  vi.stubGlobal('fetch', fetch);
+  return fetch;
+};
+afterEach(() => vi.unstubAllGlobals());
+describe('contract wire shapes', () => {
+  it('wraps unlock args with the canonical message and nullable header; omitted claim grant canonicalizes to zero', () => {
+    const args = { purchase: buildPurchaseMessage(purchase), logs: [], header: null };
+    // Logs are validated separately; this checks the transaction shape.
+    expect(contractArgs({ method: 'unlock', args })).toEqual({ args });
+    expect(canonicalRequest({ method: 'claim_key', args: { purchase_id: terms.file_id } })).toEqual(
+      { method: 'claim_key', args: { purchase_id: terms.file_id, grant: 0 } },
+    );
+    expect(() => canonicalRequest({ method: 'unlock', args: { ...args, purchase } })).toThrow();
+  });
+  it('reads terms through get_file and validates its commitment', async () => {
+    const f = {
+      terms,
+      terms_hash: termsHash(terms),
+      header_hash: null,
+      sales_stopped_at: null,
+      taken_down: null,
+    };
+    const fetch = rpc(f);
+    expect((await getFile('https://rpc', terms.contract, terms.file_id))?.terms).toEqual(terms);
+    expect(JSON.parse(fetch.mock.calls[0]?.[1].body).params.method_name).toBe('get_file');
+    rpc({ ...f, terms_hash: terms.cipher_hash });
+    await expect(getFile('https://rpc', terms.contract, terms.file_id)).rejects.toMatchObject({
+      code: 'transport',
+    });
+  });
+  it('validates all purchase view fields', async () => {
+    const p = {
+      purchase_id: terms.file_id,
+      file_id: terms.file_id,
+      terms_hash: termsHash(terms),
+      buyer_key: purchase.buyer_key,
+      recovery: purchase.recovery,
+      route: 'base-usdc',
+      delivery: null,
+      accepted_at: 1800000000,
+      grants: 1,
+    };
+    rpc(p);
+    expect(await getPurchase('https://rpc', terms.contract, p.purchase_id)).toEqual(p);
+    for (const bad of [
+      { ...p, route: 'other' },
+      { ...p, accepted_at: -1 },
+      { ...p, delivery: '0' },
+      { ...p, grants: 2 ** 32 },
+      { ...p, route: 'near-usdc' },
+    ]) {
+      rpc(bad);
+      await expect(getPurchase('https://rpc', terms.contract, p.purchase_id)).rejects.toMatchObject(
+        { code: 'transport' },
+      );
+    }
+  });
+  it('supports configured NEAR tokens on testnet and sandbox and pins mainnet', () => {
+    for (const network of ['near:testnet', 'near:sandbox']) {
+      const t = { ...terms, network, near: { ...terms.near, token: 'usdc.fakes.testnet' } };
+      expect(encodeTerms(t).length).toBeGreaterThan(0);
+      expect(() => encodeTerms(t, { nearUsdc: 'other.testnet' })).toThrow();
+      expect(
+        encodePurchase({ ...purchase, route: 'near-usdc', network, asset: t.near.token }).length,
+      ).toBeGreaterThan(0);
+    }
+    expect(() => encodeTerms({ ...terms, near: { ...terms.near, token: 'fake.near' } })).toThrow();
+  });
+  it('pins a configured Base asset when supplied', () => {
+    const baseUsdc = `0x${'55'.repeat(20)}`;
+    const p = { ...purchase, asset: baseUsdc };
+    expect(() => encodePurchase(p)).toThrow();
+    expect(encodePurchase(p, { baseUsdc }).length).toBeGreaterThan(0);
+    expect(() => encodePurchase({ ...p, network: 'near:mainnet' }, { baseUsdc })).toThrow();
+    expect(() => encodePurchase({ ...p, asset: baseUsdc.toUpperCase() }, { baseUsdc })).toThrow();
+  });
+  it('formats deadlines beyond Date and through u64 max like Rust', () => {
+    expect(utc(253402300800)).toBe('10000-01-01 00:00:00 UTC');
+    expect(utc(18446744073709551615n)).toBe('584554051223-11-09 07:00:15 UTC');
+  });
+});
+
+it('classifies absent access keys as refusal, never as a retryable transport failure', async () => {
+  const { isFullAccessKey } = await import('./rpc.js');
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_u, init) => {
+      const q = JSON.parse(String(init?.body));
+      return {
+        json: async () => ({
+          id: q.id,
+          error: { cause: { name: 'UNKNOWN_ACCESS_KEY', info: {} } },
+        }),
+      };
+    }),
+  );
+  await expect(
+    isFullAccessKey('https://rpc', 'buyer.near', 'ed25519:missing'),
+  ).rejects.toMatchObject({ code: 'refused' });
 });

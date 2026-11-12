@@ -25,7 +25,6 @@ export const refundNode = (left: string, right: string): string =>
   hex(sha256(concat(le(1, 1), bytes(left, 32), bytes(right, 32))));
 const zeros = [hex(new Uint8Array(32))];
 for (let h = 0; h < 32; h++) zeros.push(refundNode(zeros[h] as string, zeros[h] as string));
-export const REFUND_ZEROS: readonly string[] = Object.freeze(zeros);
 const capacity = 2 ** 32;
 
 export class RefundTree {

@@ -150,7 +150,7 @@ impl Annon {
         // Rejected payments use only refund working capital, never a file budget.
         if outcome.is_err() && self.reserve < admission {
             if self.refunds.is_full() {
-                // ponytail: 2^32 leaves; unreachable in practice. Refused, so NEP-141 returns it.
+                // Note: 2^32 leaves; unreachable in practice. Refused, so NEP-141 returns it.
                 env::log_str("delivery refused: no storage reserve and the refund tree is full");
                 self.next_delivery -= 1;
                 return amount;

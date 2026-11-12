@@ -264,11 +264,11 @@ export interface Wallet {
 }
 
 export interface AuthorizeOptions {
-  /** The buyer's one-time G1 key (`OneTimeKey.publicKeyBytes`). */
+  /** The canonical purchase binding its terms, buyer key, refund and recovery identities. */
   purchase: Purchase;
   buyerSecret: Uint8Array;
   wallet: Wallet;
-  /** Where the purchase is recorded (profile section 10): one open purchase per wallet and file. */
+  /** Where the purchase is recorded by purchase_id (profile section 5). */
   store: Store<PurchaseRecord>;
 }
 
@@ -287,7 +287,7 @@ export const authorizationOf = (
 
 /**
  * Asks the wallet to sign and returns the `PAYMENT-SIGNATURE` header. The purchase is recorded
- * first (refused while this wallet has another open purchase of the file); the signature is checked
+ * first (refused if this purchase_id already has a record); the signature is checked
  * to be the buyer's, in the form USDC takes; the payload is recorded, and only then run against
  * USDC and returned.
  */

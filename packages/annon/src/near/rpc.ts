@@ -179,13 +179,6 @@ export interface FileInfo {
   salesStoppedAt: number | null;
   takenDown: string | null;
 }
-export async function getTerms(
-  url: string,
-  contractId: string,
-  fileId: string,
-): Promise<Terms | null> {
-  return (await getFile(url, contractId, fileId))?.terms ?? null;
-}
 export async function getFile(
   url: string,
   contractId: string,

@@ -52,7 +52,7 @@ const hex = (b: Uint8Array) => `0x${Buffer.from(b).toString('hex')}`;
 
 const SELLER = `0x${'ab'.repeat(20)}`;
 const SAFE = `0x${'5a'.repeat(20)}`;
-const partner: Split = {
+const exampleSplit: Split = {
   recipients: [SELLER, SAFE],
   allocations: [950_000n, 50_000n],
   totalAllocation: 1_000_000n,
@@ -62,7 +62,7 @@ const partner: Split = {
 describe('encodeSplit against viem', () => {
   it('encodes abi.encode(split) byte for byte, for any shape', () => {
     const shapes: Split[] = [
-      partner,
+      exampleSplit,
       { recipients: [], allocations: [], totalAllocation: 0n, distributionIncentive: 0 },
       {
         recipients: [SELLER],
@@ -84,8 +84,10 @@ describe('encodeSplit against viem', () => {
   });
 
   it('refuses a split it cannot encode', () => {
-    expect(() => encodeSplit({ ...partner, allocations: [1n] })).toThrow(TypeError);
-    expect(() => encodeSplit({ ...partner, distributionIncentive: 65_536 })).toThrow(RangeError);
+    expect(() => encodeSplit({ ...exampleSplit, allocations: [1n] })).toThrow(TypeError);
+    expect(() => encodeSplit({ ...exampleSplit, distributionIncentive: 65_536 })).toThrow(
+      RangeError,
+    );
   });
 });
 
@@ -144,20 +146,20 @@ describe('splitAddress against viem', () => {
     for (const f of SPLIT_FACTORIES)
       for (const origin of [SALT, { nonce: 0n }, { nonce: 7n }])
         for (const owner of [ZERO, SAFE as `0x${string}`]) {
-          expect(splitAddress(f, partner, owner, origin)).toBe(
-            viemAddress(f, partner, owner, origin),
+          expect(splitAddress(f, exampleSplit, owner, origin)).toBe(
+            viemAddress(f, exampleSplit, owner, origin),
           );
         }
   });
 
   it('gives another address for another owner, share, salt or factory', () => {
-    const a = splitAddress(PUSH, partner, ZERO, SALT);
-    expect(splitAddress(PUSH, partner, SAFE, SALT)).not.toBe(a);
+    const a = splitAddress(PUSH, exampleSplit, ZERO, SALT);
+    expect(splitAddress(PUSH, exampleSplit, SAFE, SALT)).not.toBe(a);
     expect(
-      splitAddress(PUSH, { ...partner, allocations: [949_999n, 50_001n] }, ZERO, SALT),
+      splitAddress(PUSH, { ...exampleSplit, allocations: [949_999n, 50_001n] }, ZERO, SALT),
     ).not.toBe(a);
-    expect(splitAddress(PUSH, partner, ZERO, { salt: `0x${'c5'.repeat(32)}` })).not.toBe(a);
-    expect(splitAddress(PULL, partner, ZERO, SALT)).not.toBe(a);
+    expect(splitAddress(PUSH, exampleSplit, ZERO, { salt: `0x${'c5'.repeat(32)}` })).not.toBe(a);
+    expect(splitAddress(PULL, exampleSplit, ZERO, SALT)).not.toBe(a);
   });
 });
 
@@ -191,7 +193,7 @@ describe('createSplit against viem', () => {
       ['push', PUSH],
       ['pull', PULL],
     ] as const) {
-      const s = { ...partner, distributionIncentive: 7 };
+      const s = { ...exampleSplit, distributionIncentive: 7 };
       const tx = createSplit(kind, s, SALT.salt);
       expect(tx.to).toBe(f.factory);
       expect(tx.data).toBe(
@@ -209,34 +211,34 @@ describe('createSplit against viem', () => {
     expect(MAX_RECIPIENTS).toBe(100);
     expect(createSplit('push', many(100), SALT.salt).address).toMatch(/^0x[0-9a-f]{40}$/);
     const top = {
-      ...partner,
+      ...exampleSplit,
       allocations: [2n ** 128n - 2n, 1n],
       totalAllocation: 2n ** 128n - 1n,
     };
     expect(createSplit('pull', top, SALT.salt).to).toBe(PULL.factory);
     const refused = [
       many(101),
-      { ...partner, allocations: [2n ** 128n - 1n, 1n], totalAllocation: 2n ** 128n },
-      { ...partner, allocations: [0n, 0n], totalAllocation: 0n },
+      { ...exampleSplit, allocations: [2n ** 128n - 1n, 1n], totalAllocation: 2n ** 128n },
+      { ...exampleSplit, allocations: [0n, 0n], totalAllocation: 0n },
     ];
     for (const s of refused) expect(() => createSplit('push', s, SALT.salt)).toThrow(PayError);
     expect(() =>
-      createSplit('push', { ...partner, totalAllocation: 1_000_001n }, SALT.salt),
+      createSplit('push', { ...exampleSplit, totalAllocation: 1_000_001n }, SALT.salt),
     ).toThrow(/add up/);
-    expect(() => createSplit('push', partner, '0x12')).toThrow();
+    expect(() => createSplit('push', exampleSplit, '0x12')).toThrow();
     for (const kind of ['push', 'pull'] as const) {
       expect(() =>
-        createSplit(kind, { ...partner, recipients: [SELLER, ZERO] }, SALT.salt),
+        createSplit(kind, { ...exampleSplit, recipients: [SELLER, ZERO] }, SALT.salt),
       ).toThrow(/zero address/);
     }
-    expect(() => createSplit('other' as 'push', partner, SALT.salt)).toThrow(/push or pull/);
+    expect(() => createSplit('other' as 'push', exampleSplit, SALT.salt)).toThrow(/push or pull/);
   });
 });
 
 describe('payoutCall against viem', () => {
   const D = `0x${'d1'.repeat(20)}` as const;
   it('pull: one aggregate3 on Multicall3, distribute must succeed, each withdrawal may fail', () => {
-    for (const s of [partner, { ...partner, distributionIncentive: 10_000 }, many(100)]) {
+    for (const s of [exampleSplit, { ...exampleSplit, distributionIncentive: 10_000 }, many(100)]) {
       const calls = payoutCalls('pull', SPLIT, s, USDC, D);
       const tx = payoutCall('pull', SPLIT, s, USDC, D);
       expect(tx.to).toBe(MULTICALL3);
@@ -257,8 +259,8 @@ describe('payoutCall against viem', () => {
   });
 
   it('push: the single distribute itself', () => {
-    expect(payoutCall('push', SPLIT, partner, USDC, D)).toEqual(
-      payoutCalls('push', SPLIT, partner, USDC, D)[0],
+    expect(payoutCall('push', SPLIT, exampleSplit, USDC, D)).toEqual(
+      payoutCalls('push', SPLIT, exampleSplit, USDC, D)[0],
     );
   });
 });
@@ -269,9 +271,9 @@ describe('payoutCalls against viem', () => {
     encodeFunctionData({ abi: SPLITS_ABI, functionName: 'distribute', args: [asViem(s), USDC, D] });
 
   it('push: one distribute on the split, which pays the wallets', () => {
-    expect(payoutCalls('push', SPLIT.toUpperCase().replace('0X', '0x'), partner, USDC, D)).toEqual([
-      { to: SPLIT, data: distribute(partner) },
-    ]);
+    expect(
+      payoutCalls('push', SPLIT.toUpperCase().replace('0X', '0x'), exampleSplit, USDC, D),
+    ).toEqual([{ to: SPLIT, data: distribute(exampleSplit) }]);
   });
 
   it('pull: also withdraws the reward for a distributor outside the split, never twice', () => {
@@ -285,10 +287,10 @@ describe('payoutCalls against viem', () => {
       payoutCalls('pull', SPLIT, s, USDC, d)
         .slice(1)
         .map((c) => c.data);
-    const rewarded = { ...partner, distributionIncentive: 10_000 };
+    const rewarded = { ...exampleSplit, distributionIncentive: 10_000 };
     expect(paid(rewarded, D)).toEqual([withdraw(SELLER), withdraw(SAFE), withdraw(D)]);
     expect(paid(rewarded, SAFE)).toEqual([withdraw(SELLER), withdraw(SAFE)]);
-    expect(paid(partner, D)).toEqual([withdraw(SELLER), withdraw(SAFE)]);
+    expect(paid(exampleSplit, D)).toEqual([withdraw(SELLER), withdraw(SAFE)]);
     expect(payoutCalls('push', SPLIT, rewarded, USDC, D)).toHaveLength(1);
     for (const kind of ['push', 'pull'] as const) {
       expect(() => payoutCalls(kind, SPLIT, rewarded, USDC, ZERO)).toThrow(/distributor/);
@@ -297,7 +299,7 @@ describe('payoutCalls against viem', () => {
 
   it('pull: distribute, then one warehouse withdrawal to each recipient, once each', () => {
     const s = {
-      ...partner,
+      ...exampleSplit,
       recipients: [SELLER, SAFE, SELLER.toUpperCase().replace('0X', '0x')],
       allocations: [1n, 1n, 1n],
       totalAllocation: 3n,
@@ -321,7 +323,7 @@ const ABI = parseAbi([
   'function owner() view returns (address)',
   'function paused() view returns (bool)',
 ]);
-const SPLIT = splitAddress(PUSH, partner, ZERO, SALT);
+const SPLIT = splitAddress(PUSH, exampleSplit, ZERO, SALT);
 let chain: {
   at: string;
   chainId: string;
@@ -336,7 +338,7 @@ beforeEach(() => {
   chain = {
     at: SPLIT,
     chainId: '0x2105',
-    hash: splitHash(partner),
+    hash: splitHash(exampleSplit),
     owner: ZERO,
     paused: false,
     code: RUNTIME.push,
@@ -392,7 +394,7 @@ const code = (p: Promise<unknown>) =>
 
 describe('readSplit', () => {
   it('returns who gets what from an ownerless V2.2 split', async () => {
-    expect(await readSplit('https://base', SPLIT, partner, SALT)).toEqual({
+    expect(await readSplit('https://base', SPLIT, exampleSplit, SALT)).toEqual({
       kind: 'push',
       shares: [
         { recipient: SELLER, percent: 95 },
@@ -403,13 +405,13 @@ describe('readSplit', () => {
   });
 
   it('knows a pull split by its factory', async () => {
-    chain.at = splitAddress(PULL, partner, ZERO, SALT);
+    chain.at = splitAddress(PULL, exampleSplit, ZERO, SALT);
     chain.code = RUNTIME.pull;
-    expect((await readSplit('https://base', chain.at, partner, SALT)).kind).toBe('pull');
+    expect((await readSplit('https://base', chain.at, exampleSplit, SALT)).kind).toBe('pull');
   });
 
   it('takes the distributor reward off before the shares', async () => {
-    const s = { ...partner, distributionIncentive: 10_000 }; // 1%
+    const s = { ...exampleSplit, distributionIncentive: 10_000 }; // 1%
     chain.at = splitAddress(PUSH, s, ZERO, SALT);
     chain.hash = splitHash(s);
     const t = await readSplit('https://base', chain.at, s, SALT);
@@ -419,16 +421,18 @@ describe('readSplit', () => {
 
   it('refuses terms the address does not commit to: other shares, an owner at creation, other salt', async () => {
     const cases: [Split, SplitOrigin][] = [
-      [{ ...partner, allocations: [900_000n, 100_000n] }, SALT],
-      [partner, { salt: `0x${'c5'.repeat(32)}` }],
-      [partner, { nonce: 0n }],
+      [{ ...exampleSplit, allocations: [900_000n, 100_000n] }, SALT],
+      [exampleSplit, { salt: `0x${'c5'.repeat(32)}` }],
+      [exampleSplit, { nonce: 0n }],
     ];
     for (const [s, origin] of cases) {
       expect(await code(readSplit('https://base', SPLIT, s, origin))).toMatch(/not an ownerless/);
     }
     // Created with an owner (who could have approved USDC to anyone before renouncing).
-    const owned = splitAddress(PUSH, partner, SAFE, SALT);
-    expect(await code(readSplit('https://base', owned, partner, SALT))).toMatch(/not an ownerless/);
+    const owned = splitAddress(PUSH, exampleSplit, SAFE, SALT);
+    expect(await code(readSplit('https://base', owned, exampleSplit, SALT))).toMatch(
+      /not an ownerless/,
+    );
   });
 
   it('refuses code that is not the factory clone, even if it answers like a split', async () => {
@@ -439,18 +443,22 @@ describe('readSplit', () => {
       RUNTIME.push.replace('36602c57', '36602b57'),
     ]) {
       chain.code = c;
-      expect(await code(readSplit('https://base', SPLIT, partner, SALT))).toMatch(/not deployed/);
+      expect(await code(readSplit('https://base', SPLIT, exampleSplit, SALT))).toMatch(
+        /not deployed/,
+      );
     }
   });
 
   it('refuses an RPC that is not Base', async () => {
     chain.chainId = '0x1';
-    expect(await code(readSplit('https://base', SPLIT, partner, SALT))).toMatch(/network_mismatch/);
+    expect(await code(readSplit('https://base', SPLIT, exampleSplit, SALT))).toMatch(
+      /network_mismatch/,
+    );
   });
 
   it('refuses a split that allocates nothing or too much to distribute', async () => {
     for (const totalAllocation of [0n, 2n ** 128n]) {
-      const s = { ...partner, allocations: [totalAllocation, 0n], totalAllocation };
+      const s = { ...exampleSplit, allocations: [totalAllocation, 0n], totalAllocation };
       expect(await code(readSplit('https://base', SPLIT, s, SALT))).toMatch(
         /allocates nothing|too large/,
       );
@@ -458,7 +466,7 @@ describe('readSplit', () => {
     expect(await code(readSplit('https://base', SPLIT, many(101), SALT))).toMatch(
       /more than 100 recipients/,
     );
-    const zero = { ...partner, recipients: [ZERO, SAFE] };
+    const zero = { ...exampleSplit, recipients: [ZERO, SAFE] };
     chain.at = splitAddress(PUSH, zero, ZERO, SALT);
     chain.hash = splitHash(zero);
     expect(await code(readSplit('https://base', chain.at, zero, SALT))).toMatch(/zero address/);
@@ -467,7 +475,7 @@ describe('readSplit', () => {
   it('accepts a split of 100 recipients and a total just below 2^128', async () => {
     for (const s of [
       many(100),
-      { ...partner, allocations: [2n ** 128n - 2n, 1n], totalAllocation: 2n ** 128n - 1n },
+      { ...exampleSplit, allocations: [2n ** 128n - 2n, 1n], totalAllocation: 2n ** 128n - 1n },
     ]) {
       chain.at = splitAddress(PUSH, s, ZERO, SALT);
       chain.hash = splitHash(s);
@@ -476,19 +484,21 @@ describe('readSplit', () => {
   });
 
   it('still checks the state on chain: hash, owner, pause, and a contract without the views', async () => {
-    chain.hash = splitHash({ ...partner, allocations: [900_000n, 100_000n] });
-    expect(await code(readSplit('https://base', SPLIT, partner, SALT))).toMatch(
+    chain.hash = splitHash({ ...exampleSplit, allocations: [900_000n, 100_000n] });
+    expect(await code(readSplit('https://base', SPLIT, exampleSplit, SALT))).toMatch(
       /not the one described/,
     );
-    chain.hash = splitHash(partner);
+    chain.hash = splitHash(exampleSplit);
     chain.owner = SAFE;
-    expect(await code(readSplit('https://base', SPLIT, partner, SALT))).toMatch(/has an owner/);
+    expect(await code(readSplit('https://base', SPLIT, exampleSplit, SALT))).toMatch(
+      /has an owner/,
+    );
     chain.owner = ZERO;
     chain.paused = true;
-    expect(await code(readSplit('https://base', SPLIT, partner, SALT))).toMatch(/paused/);
+    expect(await code(readSplit('https://base', SPLIT, exampleSplit, SALT))).toMatch(/paused/);
     chain.paused = false;
     chain.calls = 'revert';
-    expect(await code(readSplit('https://base', SPLIT, partner, SALT))).toMatch(
+    expect(await code(readSplit('https://base', SPLIT, exampleSplit, SALT))).toMatch(
       /not an 0xSplits v2 split/,
     );
   });
@@ -500,7 +510,7 @@ describe('readSplitState without creation provenance', () => {
     async (f) => {
       chain.at = SAFE;
       chain.code = RUNTIME[f.kind];
-      expect(await readSplitState('https://base', SAFE, partner)).toMatchObject({
+      expect(await readSplitState('https://base', SAFE, exampleSplit)).toMatchObject({
         kind: f.kind,
         distributorPercent: 0,
         shares: [
@@ -519,16 +529,16 @@ describe('readSplitState without creation provenance', () => {
 
   it('rejects a wrong chain and invalid addresses without accepting split-shaped responses', async () => {
     chain.chainId = '0x1';
-    await expect(readSplitState('https://base', SPLIT, partner)).rejects.toMatchObject({
+    await expect(readSplitState('https://base', SPLIT, exampleSplit)).rejects.toMatchObject({
       code: 'network_mismatch',
     });
-    await expect(readSplitState('https://base', '0x12', partner)).rejects.toThrow(TypeError);
+    await expect(readSplitState('https://base', '0x12', exampleSplit)).rejects.toThrow(TypeError);
   });
 
   it('rejects an EOA and code that merely answers the split views', async () => {
     for (const code of ['0x', '0x6000', `${RUNTIME.push}00`]) {
       chain.code = code;
-      await expect(readSplitState('https://base', SPLIT, partner)).rejects.toMatchObject({
+      await expect(readSplitState('https://base', SPLIT, exampleSplit)).rejects.toMatchObject({
         code: 'bad_requirements',
       });
     }
@@ -536,7 +546,7 @@ describe('readSplitState without creation provenance', () => {
 
   it('preserves retryable transport errors from failed or malformed RPC answers', async () => {
     vi.mocked(fetch).mockRejectedValueOnce(new Error('fixture offline'));
-    await expect(readSplitState('https://base', SPLIT, partner)).rejects.toMatchObject({
+    await expect(readSplitState('https://base', SPLIT, exampleSplit)).rejects.toMatchObject({
       code: 'transport',
     });
     const fetcher = vi.mocked(fetch).getMockImplementation();
@@ -547,7 +557,7 @@ describe('readSplitState without creation provenance', () => {
         return { ok: true, json: async () => ({ id: b.id, result: '0x12' }) } as Response;
       return fetcher(...args);
     });
-    await expect(readSplitState('https://base', SPLIT, partner)).rejects.toMatchObject({
+    await expect(readSplitState('https://base', SPLIT, exampleSplit)).rejects.toMatchObject({
       code: 'transport',
     });
   });

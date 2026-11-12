@@ -7,12 +7,13 @@ Notes for coding agents working in this repository.
 | Path | What |
 |---|---|
 | `contracts/annon` | NEAR contract (Rust) |
-| `packages/annon` | `@defdone/annon`: SDK, CLI and `<annon-buy>` |
+| `contracts/mock-mpc`, `contracts/mock-token` | Stand-ins for local sandbox tests |
+| `packages/annon` | `@defdone/annon`: SDK, CLI and browser wallet adapters |
 | `packages/annon-mcp` | `@defdone/annon-mcp`: MCP server |
-| `apps/relayer` | Submits `unlock` and `reopen` for buyers without a NEAR account |
-| `apps/web` | Demo and verify page |
-| `specs/` | PAY2 format, nonce, receipt and contract interface |
-| `examples/` | Runnable examples, checked in CI |
+| `apps/relayer` | Relays `register`, `unlock`, `claim_key`, `reopen`, `reopen_seller`, `stop_sales` and `fund_file_storage`; optional settlement keeper |
+| `apps/demo-host` | x402 offers, purchase grant downloads and optional Base facilitator |
+| `specs/` | PAY2 format, nonce, download, x402 profile, NEAR settlement and vectors |
+| `skills/annon` | Agent instructions for the CLI and MCP tools |
 
 A directory exists only once it has code.
 
@@ -31,4 +32,4 @@ pnpm build
 - ESM only, TypeScript strict. Browser and Node share one code path (WebCrypto).
 - Tests first for anything that touches payments, keys or the contract.
 - Never commit keys, `.env` files or wallet secrets.
-- A published package change needs a changeset (`pnpm changeset`).
+- Packages are private for now; record package changes in a changeset (`pnpm changeset`).

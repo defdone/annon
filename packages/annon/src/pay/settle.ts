@@ -307,7 +307,7 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
       return (await fromChain(submitted, s, submitted)) ?? winner();
     }
     // Unclear or refused: Base is still read on every request, but the facilitator is called
-    // again only after RETRY_SECONDS, the Retry-After a host sends, so retries and sign-ins can't
+    // again only after RETRY_SECONDS, the Retry-After a host sends, so retries and repeated downloads can't
     // turn one purchase into a call per request. A purchase already broadcast keeps its answer:
     // pending, with its hash.
     const released = { ...r, revision: r.revision + 1, leaseUntil: now() + RETRY_SECONDS };

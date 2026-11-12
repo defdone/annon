@@ -178,7 +178,7 @@ export function sealStream(
   return sealStreamWithKey(crypto.getRandomValues(new Uint8Array(32)), plaintext, size, opts);
 }
 
-/** @internal Deterministic vector/testing entry point. Never reuse a key for different files. */
+/** Seals with a caller-chosen file key (the streaming sell and the vectors use it). Never reuse a key for different files. */
 export async function sealStreamWithKey(
   K: Uint8Array,
   plaintext: ReadableStream<Uint8Array>,

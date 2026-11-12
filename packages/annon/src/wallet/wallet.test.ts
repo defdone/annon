@@ -1,7 +1,11 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { base58, base64 } from '@scure/base';
+import { Account, JsonRpcProvider, KeyPairSigner } from 'near-api-js';
 import { privateKeyToAccount } from 'viem/accounts';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { must, purchase, terms } from '../../test/fixtures.js';
+import { concat, le, str } from '../settle-near/codec.js';
 import { buildPurchaseMessage } from '../settle-near/purchase.js';
 import { NEAR_USDC } from '../settle-near/terms.js';
 import { evmWallet, nearKeyPairWallet, nearSelectorWallet, solanaWallet } from './wallet.js';
@@ -160,5 +164,156 @@ it.each(['returned', 'thrown'] as const)('recognizes a %s final funding refusal'
   };
   await expect(fundFileStorage({ call }, 'contract.test', args.file_id, 5n)).rejects.toMatchObject({
     code: 'funding_refused',
+  });
+});
+
+const rpc = (value: unknown) => {
+  const fetch = vi.fn(async (_url, init) => {
+    const q = JSON.parse(init.body);
+    return {
+      json: async () => ({
+        id: q.id,
+        result:
+          q.params.request_type === 'view_access_key'
+            ? value
+            : { result: [...new TextEncoder().encode(JSON.stringify(value))] },
+      }),
+    };
+  });
+  vi.stubGlobal('fetch', fetch);
+  return fetch;
+};
+afterEach(() => vi.unstubAllGlobals());
+describe('NEP-413 recovery ownership', () => {
+  const seed = new Uint8Array(32).fill(9);
+  const publicKey = `ed25519:${base58.encode(ed25519.getPublicKey(seed))}`;
+  const message =
+    'Annon: verify purchase recovery\ncontract: annon.near\npurchase: 0x01\nrecovery: NEAR buyer.near';
+  // Independent NEP-413 encoder: u32 tag, string, fixed nonce, string, Option<string>.
+  const signMessage = vi.fn(
+    async (p: { message: string; nonce: Uint8Array; recipient: string }) => ({
+      accountId: 'buyer.near',
+      publicKey,
+      signature: base64.encode(
+        ed25519.sign(
+          sha256(
+            concat(
+              le(2147484061, 4),
+              str(p.message),
+              p.nonce,
+              str(p.recipient),
+              new Uint8Array([0]),
+            ),
+          ),
+          seed,
+        ),
+      ),
+    }),
+  );
+  it('verifies a known keypair and requires final full access for this account', async () => {
+    const fetch = rpc({ permission: 'FullAccess', nonce: 1 });
+    const wallet = nearSelectorWallet(
+      {
+        getAccounts: async () => [{ accountId: 'buyer.near' }],
+        signAndSendTransaction: vi.fn(),
+        signMessage,
+      },
+      'buyer.near',
+    );
+    await wallet.proveControl?.(message, { contractId: 'annon.near', nearRpc: 'https://rpc' });
+    expect(signMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ message, recipient: 'annon.near', nonce: expect.any(Uint8Array) }),
+    );
+    expect(JSON.parse(fetch.mock.calls[0]?.[1].body).params).toEqual({
+      request_type: 'view_access_key',
+      finality: 'final',
+      account_id: 'buyer.near',
+      public_key: publicKey,
+    });
+    const first = signMessage.mock.calls.at(-1)?.[0].nonce;
+    await wallet.proveControl?.(message, { contractId: 'annon.near', nearRpc: 'https://rpc' });
+    expect(signMessage.mock.calls.at(-1)?.[0].nonce).not.toEqual(first);
+    rpc({ permission: { FunctionCall: { receiver_id: 'buyer.near', method_names: [] } } });
+    await expect(
+      wallet.proveControl?.(message, { contractId: 'annon.near', nearRpc: 'https://rpc' }),
+    ).rejects.toThrow(/full.access/i);
+  });
+  it('supports the actual near-api-js signMessage adapter with a known keypair', async () => {
+    rpc({ permission: 'FullAccess' });
+    const account = new Account(
+      'buyer.near',
+      new JsonRpcProvider({ url: 'https://rpc' }),
+      KeyPairSigner.fromSecretKey(
+        `ed25519:${base58.encode(concat(seed, ed25519.getPublicKey(seed)))}`,
+      ),
+    );
+    await nearKeyPairWallet(account).proveControl?.(message, {
+      contractId: 'annon.near',
+      nearRpc: 'https://rpc',
+    });
+  });
+  it('binds the challenge text, recipient, nonce and tag independently', async () => {
+    for (const edit of [
+      (p: { message: string; recipient: string; nonce: Uint8Array }) => ({
+        ...p,
+        message: `${p.message}!`,
+      }),
+      (p: { message: string; recipient: string; nonce: Uint8Array }) => ({
+        ...p,
+        recipient: 'other.near',
+      }),
+      (p: { message: string; recipient: string; nonce: Uint8Array }) => ({
+        ...p,
+        nonce: new Uint8Array(32),
+      }),
+    ]) {
+      rpc({ permission: 'FullAccess' });
+      const wallet = nearSelectorWallet(
+        {
+          getAccounts: async () => [{ accountId: 'buyer.near' }],
+          signAndSendTransaction: vi.fn(),
+          signMessage: (p) => signMessage(edit(p)),
+        },
+        'buyer.near',
+      );
+      await expect(
+        wallet.proveControl?.(message, { contractId: 'annon.near', nearRpc: 'https://rpc' }),
+      ).rejects.toThrow(/signature/);
+    }
+  });
+  it('rejects altered text, recipient, nonce, signature, account and missing RPC key', async () => {
+    const good = await signMessage({ message, recipient: 'annon.near', nonce: new Uint8Array(32) });
+    for (const result of [
+      good,
+      { ...good, accountId: 'other.near' },
+      { ...good, signature: base64.encode(new Uint8Array(64)) },
+      { ...good, publicKey: `ed25519:${base58.encode(new Uint8Array(32))}` },
+    ]) {
+      rpc({ permission: 'FullAccess' });
+      const wallet = nearSelectorWallet(
+        {
+          getAccounts: async () => [{ accountId: 'buyer.near' }],
+          signAndSendTransaction: vi.fn(),
+          signMessage: async () => result,
+        },
+        'buyer.near',
+      );
+      await expect(
+        wallet.proveControl?.(message, { contractId: 'annon.near', nearRpc: 'https://rpc' }),
+      ).rejects.toThrow();
+    }
+    const wallet = nearKeyPairWallet(
+      new Account(
+        'buyer.near',
+        new JsonRpcProvider({ url: 'https://rpc' }),
+        KeyPairSigner.fromSecretKey(
+          `ed25519:${base58.encode(concat(seed, ed25519.getPublicKey(seed)))}`,
+        ),
+      ),
+    );
+    rpc(null);
+    await expect(
+      wallet.proveControl?.(message, { contractId: 'annon.near', nearRpc: 'https://rpc' }),
+    ).rejects.toThrow();
   });
 });

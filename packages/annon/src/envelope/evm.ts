@@ -7,7 +7,6 @@ const toHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2,
 
 /**
  * Whether `sig` (r ‖ s ‖ v, low s, v 27 or 28) is `address` signing `text` with EIP-191.
- * @internal exported for the tests
  */
 export function signedBy(text: string, sig: Uint8Array, address: string): boolean {
   return signerOf(text, sig) === address.toLowerCase();
@@ -16,7 +15,6 @@ export function signedBy(text: string, sig: Uint8Array, address: string): boolea
 /**
  * The address that signed `text` with EIP-191 (r ‖ s ‖ v, low s, v 27 or 28), lowercase 0x, or
  * null for a signature that recovers to nobody.
- * @internal exported for the relayer
  */
 export function signerOf(text: string, sig: Uint8Array): string | null {
   if (sig.length !== 65 || (sig[64] !== 27 && sig[64] !== 28)) return null;

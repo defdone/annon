@@ -435,7 +435,7 @@ export type PaymentStatus =
  * there and after), or the head. Searched forward, so it holds whatever Base's block time is.
  */
 async function lastBlock(url: string, from: number, validBefore: bigint, now: Head) {
-  // ponytail: a first guess of 5 blocks a second (Base since Denim, 5 Nov 2026), doubled on a miss.
+  // Note: a first guess of 5 blocks a second (Base since Denim, 5 Nov 2026), doubled on a miss.
   let step = Math.max(1, (Number(validBefore) - (await block(url, from)).timestamp) * 5);
   for (let at = from + step; ; at += step, step *= 2) {
     if (at >= now.number) return now.number;
@@ -445,7 +445,7 @@ async function lastBlock(url: string, from: number, validBefore: bigint, now: He
 
 /** The block of an `AuthorizationCanceled` for this nonce in `[from, to]`, searched in chunks. */
 async function canceledAfter(url: string, e: Expected, from: number, to: number) {
-  // ponytail: 10,000 blocks per query, the common RPC limit; a long-expired purchase takes several.
+  // Note: 10,000 blocks per query, the common RPC limit; a long-expired purchase takes several.
   for (let at = from; at <= to; at += 10_000) {
     const end = Math.min(to, at + 9_999);
     const topics = [

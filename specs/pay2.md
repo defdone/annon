@@ -7,7 +7,7 @@ The file key `K` is released by the Annon contract on NEAR (`near-ckd/v1` stanza
 registered on the contract and the seller signs the final header, so a buyer can check every byte
 against the registration before paying or opening.
 
-PAY2 extends PAY1, the Private Link format Partner has used since September 2026 (chunked
+PAY2 extends PAY1, the earlier Private Link format (chunked
 AES-256-GCM, a last-chunk flag against truncation). New in PAY2: key stanzas, a header MAC, a
 registered body hash over a chunk hash list, one key per chunk, and an optional verified preview.
 
@@ -227,7 +227,7 @@ limit in section 3.
 - Hosting, a relayer or anyone in between can't change a byte without failing step 2, 3 or 4: the
   registration covers the body, the commitments and the hash list, and the seller's signature
   covers the whole header. Where the bytes are public this is known before paying; where they
-  arrive with the payment (Partner), before opening, and it shows who changed them.
+  arrive with the payment, before opening, and it shows who changed them.
 - Only the seller can build a file that passes steps 1 to 4 and fails later, and the seller signed
   it. The registration, the signed header and the receipt are the evidence.
 - The signature binds the header to the seller's wallet, not to the content: a seller who lists a
