@@ -39,13 +39,70 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
-    "./*": {
-      "types": "./dist/*.d.ts",
-      "default": "./dist/*.js"
-    },
     "./browser": {
       "types": "./dist/browser/index.d.ts",
       "default": "./dist/browser/index.js"
+    },
+    "./browser/purchase-bundle.js": "./dist/browser/purchase-bundle.js",
+    "./node": {
+      "types": "./dist/node/index.d.ts",
+      "default": "./dist/node/index.js"
+    },
+    "./relay": {
+      "types": "./dist/relay/index.d.ts",
+      "default": "./dist/relay/index.js"
+    },
+    "./download/host": {
+      "types": "./dist/download/host.d.ts",
+      "default": "./dist/download/host.js"
+    },
+    "./download/http": {
+      "types": "./dist/download/http.d.ts",
+      "default": "./dist/download/http.js"
+    },
+    "./envelope/pay2": {
+      "types": "./dist/envelope/pay2.d.ts",
+      "default": "./dist/envelope/pay2.js"
+    },
+    "./near/rpc": {
+      "types": "./dist/near/rpc.d.ts",
+      "default": "./dist/near/rpc.js"
+    },
+    "./pay/seller": {
+      "types": "./dist/pay/seller.d.ts",
+      "default": "./dist/pay/seller.js"
+    },
+    "./pay/settle": {
+      "types": "./dist/pay/settle.d.ts",
+      "default": "./dist/pay/settle.js"
+    },
+    "./pay/split": {
+      "types": "./dist/pay/split.d.ts",
+      "default": "./dist/pay/split.js"
+    },
+    "./pay/store": {
+      "types": "./dist/pay/store.d.ts",
+      "default": "./dist/pay/store.js"
+    },
+    "./pay/store-node": {
+      "types": "./dist/pay/store-node.d.ts",
+      "default": "./dist/pay/store-node.js"
+    },
+    "./node/signer-mock": {
+      "types": "./dist/node/signer-mock.d.ts",
+      "default": "./dist/node/signer-mock.js"
+    },
+    "./node/adapter": {
+      "types": "./dist/node/adapter.d.ts",
+      "default": "./dist/node/adapter.js"
+    },
+    "./node/cli": {
+      "types": "./dist/node/cli.d.ts",
+      "default": "./dist/node/cli.js"
+    },
+    "./node/errors": {
+      "types": "./dist/node/errors.d.ts",
+      "default": "./dist/node/errors.js"
     }
   },
   "files": [
@@ -57,8 +114,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc --noEmit && tsc -p tsconfig.build.json && node scripts/build-browser.ts",
-    "dist": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/build-browser.ts",
+    "build": "rm -rf dist && tsc --noEmit && tsc -p tsconfig.build.json && node scripts/build-browser.ts",
     "test": "vitest run"
   },
   "devDependencies": {

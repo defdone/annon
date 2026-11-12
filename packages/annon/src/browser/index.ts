@@ -1,7 +1,17 @@
 /** Browser purchase logic. The embedding application supplies its own screen and wallets. */
 
-export { Annon, type AnnonOptions, type BuyOptions, type BuyRoute } from '../api/annon.js';
+export {
+  Annon,
+  type AnnonOptions,
+  type BuyOptions,
+  type BuyRoute,
+  SellError,
+} from '../api/annon.js';
 export { DownloadError, type DownloadErrorCode } from '../download/download.js';
+export { Pay2Error, type Pay2ErrorCode } from '../envelope/pay2.js';
+export { SourceChangedError } from '../envelope/stream.js';
+export { CkdError, type CkdErrorCode } from '../keys/near-ckd.js';
+export { NearError, type NearErrorCode, NearRpcRateLimited } from '../near/rpc.js';
 export {
   type Deposit,
   OneClick,
@@ -18,7 +28,14 @@ export {
   validateRefundAddress,
 } from '../oneclick/oneclick.js';
 export { newBackupSecret } from '../pay/backup.js';
-export type { EvmWallet, IdentityWallet, NearWallet } from '../wallet/wallet.js';
+export { BaseRpcRateLimited, PayError, type PayErrorCode } from '../pay/base.js';
+export { TransactionUncertain } from '../wallet/uncertain.js';
+export {
+  type EvmWallet,
+  FileFundingRefused,
+  type IdentityWallet,
+  type NearWallet,
+} from '../wallet/wallet.js';
 export {
   BROWSER_DOWNLOAD_LIMIT,
   type BrowserDownloadOptions,

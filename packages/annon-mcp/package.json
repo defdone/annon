@@ -45,7 +45,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "build": "tsc --noEmit && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc --noEmit && tsc -p tsconfig.build.json --sourceMap false",
     "test": "vitest run"
   },
   "dependencies": {
