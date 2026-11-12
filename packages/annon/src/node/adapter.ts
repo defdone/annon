@@ -1,5 +1,5 @@
 /** Node I/O around the SDK. Settlement, commitments, encryption and proofs stay in the SDK. */
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { Annon, type AnnonOptions } from '../api/annon.js';
 import { download, secureUrl } from '../download/download.js';
@@ -15,12 +15,11 @@ import {
   importRecovery,
   type RecoveryRecord,
 } from '../pay/backup.js';
-import { PayError } from '../pay/base.js';
 import { type PaymentSummary, type PurchaseRecord, purchaseKey } from '../pay/purchase.js';
-import { readSplitState } from '../pay/split.js';
 import { fileStore } from '../pay/store-node.js';
 import { discover, type PaymentRequired, readPaymentRequired } from '../pay/x402.js';
-import { checkProtocolFee, type ProtocolFee, protocolFeeAboveMax } from '../relay/fees.js';
+import { checkBaseSponsorship } from '../relay/capabilities.js';
+import { type ProtocolFee, protocolFeeAboveMax } from '../relay/fees.js';
 import { bytes, hex } from '../settle-near/codec.js';
 import { identityJson, parseIdentity } from '../settle-near/identity.js';
 import type { NearWallet } from '../wallet/wallet.js';
@@ -42,7 +41,9 @@ import {
   savedPayment,
   validatePaymentToken,
 } from './payment-terms.js';
+import { claimPurchase, type PurchaseGuard } from './purchase-guard.js';
 import { resourceAllowed } from './resources.js';
+import { retryGate } from './retry-gate.js';
 import { assertSignerInput, configuredWallet } from './signer-wallet.js';
 import { type SigningResult, signingRequest, verifySigningResult } from './signing.js';
 import {
@@ -199,7 +200,8 @@ async function originFor(
   wallet: LocalWallet,
   fetcher: typeof fetch,
   c: Config,
-): Promise<Origin & { sourceAsset: SourceAsset }> {
+): Promise<Origin & { sourceAsset: SourceAsset; maxSourceAmount?: string }> {
+  const sourcePolicy = o.origin ? c.origins?.[o.origin] : undefined;
   if (o.origin) {
     if (!c.origins || !Object.hasOwn(c.origins, o.origin))
       return fail('origin_not_allowed', 'Choose a human-configured origin name.', 2);
@@ -254,7 +256,11 @@ async function originFor(
     asset,
     chain: kind,
     refundTo,
+    ...(sourcePolicy?.maxSourceAmount ? { maxSourceAmount: sourcePolicy.maxSourceAmount } : {}),
     sourceAsset: {
+      ...(sourcePolicy?.usdcDecimals !== undefined
+        ? { symbol: 'USDC', decimals: sourcePolicy.usdcDecimals }
+        : {}),
       chain,
       asset,
       ...(token ? { symbol: token.symbol } : {}),
@@ -326,11 +332,14 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         return {};
       }
     };
-    const pendingSetup = (purchaseId: string) => ({
-      purchaseId,
-      state: 'pending',
-      next: 'Check the payment; configure readable saved state and the matching backup secret to resume Base unlock. 1Click SUCCESS alone is not acceptance.',
-    });
+    const pendingSetup = async (purchaseId: string) => {
+      if (d.agent) await retryGate({ ...c, purchaseId }).defer('settlement_pending', 30);
+      return {
+        purchaseId,
+        state: 'pending',
+        next: 'Check the payment; configure readable saved state and the matching backup secret to resume Base unlock. 1Click SUCCESS alone is not acceptance.',
+      };
+    };
     if (o.command === 'budget') {
       if (!o.target || !isId(o.target)) throw usage();
       const budget = await fileStorageBalance(c.nearRpc, c.contractId, o.target);
@@ -363,6 +372,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     }
     if (o.command === 'status') {
       if (!o.target || !isId(o.target)) throw usage();
+      if (d.agent) await retryGate({ ...c, purchaseId: o.target }).check();
       const p = await (d.purchase ?? getPurchase)(c.nearRpc, c.contractId, o.target);
       if (p)
         return {
@@ -536,6 +546,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     const sdk = (d.sdk ?? ((options) => new Annon(options)))({
       ...c,
       rawStore,
+      fetch: fetcher,
       backupSecret: secret,
       send,
       ...(c.relayer
@@ -576,7 +587,17 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       }
       if (!record) return pendingSetup(o.target);
       if (o.wallet || env.ANNON_WALLET) await wallet();
-      const accepted = await sdk.accept(record ?? undefined, o.target);
+      let accepted: boolean;
+      try {
+        accepted = await sdk.accept(record ?? undefined, o.target);
+      } catch (error) {
+        const safe = publicError(error);
+        if (d.agent && safe.retryAfterSeconds !== undefined)
+          await retryGate({ ...c, purchaseId: o.target }).defer(safe.code, safe.retryAfterSeconds);
+        throw error;
+      }
+      if (d.agent && !accepted)
+        await retryGate({ ...c, purchaseId: o.target }).defer('settlement_pending', 30);
       return {
         purchaseId: o.target,
         state: accepted ? 'accepted' : 'pending',
@@ -748,6 +769,8 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       const route =
         o.route ??
         (o.fromChain || o.origin ? '1click' : buyer.identity.kind === 'near' ? 'near' : 'base');
+      if (d.agent && route === '1click' && !o.origin)
+        return fail('origin_not_allowed', 'Use a human-configured origin name.', 2);
       if (route === 'near' && buyer.identity.kind !== 'near')
         return fail(
           'near_wallet_required',
@@ -780,69 +803,8 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       const price = route === 'base' ? f.terms.base?.price : f.terms.near.price;
       if (!price || BigInt(price) > maxPrice)
         return fail('price_above_max', 'The registered price exceeds maxPrice.');
-      if (route === 'base' && c.relayer) {
-        const reply = await response(new URL('/v1/capabilities', c.relayer).href, fetcher);
-        const cap = (await reply.json()) as {
-          contract?: unknown;
-          minPrice?: unknown;
-          disabled?: unknown;
-          methods?: unknown;
-          baseSponsorship?: unknown;
-          fee?: ProtocolFee;
-        };
-        if (
-          !reply.ok ||
-          cap.contract !== c.contractId ||
-          typeof cap.minPrice !== 'string' ||
-          !/^[0-9]+$/.test(cap.minPrice) ||
-          !Array.isArray(cap.methods) ||
-          !cap.methods.includes('unlock')
-        )
-          return fail(
-            'relayer_unavailable',
-            'Relayer sponsorship policy is unavailable; check configuration before paying.',
-          );
-        if (
-          cap.disabled === true ||
-          cap.baseSponsorship === false ||
-          BigInt(price) < BigInt(cap.minPrice)
-        )
-          return fail(
-            'not_sponsored',
-            'The relayer does not sponsor this Base price; do not pay through this route.',
-          );
-        try {
-          if (f.terms.near.recipients.some((r) => r.identity.kind !== 'evm'))
-            throw new TypeError('Base split recipients must be EVM identities');
-          if (!cap.fee) throw new TypeError('missing fee policy');
-          checkProtocolFee(f.terms, cap.fee);
-        } catch {
-          return fail(
-            'not_sponsored',
-            'The registered terms do not carry the required treasury share for Base sponsorship.',
-          );
-        }
-        if (c.baseRpc && f.terms.base) {
-          try {
-            await readSplitState(c.baseRpc, f.terms.base.pay_to, {
-              recipients: f.terms.near.recipients.map((r) => r.identity.id),
-              allocations: f.terms.near.recipients.map((r) => BigInt(r.bps)),
-              totalAllocation: 10000n,
-              distributionIncentive: 0,
-            });
-          } catch (error) {
-            if (error instanceof PayError && error.code === 'transport')
-              return fail(
-                'relayer_unavailable',
-                'Base split verification is unavailable; retry before paying.',
-              );
-            return fail(
-              'not_sponsored',
-              'The Base split code or state does not match the registered recipients.',
-            );
-          }
-        }
-      }
+      const paymentConfig = await getConfig(c.nearRpc, c.contractId);
+
       const paymentTerms = {
         file: found.fileId,
         resource: found.url,
@@ -854,7 +816,6 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         baseRecipient: f.terms.base?.pay_to,
         token: route === 'base' ? f.terms.base?.usdc : f.terms.near.token,
       };
-      const paymentConfig = await getConfig(c.nearRpc, c.contractId);
       if (paymentConfig.network !== c.network)
         return fail(
           'network_mismatch',
@@ -862,6 +823,21 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           2,
         );
       validatePaymentToken(paymentTerms, paymentConfig);
+      const baseSponsorship =
+        route === 'base'
+          ? await checkBaseSponsorship({
+              deployment: {
+                network: c.network,
+                contractId: c.contractId,
+                nearUsdc: paymentConfig.nearUsdc,
+                baseUsdc: paymentConfig.usdc,
+              },
+              file: f,
+              baseRpc: c.baseRpc,
+              relayer: c.relayer ?? '',
+              fetch: fetcher,
+            })
+          : undefined;
       if (route !== 'base') {
         const budget = await fileStorageBalance(c.nearRpc, c.contractId, f.terms.file_id);
         if (budget.available < budget.admissionRequirement)
@@ -890,29 +866,74 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
             );
         }
       };
-      if (!origin || (o.json && !d.browserApprovals)) await confirmPayment();
+      if (d.agent && c.dailyBudget === undefined)
+        return fail('budget_required', 'Configure a daily budget before buying.', 2);
+      const guardDir = join(c.stateDir, 'purchase-guards');
+      await mkdir(guardDir, { recursive: true, mode: 0o700 });
+      const known: string[] = [];
+      for (const name of await readdir(storeDir)) {
+        if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
+        const envelope = JSON.parse(
+          await readFile(join(storeDir, name), 'utf8'),
+        ) as EncryptedRecord;
+        if (!isId(envelope.id)) continue;
+        const saved = await sdk.store.load(purchaseKey(envelope.id));
+        if (
+          saved?.purchase.file_id === found.fileId &&
+          saved.purchase.contract === c.contractId &&
+          saved.terms.network === (saved.purchase.route === 'base-usdc' ? 'eip155:8453' : c.network)
+        )
+          known.push(saved.id);
+      }
+      const guard = await claimPurchase(
+        fileStore<PurchaseGuard>(guardDir),
+        JSON.stringify([c.network, c.contractId, found.fileId]),
+        {
+          known,
+          ...(o.force === undefined ? {} : { force: o.force }),
+          live: async (id, claimUntil) => {
+            const saved = await sdk.store.load(purchaseKey(id));
+            if (await (d.purchase ?? getPurchase)(c.nearRpc, c.contractId, id)) return true;
+            if (!saved) return Date.now() / 1000 < claimUntil;
+            return (
+              Number(saved.purchase.expires_at) > Date.now() / 1000 ||
+              (saved.purchase.route === 'base-usdc' && saved.attempts.length > 0)
+            );
+          },
+        },
+      );
+      let renewalError: unknown;
+      const heartbeat = setInterval(() => {
+        void guard.renew().catch((error: unknown) => {
+          renewalError = error;
+        });
+      }, 30000);
       let refundBudget: (() => Promise<void>) | undefined;
-      if (d.agent) {
+      const reserve = async (spend: bigint) => {
+        if (!d.agent) return;
         if (c.dailyBudget === undefined)
-          return fail('budget_required', 'Configure a daily agent budget before buying.', 2);
+          return fail('budget_required', 'Configure a daily budget before buying.', 2);
         const budgetDir = join(c.stateDir, 'budgets');
         await mkdir(budgetDir, { recursive: true, mode: 0o700 });
-        refundBudget = await reserveSpend(
-          fileStore<BudgetRecord>(budgetDir),
-          'agent:USDC',
-          BigInt(price),
-          {
-            daily: c.dailyBudget === '0' ? 0n : BigInt(amount(c.dailyBudget)),
-          },
-        );
-      }
+        refundBudget = await reserveSpend(fileStore<BudgetRecord>(budgetDir), 'agent:USDC', spend, {
+          daily: c.dailyBudget === '0' ? 0n : BigInt(amount(c.dailyBudget)),
+        });
+      };
       let completed = false;
       try {
+        if (!origin || (o.json && !d.browserApprovals)) await confirmPayment();
+        if (!origin) await reserve(BigInt(price));
         let source: SourcePayment | undefined;
         const bought = await sdk.buy({
           fileId: found.fileId,
           header: found.header,
+          beforeSave: async (record) => {
+            if (renewalError) throw renewalError;
+            await guard.saved(record.id);
+          },
           recovery: buyer,
+          ...(baseSponsorship ? { baseSponsorship } : {}),
+          route: route === 'base' ? 'base-usdc' : route === 'near' ? 'near-usdc' : 'oneclick',
           refund: buyer.identity,
           ...(route === '1click' ? {} : { payer: buyer }),
           maxPrice,
@@ -925,6 +946,35 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
                 oneClick: new OneClick({ fetch: fetcher }),
                 onQuote: async (quote) => {
                   source = quotedSource(quote, origin.sourceAsset);
+                  let spend = BigInt(price);
+                  if (d.agent) {
+                    const sourceAmount = BigInt(source.amount);
+                    if (
+                      origin.maxSourceAmount !== undefined &&
+                      sourceAmount > BigInt(origin.maxSourceAmount)
+                    )
+                      return fail(
+                        'price_above_max',
+                        'The quoted source amount exceeds the configured origin cap.',
+                        2,
+                      );
+                    if (source.symbol === 'USDC' && source.decimals !== undefined) {
+                      const scale = 10n ** BigInt(source.decimals);
+                      spend = (sourceAmount * 1000000n + scale - 1n) / scale;
+                      if (spend > maxPrice)
+                        return fail(
+                          'price_above_max',
+                          'The quoted source USDC amount exceeds maxPrice.',
+                          2,
+                        );
+                    } else if (!origin.maxSourceAmount)
+                      return fail(
+                        'origin_not_allowed',
+                        'Configure maxSourceAmount in source base units for this origin before buying.',
+                        2,
+                      );
+                  }
+                  await reserve(spend);
                   await confirmPayment(source);
                 },
               }
@@ -939,6 +989,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
               );
           },
         });
+        await guard.saved(bought.record.id);
         completed = true;
         let payment: ReturnType<typeof savedPayment> | undefined;
         try {
@@ -969,6 +1020,10 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         // Only failures before the SDK returns can release a 1Click reservation.
         if (origin && !completed) await refundBudget?.().catch(() => {});
         throw error;
+      } finally {
+        clearInterval(heartbeat);
+        if (completed) await guard.release().catch(() => {});
+        else await guard.release();
       }
     }
     if (o.command === 'recover') {
@@ -998,6 +1053,8 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       return { fileId: o.target, stopped: true };
     }
     if (o.command !== 'open' || !o.target || !o.output) throw usage();
+    if (d.agent && o.url && !resourceAllowed(c.allowedResources, o.url))
+      return fail('resource_not_allowed', 'The resource URL is outside the configured policy.', 2);
     await newOutput(o.output);
     const ref = o.purchase ?? o.target;
     let record: PurchaseRecord | undefined;
@@ -1029,14 +1086,40 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     const fileId = recovery?.file_id ?? record?.purchase.file_id;
     if (!fileId) throw usage();
     if (o.wallet || env.ANNON_WALLET) await wallet();
-    if (!(await sdk.accept(record, recovery?.purchase_id ?? record?.id)))
+    const purchaseId = recovery?.purchase_id ?? record?.id;
+    if (!purchaseId) throw usage();
+    const resource = await resources.load(fileId);
+    const local = o.file ?? (o.purchase ? o.target : undefined);
+    const remoteUrl = o.url ?? resource?.url;
+    if (d.agent && !local && remoteUrl && !resourceAllowed(c.allowedResources, remoteUrl))
+      return fail('resource_not_allowed', 'The resource URL is outside the configured policy.', 2);
+    const settlementGate = retryGate({ ...c, purchaseId });
+    const downloadGate =
+      !local && remoteUrl
+        ? retryGate({ ...c, purchaseId, fileId, host: new URL(remoteUrl).origin })
+        : undefined;
+    if (d.agent) {
+      await settlementGate.check();
+      await downloadGate?.check();
+    }
+    let accepted: boolean;
+    try {
+      accepted = await sdk.accept(record, purchaseId);
+    } catch (error) {
+      const safe = publicError(error);
+      if (d.agent && safe.retryAfterSeconds !== undefined)
+        await settlementGate.defer(safe.code, safe.retryAfterSeconds);
+      throw error;
+    }
+    if (!accepted) {
+      if (d.agent) await settlementGate.defer('settlement_pending', 30);
+
       throw new AdapterError(
         'settlement_processing',
         publicError({ code: 'settlement_processing' }).message,
       );
-    const resource = await resources.load(fileId);
+    }
     let readFileSource: () => Awaited<ReturnType<typeof fileSource>> | ReadableStream<Uint8Array>;
-    const local = o.file ?? (o.purchase ? o.target : undefined);
     if (local) {
       const source = await fileSource(local);
       readFileSource = () => source;
@@ -1044,6 +1127,12 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       const url = o.url ?? resource?.url;
       if (!url)
         return fail('file_required', 'Provide --file or --url to open this saved purchase.', 2);
+      if (d.agent && !resourceAllowed(c.allowedResources, url))
+        return fail(
+          'resource_not_allowed',
+          'The resource URL is outside the configured policy.',
+          2,
+        );
       const header =
         resource && resource.contractId === c.contractId
           ? bytes(resource.header, (resource.header.length - 2) / 2)
@@ -1087,7 +1176,18 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         spool: (stream, use) => withSpool(o.output as string, stream, use),
         ...(recovery?.grant != null ? { recovery } : record ? { record } : {}),
       }),
-    );
+    ).catch(async (error: unknown) => {
+      const safe = publicError(error);
+      if (
+        d.agent &&
+        safe.retryAfterSeconds !== undefined &&
+        ['download_limited', 'download_in_progress', 'rate_limited', 'unavailable'].includes(
+          safe.code,
+        )
+      )
+        await downloadGate?.defer(safe.code, safe.retryAfterSeconds);
+      throw error;
+    });
     return {
       fileId,
       purchaseId: recovery?.purchase_id ?? record?.id,
@@ -1113,7 +1213,11 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
     if (o.command === 'init') return initAgent(o, env, d.keychain ?? osKeychain);
     const c = await loadConfig(o, env, o.command === 'login', d.agent);
     if (agent || c.agent) o = await confinePaths(o, c.workDir as string);
-    if (c.signer) assertSignerInput(o);
+    if (c.signer) {
+      assertSignerInput(o);
+      if (o.recovery && identityJson(identity(o.recovery)) !== identityJson(c.signer.identity))
+        throw new AdapterError('wrong_identity', 'Recovery must match the configured signer.', 2);
+    }
     if ((agent || c.agent) && o.command === 'login')
       throw new AdapterError('agent_policy', 'Agent mode refuses interactive login.', 2);
     let session: BrowserSession | undefined;

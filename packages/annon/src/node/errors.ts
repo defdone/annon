@@ -18,6 +18,15 @@ export class AdapterError extends Error {
 export const usage = () =>
   new AdapterError('invalid_arguments', 'Invalid arguments. Run annon --help.', 2);
 const actions: Record<string, string> = {
+  download_limited: 'Download limit reached. Wait before downloading again.',
+  download_in_progress: 'Another download is active. Wait before retrying.',
+  rate_limited: 'The host is busy. Wait before retrying.',
+  unavailable: 'The service is temporarily unavailable. Wait before retrying.',
+  transport_required: 'Configure a trusted relayer before a Base purchase.',
+  relayer_unavailable: 'Base sponsorship checks are unavailable. Retry before paying.',
+  not_sponsored:
+    'This listing does not qualify for Base sponsorship. Do not pay through this route.',
+  settlement_pending: 'The purchase is still settling. Wait before retrying the saved purchase.',
   protocol_fee_above_max:
     'The advertised protocol fee exceeds maxProtocolFee. Review the fee in human configuration.',
   funding_refused: 'File funding was refused. Correct the cause before retrying.',
@@ -52,6 +61,32 @@ const actions: Record<string, string> = {
   not_authorized:
     'The host has not accepted this final grant. Check final purchase status and the resource URL.',
 };
+function evidence(error: object) {
+  const e = error as Record<string, unknown>;
+  const id = (v: unknown): v is string => typeof v === 'string' && /^0x[0-9a-f]{64}$/.test(v);
+  const seconds =
+    typeof e.retryAfterSeconds === 'number' && e.retryAfterSeconds >= 0
+      ? Math.ceil(e.retryAfterSeconds)
+      : NaN;
+  return {
+    ...(id(e.fileId) ? { fileId: e.fileId } : {}),
+    ...(id(e.purchaseId) ? { purchaseId: e.purchaseId } : {}),
+    ...(typeof e.txHash === 'string' ? { txHash: e.txHash } : {}),
+    ...(Number.isSafeInteger(seconds) && seconds >= 0 ? { retryAfterSeconds: seconds } : {}),
+  };
+}
+const waiting = new Set([
+  'download_limited',
+  'download_in_progress',
+  'rate_limited',
+  'unavailable',
+  'settlement_pending',
+  'settlement_processing',
+  'payment_not_safe',
+  'settling',
+  'relayer_unavailable',
+  'relayer_rate_limited',
+]);
 export function publicError(error: unknown): {
   code: string;
   message: string;
@@ -107,8 +142,13 @@ export function publicError(error: unknown): {
     return {
       code: error.code,
       message: error.message,
-      exitCode: error.exitCode,
-      ...(error.code === 'payment_not_safe' ? { retryAfterSeconds: 30 } : {}),
+      exitCode: waiting.has(error.code) ? 4 : error.exitCode,
+      ...evidence(error),
+      ...(['payment_not_safe', 'settlement_pending', 'settlement_processing', 'settling'].includes(
+        error.code,
+      ) && !('retryAfterSeconds' in evidence(error))
+        ? { retryAfterSeconds: 30 }
+        : {}),
     };
   if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') {
     const message = Object.hasOwn(actions, error.code) ? actions[error.code] : undefined;
@@ -116,8 +156,16 @@ export function publicError(error: unknown): {
       return {
         code: error.code,
         message,
-        exitCode: 1,
-        ...(error.code === 'payment_not_safe' ? { retryAfterSeconds: 30 } : {}),
+        exitCode: error.code === 'network_mismatch' ? 2 : waiting.has(error.code) ? 4 : 1,
+        ...evidence(error),
+        ...([
+          'payment_not_safe',
+          'settlement_pending',
+          'settlement_processing',
+          'settling',
+        ].includes(error.code) && !('retryAfterSeconds' in evidence(error))
+          ? { retryAfterSeconds: 30 }
+          : {}),
       };
   }
   return {

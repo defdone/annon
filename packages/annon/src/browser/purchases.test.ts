@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { purchase as fixture } from '../../test/fixtures.js';
 import { keyFromSecret } from '../keys/near-ckd.js';
 import type { OneClick, PollCheckpoint, SwapStatus } from '../oneclick/oneclick.js';
-import { newBackupSecret } from '../pay/backup.js';
-import type { PurchaseRecord } from '../pay/purchase.js';
+import { encryptedPurchaseStore, newBackupSecret } from '../pay/backup.js';
+import { type PurchaseRecord, purchaseKey } from '../pay/purchase.js';
 import { hex } from '../settle-near/codec.js';
 import { baseNonceV2, buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import { NEAR_USDC } from '../settle-near/terms.js';
@@ -900,7 +900,9 @@ it.each(['signed', 'before-payment', 'uncertain'] as const)(
       lease: { owner: 'old-owner', expiresAt: now - 1 },
     });
     await c.resume();
-    expect((await c.snapshot()).state).toBe('payment_uncertain');
+    expect((await c.snapshot()).state).toBe(
+      evidence === 'signed' ? 'accepting' : 'payment_uncertain',
+    );
     expect(h.sdk.accept).toHaveBeenCalledTimes(1);
     expect(h.sdk.buy).not.toHaveBeenCalled();
   },
@@ -1375,34 +1377,123 @@ it('a long open renews its lease and keeps its final write compatible with heart
   }
 });
 
-it('resuming a submitted Base payload preserves its submission label while acquiring a lease', async () => {
-  const h = setup();
-  const c = await h.create();
-  const before = await c.storage.load('synthetic-checkout');
-  if (!before) throw new Error('missing fixture');
-  const purchase = recordForBase();
-  purchase.attempts = [
-    {
-      attemptId: 'synthetic-attempt',
-      preparedAt: now,
-      searchFromBlock: 1,
-      validBefore: String(now + 100),
-      paymentRequired: {} as never,
-      payload: 'synthetic-signed-payload',
-    },
-  ];
-  await c.storage.save(before, {
-    ...before,
-    revision: 1,
-    route: 'base-usdc',
-    purchase,
-    state: 'payment_uncertain',
-    submission: 'submitted',
-  });
-  await c.resume();
-  expect((await c.storage.load(before.id))?.submission).toBe('submitted');
-  expect((await c.snapshot()).state).toBe('accepting');
-});
+it.each(['payment_uncertain', 'expired'] as const)(
+  'resuming a submitted Base payload from %s preserves acceptance after expiry',
+  async (state) => {
+    const h = setup(() => now + 4000);
+    const c = await h.create();
+    const before = await c.storage.load('synthetic-checkout');
+    if (!before) throw new Error('missing fixture');
+    const purchase = recordForBase();
+    purchase.attempts = [
+      {
+        attemptId: 'synthetic-attempt',
+        preparedAt: now,
+        searchFromBlock: 1,
+        validBefore: String(now + 100),
+        paymentRequired: {} as never,
+        payload: 'synthetic-signed-payload',
+      },
+    ];
+    await c.storage.save(before, {
+      ...before,
+      revision: 1,
+      route: 'base-usdc',
+      purchase,
+      state,
+      submission: 'submitted',
+    });
+    await c.resume();
+    expect((await c.storage.load(before.id))?.submission).toBe('submitted');
+    expect((await c.snapshot()).state).toBe('accepting');
+  },
+);
+
+it.each(['uncertain', 'submitted-interrupted', 'pending-error'] as const)(
+  'keeps a signed Base payment accepting past expiry: %s',
+  async (mode) => {
+    const h = setup(() => now + 4000);
+    const c = await h.create();
+    const before = await c.storage.load('synthetic-checkout');
+    if (!before) throw new Error('missing fixture');
+    const purchase = recordForBase();
+    purchase.attempts = [
+      {
+        attemptId: 'synthetic-attempt',
+        preparedAt: now,
+        searchFromBlock: 1,
+        validBefore: String(now + 100),
+        paymentRequired: {} as never,
+        payload: 'synthetic-signed-payload',
+      },
+    ];
+    await c.storage.save(before, {
+      ...before,
+      revision: 1,
+      route: 'base-usdc',
+      purchase,
+      state: 'payment_uncertain',
+      submission: mode === 'uncertain' ? 'uncertain' : 'submitted',
+      ...(mode === 'submitted-interrupted'
+        ? { lease: { owner: 'old-tab', expiresAt: now - 1 } }
+        : {}),
+    });
+    if (mode === 'pending-error') {
+      h.sdk.accept = vi.fn(async () => {
+        throw Object.assign(new Error('pending'), { code: 'settlement_pending' });
+      });
+      await expect(c.resume()).rejects.toMatchObject({ code: 'settlement_pending' });
+    } else await c.resume();
+    expect((await c.snapshot()).state).toBe('accepting');
+    expect((await c.storage.load(before.id))?.submission).toBe(
+      mode === 'uncertain' ? 'uncertain' : 'submitted',
+    );
+    expect(h.sdk.buy).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['expired', 'canceled'] as const)(
+  'uses final Base evidence on resume: %s',
+  async (paymentState) => {
+    const h = setup(() => now + 4000);
+    const c = await h.create();
+    const before = await c.storage.load('synthetic-checkout');
+    if (!before) throw new Error('missing fixture');
+    const purchase = recordForBase();
+    purchase.attempts = [
+      {
+        attemptId: 'synthetic-attempt',
+        preparedAt: now,
+        searchFromBlock: 1,
+        validBefore: String(now + 100),
+        paymentRequired: {} as never,
+        payload: 'synthetic-signed-payload',
+      },
+    ];
+    await c.storage.save(before, {
+      ...before,
+      revision: 1,
+      route: 'base-usdc',
+      purchase,
+      state: 'payment_uncertain',
+      submission: 'uncertain',
+    });
+    h.sdk.accept = vi.fn(async (record) => {
+      if (!record) throw new Error('missing purchase');
+      const store = encryptedPurchaseStore(c.storage.rawStore, c.storage.backupSecret);
+      expect(
+        await store.compareAndSet(purchaseKey(record.id), record, {
+          ...record,
+          revision: record.revision + 1,
+          paymentState,
+        }),
+      ).toBe(true);
+      return false;
+    });
+    await c.resume();
+    expect((await c.snapshot()).state).toBe(paymentState === 'expired' ? 'expired' : 'accepting');
+  },
+);
 
 it('an open whose lease expires cannot publish a final state and remains retryable', async () => {
   let clock = now;

@@ -56,11 +56,11 @@ it('downloads checked ciphertext with a grant proof and decrypts to bytes and he
   );
   expect(fetch).toHaveBeenCalledTimes(1);
 });
-it('refuses a known size above 50 MiB before fetching with a typed CLI instruction', async () => {
+it('refuses a known size above the encrypted size cap before fetching', async () => {
   const fetch = host();
   await expect(
     browserDownload({ ...base, fetch, size: BROWSER_DOWNLOAD_LIMIT + 1 }),
-  ).rejects.toMatchObject({ code: 'too_large', message: expect.stringMatching(/CLI/) });
+  ).rejects.toMatchObject({ code: 'too_large', message: expect.stringMatching(/50 MB/) });
   expect(fetch).not.toHaveBeenCalled();
 });
 it.each(['length', 'range', 'stream'] as const)('aborts an oversized %s response', async (kind) => {

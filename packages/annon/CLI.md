@@ -207,6 +207,33 @@ URLs or path prefixes ending in `/*`, on the same origin and port. Prefixes cann
 path boundaries or authorize another origin. `ANNON_ALLOWED_RESOURCES`, when present,
 further restricts the effective list, including when config leaves it open.
 These environment settings can only tighten policy, regardless of the agent-mode trigger.
+Deployment and trust overrides (`ANNON_CONTRACT_ID`, `ANNON_NETWORK`, `ANNON_NEAR_RPC`,
+`ANNON_BASE_RPC`, `ANNON_RELAYER`, `ANNON_TRUST_CONTRACT`, `ANNON_MODERATORS`,
+`ANNON_MPC_KEY` and `ANNON_ORIGINS`) are ignored in agent mode unless the launcher explicitly
+sets `ANNON_AGENT=true`. In that explicit mode, the launcher owns those values.
+The resource allowlist applies to `open --url` and to saved download URLs too.
+If the home config enables agent mode, an alternate `ANNON_CONFIG` is refused. Use
+`ANNON_AGENT=true` or the MCP launcher to keep agent mode enabled independently of config contents.
+
+For a 1Click USDC source, price and daily limits apply to the quoted source amount, including
+its quoted fees. Every configured origin must set `usdcDecimals` to declare its source USDC
+precision or `maxSourceAmount` to cap its source base units. Token catalog decimals do not set
+spending policy.
+For other assets, configure `maxSourceAmount` on that origin in source base units; the quoted
+amount must fit it. The destination USDC amount still counts toward the daily USDC budget.
+Quotes without enough source policy are refused before deposit instructions are released.
+
+A saved live or accepted purchase blocks another buy of that file. Resume its status and open
+it using its purchase ID. Use `buy --force` only when you explicitly want another purchase.
+A supplied `--recovery` must match the configured signer.
+Base purchases check the trusted relayer's eligibility decision and registered split before signing.
+
+Completed-download cooldowns return `download_limited` and `retryAfterSeconds` immediately.
+Other host overloads retry within a total automatic wait of 60 seconds. When the next wait would
+exceed that budget, the full remaining hint is returned. CLI JSON includes the error and exit code 4;
+human output states the wait. MCP stores download and settlement waits locally and refuses repeat
+requests until they elapse, including after restart. Wait, then reuse the same purchase and output
+path. Buying again to bypass a wait spends money unnecessarily.
 
 Agent mode also requires a human-set `workDir`. Relative `sell.target`/`output` and
 `open.file`/`output` paths start there. Local `verify` targets, non-ID `open` targets and

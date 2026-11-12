@@ -1,4 +1,6 @@
 /** Sell, buy, open, recover and stop, using the single purchase/grant settlement model. */
+
+import { DownloadError } from '../download/download.js';
 import {
   type FileMeta,
   inspectHeader,
@@ -17,6 +19,7 @@ import {
 } from '../envelope/replay.js';
 import { SourceChangedError } from '../envelope/stream.js';
 import { fileAppId, keyFromSecret, oneTimeKey, openAnswer } from '../keys/near-ckd.js';
+import { MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES } from '../limits.js';
 import {
   type FileInfo,
   fileStorageBalance,
@@ -59,6 +62,12 @@ import { createSplit, type SplitCall } from '../pay/split.js';
 import type { Store, Versioned } from '../pay/store.js';
 import type { PaymentRequired } from '../pay/x402.js';
 import {
+  type BaseSponsorship,
+  checkBaseSplit,
+  checkBaseSponsorship,
+  validBaseSponsorship,
+} from '../relay/capabilities.js';
+import {
   applySponsoredFee,
   checkProtocolFee,
   type ProtocolFee,
@@ -87,6 +96,8 @@ import type { EvmWallet, IdentityWallet, NearWallet } from '../wallet/wallet.js'
 import { FileFundingRefused, fundFileStorage } from '../wallet/wallet.js';
 
 export interface AnnonOptions {
+  relayer?: string;
+  fetch?: typeof fetch;
   nearRpc: string;
   baseRpc: string;
   contractId: string;
@@ -137,6 +148,8 @@ export type BuyRoute = 'near-usdc' | 'base-usdc' | 'oneclick';
 export interface BuyOptions {
   /** Explicit selection never falls back to another payment route. */
   route?: BuyRoute;
+  baseUnlock?: 'relayer' | 'self';
+  baseSponsorship?: BaseSponsorship;
   /** Persist the workflow association before an SDK write can become uncertain. */
   beforeSave?: (record: PurchaseRecord) => Promise<void>;
   /** Awaited after each durable purchase and backup write, before external effects. */
@@ -206,6 +219,7 @@ export class Annon {
   private readonly sellerKeys: Store<SellerKeyRecord>;
   private readonly sells: Store<SellRecord>;
   private readonly recoveries: Store<RecoveryRecord>;
+  private readonly selfUnlockWallets = new Map<string, NearWallet>();
   private readonly unlocked = new Map<string, unknown>();
   constructor(private readonly o: AnnonOptions) {
     account(o.contractId);
@@ -322,6 +336,8 @@ export class Annon {
     return f;
   }
   async sell<T extends SellData>(o: SellOptions<T>) {
+    if ((o.data instanceof Uint8Array ? o.data.length : o.data.size) > MAX_PLAINTEXT_BYTES)
+      throw new DownloadError('too_large');
     if (o.storageBudget !== undefined && (o.storageBudget <= 0n || o.storageBudget >= 2n ** 128n))
       throw new TypeError('invalid storage budget');
     if (o.storageBudget !== undefined && o.seller.identity.kind !== 'near')
@@ -439,6 +455,8 @@ export class Annon {
     seller: IdentityWallet;
     publish: SellOptions<T>['publish'];
   }) {
+    if ((o.data instanceof Uint8Array ? o.data.length : o.data.size) > MAX_PLAINTEXT_BYTES)
+      throw new DownloadError('too_large');
     const job = await this.sells.load(`annon/sell/${o.fileId}`);
     if (!job) throw new Error('no saved sell job');
     if (job.published) {
@@ -711,6 +729,40 @@ export class Annon {
     if (route === 'near-usdc' && oneclick && o.origin) validateOrigin(o.origin);
     const price = route === 'base-usdc' && f.terms.base ? f.terms.base.price : f.terms.near.price;
     if (BigInt(price) > o.maxPrice) throw new PayError('price_above_max');
+    let ensureBase = async () => {};
+    if (route === 'base-usdc') {
+      if (o.baseUnlock !== undefined && !['relayer', 'self'].includes(o.baseUnlock))
+        throw new TypeError('invalid Base unlock transport');
+      if (o.baseUnlock === 'self') {
+        asNear(o.recovery);
+        ensureBase = async () => checkBaseSplit(f, this.o.baseRpc);
+      } else {
+        if (!this.o.relayer)
+          throw Object.assign(new Error('Configure a relayer before paying.'), {
+            code: 'transport_required',
+          });
+        const config = await getConfig(this.o.nearRpc, this.o.contractId);
+        const options = {
+          deployment: {
+            network: this.o.network,
+            contractId: this.o.contractId,
+            nearUsdc: config.nearUsdc,
+            baseUsdc: config.usdc,
+          },
+          file: f,
+          baseRpc: this.o.baseRpc,
+          relayer: this.o.relayer,
+          ...(this.o.fetch ? { fetch: this.o.fetch } : {}),
+          now: () => this.now(),
+        };
+        let checked = o.baseSponsorship;
+        ensureBase = async () => {
+          if (!validBaseSponsorship(checked, options))
+            checked = await checkBaseSponsorship(options);
+        };
+      }
+    }
+    await ensureBase();
     if (route === 'near-usdc') {
       const budget = await fileStorageBalance(this.o.nearRpc, this.o.contractId, o.fileId);
       if (budget.available < budget.admissionRequirement) throw new PayError('file_storage_low');
@@ -770,6 +822,7 @@ export class Annon {
         maxPrice: o.maxPrice,
         ...(o.moderators ? { moderators: o.moderators } : {}),
       });
+      await ensureBase();
       const result = await authorize(q, {
         purchase: p,
         buyerSecret: key.secret,
@@ -784,6 +837,7 @@ export class Annon {
       if (!(await store.compareAndSet(purchaseKey(id), result.purchase, proved)))
         throw new PayError('store_conflict');
       await o.beforePayment?.(proved);
+      if (o.baseUnlock === 'self') this.selfUnlockWallets.set(id, asNear(o.recovery));
       if (o.submitBase) await o.submitBase(result.header);
       return { route, record: proved, payment: result.header };
     }
@@ -886,7 +940,11 @@ export class Annon {
     return next;
   }
   /** Resume a paid Base purchase before any host download, which requires a final grant. */
-  async accept(record: PurchaseRecord | undefined, id = record?.id): Promise<boolean> {
+  async accept(
+    record: PurchaseRecord | undefined,
+    id = record?.id,
+    options: { unlockWallet?: NearWallet } = {},
+  ): Promise<boolean> {
     if (!id) throw new TypeError('missing purchase id');
     if (await getPurchase(this.o.nearRpc, this.o.contractId, id)) return true;
     if (record?.purchase.route !== 'base-usdc') return false;
@@ -897,7 +955,11 @@ export class Annon {
       store: this.store,
     });
     if (next.step === 'unlock') {
-      const answer = await this.call('unlock', { args: next.args });
+      const answer = await this.call(
+        'unlock',
+        { args: next.args },
+        options.unlockWallet ?? this.selfUnlockWallets.get(id),
+      );
       this.unlocked.set(id, answer);
       // Bound answers retained by status-only callers; evicted entries use claim_key.
       if (this.unlocked.size > 64) {
@@ -930,6 +992,8 @@ export class Annon {
     record?: PurchaseRecord;
     recovery?: RecoveryRecord;
   }): Promise<{ meta: FileMeta; data?: Uint8Array }> {
+    if ((o.file instanceof Uint8Array ? o.file.length : o.file.size) > MAX_PAY2_BYTES)
+      throw new DownloadError('too_large');
     if (!o.record && !o.recovery)
       throw new TypeError('a saved purchase or recovery grant is required');
     const r = o.recovery;
@@ -994,13 +1058,17 @@ export class Annon {
       );
     if (prepared) {
       if (!o.sink) throw new TypeError('a plaintext sink is required');
-      return { meta: await prepared.writeTo(o.sink, async () => ckd) };
+      const meta = await prepared.writeTo(o.sink, async () => ckd);
+      if (meta.size > MAX_PLAINTEXT_BYTES) throw new DownloadError('too_large');
+      return { meta };
     }
-    return openPay2(o.file as Uint8Array, {
+    const opened = await openPay2(o.file as Uint8Array, {
       contractId: this.o.contractId,
       listing: listing(fileId, f),
       ckdSecret: async () => ckd,
     });
+    if (opened.meta.size > MAX_PLAINTEXT_BYTES) throw new DownloadError('too_large');
+    return opened;
   }
   async recover(o: {
     wallet: IdentityWallet;

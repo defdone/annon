@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { terms as initial, must } from '../../test/fixtures.js';
 import { sealWithKey } from '../envelope/pay2.js';
 import { blobSource } from '../envelope/replay.js';
-import { fileAppId, hashPoint } from '../keys/near-ckd.js';
+import { fileAppId, hashPoint, keyFromSecret } from '../keys/near-ckd.js';
+import * as rpcModule from '../near/rpc.js';
 import { getFile } from '../near/rpc.js';
 import {
   type EncryptedRecord,
@@ -23,6 +24,7 @@ import type { typedData } from '../pay/eip3009.js';
 import { purchaseKey } from '../pay/purchase.js';
 import * as recoverySteps from '../pay/recover.js';
 import { paymentRequired } from '../pay/seller.js';
+import * as splitModule from '../pay/split.js';
 import { createSplit, type Split } from '../pay/split.js';
 import { memoryStore } from '../pay/store.js';
 import { bytes, hex } from '../settle-near/codec.js';
@@ -49,6 +51,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 function harness(seller: Identity = wallet.identity) {
+  vi.spyOn(splitModule, 'readSplitState').mockResolvedValue({
+    kind: 'push',
+    shares: [],
+    distributorPercent: 0,
+  });
   const raw = memoryStore<EncryptedRecord>();
   const backupSecret = newBackupSecret();
   const backups = new Map<string, string>();
@@ -116,6 +123,31 @@ function harness(seller: Identity = wallet.identity) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (_url, init) => {
+      if (String(_url).endsWith('/v1/capabilities'))
+        return Response.json({
+          network: terms.network,
+          contract: terms.contract,
+          nearUsdc: terms.near.token,
+          baseUsdc: terms.base?.usdc,
+          methods: ['unlock'],
+          disabled: false,
+          baseSponsorship: true,
+          acceptingNewBasePayments: true,
+        });
+      if (String(_url).endsWith('/v1/base-eligibility'))
+        return Response.json({
+          network: terms.network,
+          contract: terms.contract,
+          fileId: terms.file_id,
+          termsHash: termsHash(terms),
+          eligible: true,
+          tier: 'legacy',
+          policyVersion: '1',
+          minPrice: '1',
+          fee: { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
+          decidedAt: 1,
+          checkedAt: now,
+        });
       const q = JSON.parse(String(init?.body));
       if (q.method !== 'query') {
         const result =
@@ -200,6 +232,7 @@ function harness(seller: Identity = wallet.identity) {
     }),
   );
   const config = {
+    relayer: 'https://relay.test',
     nearRpc: 'https://near.rpc',
     baseRpc: 'https://base.rpc',
     contractId: terms.contract,
@@ -2341,7 +2374,7 @@ it('marks signed Base payloads uncertain before dryRun and accepts a payment tha
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url, init) => {
-      const request = JSON.parse(String(init?.body));
+      const request = JSON.parse(String(init?.body ?? '{}'));
       if (request.method === 'eth_call' && request.params[0]?.from) {
         const saved = must(await storage.load('synthetic-checkout'));
         expect(saved.purchase?.attempts[0]?.payload).toBeTruthy();
@@ -2615,4 +2648,235 @@ it('browser controller downloads a granted file and verifies final terms and CKD
   expect((await storage.load('synthetic-granted-file'))?.recovery?.grant).toBe(1);
   expect((await controller.open({ fetch })).data).toEqual(body);
   expect(payer.transferPurchase).toHaveBeenCalledTimes(1);
+});
+
+it('refuses a Base purchase without sponsorship transport before any signature or checkpoint', async () => {
+  const h = harness();
+  await h.sdk.sell({
+    data: body,
+    name: 'x',
+    mime: '',
+    seller: wallet,
+    near: {
+      price: '200000',
+      recipients: [{ identity: wallet.identity, bps: 10000 }],
+      remainder: wallet.identity,
+    },
+    publish: h.publish,
+  });
+  const f = must(await getFile(h.config.nearRpc, h.config.contractId, h.terms.file_id));
+  f.terms.base = must(initial.base);
+  f.termsHash = termsHash(f.terms);
+  vi.spyOn(rpcModule, 'getFile').mockResolvedValue(f);
+  h.config.relayer = '';
+  const authorize = vi.fn();
+  const beforePayment = vi.fn();
+  const payer = { ...wallet, authorize, signTypedData: vi.fn() };
+  await expect(
+    h.sdk.buy({
+      fileId: h.terms.file_id,
+      header: h.header,
+      recovery: { ...wallet, authorize },
+      refund: wallet.identity,
+      payer,
+      route: 'base-usdc',
+      maxPrice: 200000n,
+      beforePayment,
+    }),
+  ).rejects.toMatchObject({ code: 'transport_required' });
+  expect(authorize).not.toHaveBeenCalled();
+  expect(beforePayment).not.toHaveBeenCalled();
+});
+
+it('rechecks sponsorship that ages during recovery proof before the Base payment signature', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+  const h = await round2Listing();
+  let clock = now;
+  const transport = globalThis.fetch;
+  const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+    if (String(url).endsWith('/v1/capabilities') && clock > now)
+      return Response.json({
+        network: h.terms.network,
+        contract: h.terms.contract,
+        nearUsdc: h.terms.near.token,
+        baseUsdc: must(h.terms.base).usdc,
+        disabled: false,
+        baseSponsorship: true,
+        acceptingNewBasePayments: false,
+        methods: ['unlock'],
+      });
+    return transport(url, init);
+  });
+  const sdk = new Annon({ ...h.config, fetch: fetcher, now: () => clock });
+  const recovery = {
+    ...wallet,
+    authorize: async (text: string) => {
+      clock += 31;
+      return wallet.authorize(text);
+    },
+  };
+  const signTypedData = vi.fn();
+  const payer = { ...wallet, signTypedData };
+  const required = paymentRequired(
+    {
+      nearRpc: h.config.nearRpc,
+      contractId: h.config.contractId,
+      fileId: h.terms.file_id,
+      url: 'https://files.example/f',
+      header: 'https://files.example/header',
+    },
+    must(await getFile(h.config.nearRpc, h.config.contractId, h.terms.file_id)),
+    must(h.terms.base).usdc,
+  );
+  await expect(
+    sdk.buy({
+      fileId: h.terms.file_id,
+      header: h.header,
+      recovery,
+      refund: wallet.identity,
+      payer,
+      route: 'base-usdc',
+      maxPrice: 200000n,
+      paymentRequired: required,
+      url: 'https://files.example/f',
+    }),
+  ).rejects.toMatchObject({ code: 'relayer_unavailable' });
+  expect(signTypedData).not.toHaveBeenCalled();
+});
+
+it('allows explicit self-funded Base unlock only with a NEAR transaction wallet and still checks the split', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+  const h = await round2Listing();
+  h.config.relayer = '';
+  const call = vi.fn(async () => null);
+  const recovery = {
+    identity: { kind: 'near' as const, id: 'buyer.near' },
+    authorize: vi.fn(),
+    proveControl: vi.fn(),
+    transferPurchase: vi.fn(),
+    call,
+  };
+  const payer = {
+    ...wallet,
+    signTypedData: async (data: ReturnType<typeof typedData>) =>
+      account.signTypedData(data as never),
+  };
+  const required = paymentRequired(
+    {
+      nearRpc: h.config.nearRpc,
+      contractId: h.config.contractId,
+      fileId: h.terms.file_id,
+      url: 'https://files.example/f',
+      header: 'https://files.example/header',
+    },
+    must(await getFile(h.config.nearRpc, h.config.contractId, h.terms.file_id)),
+    must(h.terms.base).usdc,
+  );
+  const input = {
+    fileId: h.terms.file_id,
+    header: h.header,
+    recovery,
+    refund: wallet.identity,
+    payer,
+    route: 'base-usdc' as const,
+    baseUnlock: 'self' as const,
+    maxPrice: 200000n,
+    paymentRequired: required,
+    url: 'https://files.example/f',
+  };
+  const bought = await h.sdk.buy(input);
+  expect(splitModule.readSplitState).toHaveBeenCalled();
+  vi.spyOn(recoverySteps, 'nextStep').mockResolvedValue({ step: 'unlock', args: {} } as never);
+  await h.sdk.accept(bought.record);
+  expect(h.send).toHaveBeenCalledWith('unlock', { args: {} }, recovery);
+  h.send.mockClear();
+  const fresh = new Annon(h.config);
+  await fresh.accept(bought.record, bought.record.id, { unlockWallet: recovery });
+  expect(h.send).toHaveBeenCalledWith('unlock', { args: {} }, recovery);
+  const sign = vi.fn();
+  await expect(h.sdk.buy({ ...input, recovery: { ...wallet, authorize: sign } })).rejects.toThrow(
+    /NEAR transaction wallet/,
+  );
+  expect(sign).not.toHaveBeenCalled();
+});
+
+it.each(['buffered', 'streamed'] as const)(
+  'refuses oversized decrypted metadata from %s opening',
+  async (mode) => {
+    const h = await round2Listing();
+    const id = `0x${'88'.repeat(32)}`;
+    const secret = new Uint8Array(32).fill(8);
+    const key = keyFromSecret(secret);
+    h.purchases.set(id, {
+      purchase_id: id,
+      file_id: h.terms.file_id,
+      terms_hash: termsHash(h.terms),
+      recovery: wallet.identity,
+      buyer_key: hex(key.publicKeyBytes),
+      grants: 1,
+    });
+    h.grants.set(`${id}:0`, hex(key.publicKeyBytes));
+    const recovery = {
+      kind: 'recovery' as const,
+      id: `recovery:${id}`,
+      revision: 0,
+      purchase_id: id,
+      file_id: h.terms.file_id,
+      recovery: wallet.identity,
+      buyerSecret: hex(secret),
+      fresh_key: hex(key.publicKeyBytes),
+      nonce: `0x${'99'.repeat(32)}`,
+      deadline: now + 600,
+      grant: 0,
+    };
+    const meta = { name: 'f', mime: '', size: 50000001, previewLen: 0 };
+    const pay2 = await import('../envelope/pay2.js');
+    const replay = await import('../envelope/replay.js');
+    vi.spyOn(pay2, 'open').mockResolvedValue({ meta, data: new Uint8Array() });
+    vi.spyOn(replay, 'prepareOpen').mockResolvedValue({
+      header: h.header,
+      writeTo: async () => meta,
+    } as never);
+    await expect(
+      mode === 'buffered'
+        ? h.sdk.open({ file: h.file, recovery })
+        : h.sdk.openTo({
+            file: blobSource(new Blob([new Uint8Array(h.file)])),
+            sink: new WritableStream(),
+            recovery,
+          }),
+    ).rejects.toMatchObject({ code: 'too_large' });
+  },
+);
+
+it('refuses closed Base admission before recovery signatures too', async () => {
+  const h = await round2Listing();
+  const sign = vi.fn();
+  const payer = { ...wallet, authorize: sign, signTypedData: sign };
+  const sdk = new Annon({
+    ...h.config,
+    fetch: async () =>
+      Response.json({
+        network: h.terms.network,
+        contract: h.terms.contract,
+        nearUsdc: h.terms.near.token,
+        baseUsdc: must(h.terms.base).usdc,
+        disabled: false,
+        baseSponsorship: true,
+        acceptingNewBasePayments: false,
+        methods: ['unlock'],
+      }),
+  });
+  await expect(
+    sdk.buy({
+      fileId: h.terms.file_id,
+      header: h.header,
+      recovery: { ...wallet, authorize: sign },
+      refund: wallet.identity,
+      payer,
+      route: 'base-usdc',
+      maxPrice: 200000n,
+    }),
+  ).rejects.toMatchObject({ code: 'relayer_unavailable' });
+  expect(sign).not.toHaveBeenCalled();
 });

@@ -1,5 +1,6 @@
 /** Download a final purchase grant with Range retries and checked chunks. */
 import { type Bytes, copy, equal, parseHeader, sha256, TAG } from '../envelope/pay2.js';
+import { HTTP_RETRY_MAX_WAIT_SECONDS, MAX_PAY2_BYTES } from '../limits.js';
 import { BUYER_PROOF_HEADER, purchaseProof, sameResource } from './proof.js';
 export type DownloadErrorCode =
   /** The host answered something this protocol does not allow. */
@@ -13,10 +14,17 @@ export type DownloadErrorCode =
   /** The caller cancelled the download. */
   | 'cancelled'
   /** In-memory browser opening is limited; use the CLI for larger files. */
-  | 'too_large';
+  | 'too_large'
+  | 'download_limited'
+  | 'download_in_progress'
+  | 'rate_limited'
+  | 'unavailable';
 
 export class DownloadError extends Error {
   readonly code: DownloadErrorCode;
+  retryAfterSeconds?: number;
+  purchaseId?: string;
+  fileId?: string;
   constructor(code: DownloadErrorCode, message: string = code) {
     super(message);
     this.code = code;
@@ -87,10 +95,9 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
         ? h.previewLen + TAG
         : 2 ** h.chunkLog2 + TAG,
   );
-  const limit = o.maxBytes ?? Number.POSITIVE_INFINITY;
+  const limit = Math.min(o.maxBytes ?? MAX_PAY2_BYTES, MAX_PAY2_BYTES);
   const sizeCheck = (size: number) => {
-    if (size > limit)
-      fail('too_large', 'File exceeds the browser size limit. Use the CLI for larger files.');
+    if (size > limit) fail('too_large', 'File exceeds the 50 MB size limit.');
   };
   sizeCheck(header.length + lengths.reduce((sum, n) => sum + n, 0) + TAG);
   const maxLast = 2 ** h.chunkLog2 + TAG;
@@ -133,6 +140,7 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
       if (timer !== undefined) clearTimeout(timer);
     }
   }
+  let waitedMs = 0;
   let chunk = 0; // next chunk to check
   let offset = header.length; // its first byte in the file
   let sentHeader = false;
@@ -186,13 +194,73 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
         live();
       }
       if (body(r)) return r;
-      const pending = r.status === 503 || r.status === 402;
-      await r.body?.cancel().catch(() => {});
+      const pending = r.status === 503 || r.status === 402 || r.status === 429;
+      let code: DownloadErrorCode =
+        r.status === 429 ? 'rate_limited' : r.status === 503 ? 'unavailable' : 'settling';
+      let seconds: number | undefined;
+      if (r.status === 429) {
+        // Read only a bounded control response, never an unbounded error document.
+        const reader = r.body?.getReader();
+        try {
+          const parts: Uint8Array[] = [];
+          let size = 0;
+          if (reader)
+            for (;;) {
+              const part = await untilAbort(reader.read());
+              if (part.done) break;
+              size += part.value.length;
+              if (size > 8192) break;
+              parts.push(part.value);
+            }
+          if (size <= 8192) {
+            const all = new Uint8Array(size);
+            let at = 0;
+            for (const part of parts) {
+              all.set(part, at);
+              at += part.length;
+            }
+            const value = JSON.parse(new TextDecoder().decode(all)) as Record<string, unknown>;
+            if (value.error === 'download_limited' || value.error === 'download_in_progress')
+              code = value.error;
+            if (
+              typeof value.retryAfterSeconds === 'number' &&
+              Number.isFinite(value.retryAfterSeconds) &&
+              value.retryAfterSeconds >= 0 &&
+              Number.isSafeInteger(Math.ceil(value.retryAfterSeconds))
+            )
+              seconds = Math.ceil(value.retryAfterSeconds);
+          }
+        } catch {
+          /* Unknown control responses still follow the bounded overload policy. */
+        } finally {
+          await reader?.cancel().catch(() => {});
+        }
+      } else await r.body?.cancel().catch(() => {});
       if (!pending) return fail('not_authorized', `the host answered ${r.status}`);
-      if (i + 1 >= (o.settleTries ?? 40))
-        return fail('settling', 'the purchase grant is not available yet');
-      const after = Number(r.headers.get('Retry-After'));
-      await wait(Number.isFinite(after) && after > 0 ? Math.min(after, 30) * 1000 : 3000);
+      const hint = r.headers.get('Retry-After');
+      const after =
+        hint && /^\d+$/.test(hint)
+          ? Number(hint)
+          : hint
+            ? Math.ceil((Date.parse(hint) - (o.now?.() ?? Date.now() / 1000) * 1000) / 1000)
+            : NaN;
+      if (Number.isSafeInteger(after) && after >= 0) seconds = Math.max(seconds ?? 0, after);
+      const delayed = () =>
+        Object.assign(new DownloadError(code), {
+          fileId: o.fileId,
+          purchaseId: o.proof.purchase_id,
+          ...(seconds === undefined ? {} : { retryAfterSeconds: seconds }),
+        });
+      if (code === 'download_limited') throw delayed();
+      const delay = Math.max(1, seconds ?? (r.status === 402 ? 3 : 5)) * 1000;
+      if (
+        i + 1 >= (o.settleTries ?? 40) ||
+        delay > HTTP_RETRY_MAX_WAIT_SECONDS * 1000 - waitedMs ||
+        delay > HTTP_RETRY_MAX_WAIT_SECONDS * 1000
+      )
+        throw delayed();
+      waitedMs += delay;
+      await wait(delay);
     }
   }
 
