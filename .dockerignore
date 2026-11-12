@@ -1,4 +1,4 @@
-# Only what the relayer image needs leaves this machine; internal/, .env* and the rest never do.
+# Only what the relayer and demo host images need leaves this machine; internal/, .env* and the rest never do.
 *
 !package.json
 !pnpm-lock.yaml
@@ -9,4 +9,7 @@
 !apps/relayer/package.json
 !apps/relayer/server.ts
 !apps/relayer/ts-hook.mjs
+!apps/demo-host/package.json
+!apps/demo-host/server.ts
+!apps/demo-host/ts-hook.mjs
 **/*.test.ts
