@@ -82,3 +82,39 @@ Gas reservations use twice the attached gas times the configured price ceiling, 
 Refund automation accepts a pluggable `RefundSource.leaves({nearRpc,contractId,limit})` returning current `MaterializeRefundArgs` (leaf/index/32-sibling proof). It calls the SDK `materializeRefund` binding with deposit zero to spend prepaid storage. No indexer/archive integration is bundled. The operator must provide complete durable leaf history and refresh proofs before the last-32-root window expires. Without a source, keep services open deliveries only. A permanently paused/locked dependency or an uncertain InFlight callback cannot be repaired by retries. For an unknown transaction the keeper checks its signed nonce against the keeper access key at a finalized block, and its reference block height against that finalized height and the protocol transaction validity period plus a two-block margin. Age-based retirement requires `final.height - ref.height > transaction_validity_period + 2`. A consumed nonce or expired block hash makes the transaction unable to land: finalized delivery state is re-read, the hash is cleared by CAS, backoff is saved and unresolved capacity is released. Otherwise only the same durable bytes may be resent, while no affected step is InFlight. Unavailable or malformed validity evidence leaves the transaction tracked. Older records without a retained reference height need an RPC that can still serve that block, unless the finalized key nonce already proves the transaction cannot land. The validity period is measured in blocks, as described by [nearcore](https://near.github.io/nearcore/architecture/how/tx_routing.html). Do not share one signing key across independent processes; use independent funded keeper accounts and RPC infrastructure.
 
 The browser build fails if a post-build scan of emitted JavaScript detects `eval`, `Function` construction/calls or string-argument timers. CSP compatibility is also checked statically against the actual built minified bundle and the HTTP page/CSP header: no dynamic `eval`/`Function` calls, string timers, inline scripts or HTML event handlers are allowed. The browser build removes legacy dynamic-code fallbacks from the pinned Wallet Selector and js-sha256 copies, with guards that require review when their source changes. VM tests disable string/Wasm code generation and exercise fake wallet flows. **Real-browser execution was not tested.** Tests never launch browsers or GUI applications and always stub the login opener; no real wallet, RPC, transaction or Keychain is used.
+
+## Browser purchases
+
+Import the headless purchase controller from `@defdone/annon/browser`. A seller supplies its own screen, verified offer and wallet adapters. There is no hosted checkout. `dist/browser/purchase-bundle.js` is a standalone browser ESM bundle, built with the same CSP checks as the CLI approval bridge.
+
+```ts
+import {
+  browserAnnon,
+  browserPurchaseStorage,
+  BrowserPurchaseController,
+} from '@defdone/annon/browser';
+
+const storage = await browserPurchaseStorage();
+const sdk = browserAnnon(storage, trustedSdkOptions);
+const controller = await BrowserPurchaseController.create({ storage, sdk }, {
+  id: stableCheckoutId,
+  fileId,
+  header: checkedHeader,
+  resourceUrl,
+  route: 'oneclick',
+  maxPrice: approvedUsdcCap,
+});
+controller.subscribe(renderProgress);
+await controller.start({ recovery: recoveryWallet, refund: refundIdentity, origin });
+const instructions = await controller.instructions();
+```
+
+Use a stable, caller-owned checkout ID for each terms review. Creation refuses an existing ID. After a reload, construct `new BrowserPurchaseController({ storage, sdk, id })` and call `resume()`. Never call `buy()` or create another checkout to resume an uncertain payment. `storage.list()` supplies the purchases list. A renewable two-minute lease protects active preparations across tabs. After an expired lease, an unsigned preparation that never reached the payment boundary becomes `abandoned`; the UI may explicitly create a fresh checkout ID. Signed Base payloads and purchases that crossed the payment boundary remain resumable and must never be replaced. Base starts require `submitBase`; signed payloads become uncertain before the SDK dry run. `snapshot()` and progress events contain public metadata; persistence records contain private recovery material. `instructions()` releases only a saved, proved 1Click quote with the required time margin.
+
+Use `OneClick.tokens()` and `originFromToken(tokens, assetId, blockchain, refundTo)` for exact source selection. Supported sources are the explicitly listed EVM chains, Solana and NEAR. Catalog selection refuses unsupported families and slow chains. Legacy caller-specified origins in the other family retain the existing nonempty, whitespace-free refund validation. NEAR catalog selections explicitly request `ORIGIN_CHAIN` refunds. Legacy direct `quote()` callers keep their existing NEAR `INTENTS` default. A 1Click source refund and an Annon rejection refund are different obligations. The latter remains in NEAR Intents.
+
+`OneClick.preview()` returns amounts and timing without a deposit address. `poll()` awaits progress callbacks, saves memo-aware checkpoints and retries transport errors and rate limits with backoff. The controller persists checkpoints automatically. Polling remains available after expiry to track late deposits and refunds; expiry never extends the purchase or permits a new deposit. `SUCCESS` still requires contract acceptance.
+
+Each workflow is stored in its own encrypted IndexedDB record, with a small metadata index committed atomically alongside it. Index contention retries without weakening purchase revision checks. Latest purchase and recovery snapshots are retained alongside every recovery revision archive created before an expired key is replaced. Portable receipts carry those archives too. The local random backup secret is persisted in IndexedDB for reload recovery. It protects encrypted storage from accidental disclosure, and shares the embedding page's trust boundary. Export with `controller.exportReceipt(portableSecret)` using a separate random 32-byte `newBackupSecret()`, and retain that secret separately. Import with `storage.importReceipt(file, portableSecret)`. Import restores the header, resource URL and recovery records and requires a fresh recovery proof before releasing deposit instructions. IndexedDB failures and stale writes reject before payment effects.
+
+For accepted purchases, `recover(wallet)` resumes recovery and `open(file)` delegates a caller-supplied PAY2 file to the existing SDK. `file_ready` records successful opening; plaintext is never persisted. Browser downloads, file size limits, saving and wallet connectors are separate integrations.

@@ -87,3 +87,9 @@ describe('user-held encrypted purchase backup', () => {
     await expect(encryptedPurchaseStore(raw, newBackupSecret()).load(record.id)).rejects.toThrow();
   });
 });
+
+it('rejects a non-boolean recovery proof checkpoint in a portable purchase', async () => {
+  await expect(
+    exportPurchase({ ...record, recoveryProved: 'true' } as never, newBackupSecret()),
+  ).rejects.toThrow(/proof/);
+});

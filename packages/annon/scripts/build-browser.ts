@@ -118,10 +118,16 @@ export const browserBuildOptions: BuildOptions = {
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const outfile = 'dist/browser/login-bundle.js';
+  await emit('dist/browser/login-bundle.js', {});
+  await emit('dist/browser/purchase-bundle.js', {
+    entryPoints: ['src/browser/index.ts'],
+    format: 'esm',
+  });
+}
+async function emit(outfile: string, options: BuildOptions) {
   // Never leave a stale or rejected bundle behind: write only after the emitted-code scan passed.
   await rm(outfile, { force: true });
-  const result = await build({ ...browserBuildOptions, outfile, write: false });
+  const result = await build({ ...browserBuildOptions, ...options, outfile, write: false });
   await mkdir(dirname(outfile), { recursive: true });
   for (const f of result.outputFiles) await writeFile(f.path, f.contents);
 }

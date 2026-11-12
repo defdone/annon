@@ -294,3 +294,58 @@ describe('fileStore', () => {
     expect(await s.compareAndSet('k', { id: 'a', revision: 0 }, rec('a', 1))).toBe(true);
   });
 });
+
+it('rejects synchronous IndexedDB quota failures instead of leaving a pending durable write', async () => {
+  const factory = new IDBFactory();
+  const open = factory.open.bind(factory);
+  factory.open = ((...args: Parameters<IDBFactory['open']>) => {
+    const request = open(...args);
+    request.addEventListener('success', () => {
+      const db = request.result;
+      const transaction = db.transaction.bind(db);
+      db.transaction = ((...txArgs: Parameters<IDBDatabase['transaction']>) => {
+        const tx = transaction(...txArgs);
+        const objectStore = tx.objectStore.bind(tx);
+        tx.objectStore = (name) => {
+          const store = objectStore(name);
+          store.put = () => {
+            throw new DOMException('synthetic quota failure', 'QuotaExceededError');
+          };
+          return store;
+        };
+        return tx;
+      }) as typeof db.transaction;
+    });
+    return request;
+  }) as typeof factory.open;
+  const store = indexedDbStore<Rec>({ factory, name: 'quota' });
+  await expect(store.compareAndSet('synthetic', null, rec('synthetic', 0))).rejects.toThrow(
+    'quota',
+  );
+  expect(await store.load('synthetic')).toBeNull();
+});
+
+it('commits an IndexedDB CAS group atomically and refuses stale or duplicate keys', async () => {
+  const store = indexedDbStore<Rec>({ factory: new IDBFactory(), name: 'atomic-group' });
+  await store.compareAndSet('a', null, rec('a', 0));
+  expect(
+    await store.compareAndSetMany([
+      { key: 'a', expected: rec('a', 0), next: rec('a', 1) },
+      { key: 'b', expected: null, next: rec('b', 0) },
+    ]),
+  ).toBe(true);
+  expect(
+    await store.compareAndSetMany([
+      { key: 'a', expected: rec('a', 0), next: rec('a', 1) },
+      { key: 'c', expected: null, next: rec('c', 0) },
+    ]),
+  ).toBe(false);
+  expect(await store.load('c')).toBeNull();
+  expect((await store.load('a'))?.revision).toBe(1);
+  await expect(
+    store.compareAndSetMany([
+      { key: 'a', expected: rec('a', 1), next: rec('a', 2) },
+      { key: 'a', expected: rec('a', 1), next: rec('a', 2) },
+    ]),
+  ).rejects.toThrow(/duplicate/);
+});

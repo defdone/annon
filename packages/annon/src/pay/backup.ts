@@ -1,9 +1,16 @@
 /** Portable purchase backups and encrypted CAS storage. The 32-byte secret is user-held randomness. */
 import { concat, copy } from '../envelope/pay2.js';
 import { keyFromSecret } from '../keys/near-ckd.js';
-import { bytes, exactKeys, hex, utf8 } from '../settle-near/codec.js';
+import { bytes, exactKeys, hex, uint, utf8 } from '../settle-near/codec.js';
 import { identityJson } from '../settle-near/identity.js';
 import { baseNonceV2, buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
+import {
+  type BrowserIndex,
+  type BrowserPurchaseIndex,
+  type BrowserRecoveryArchiveIndex,
+  purchaseStates,
+  type StoredBrowserPurchase,
+} from './browser-record.js';
 import type { PurchaseRecord } from './purchase.js';
 import { checkNext, type Store, type Versioned } from './store.js';
 
@@ -45,8 +52,188 @@ export interface SellerKeyRecord extends Versioned {
   buyerSecret: string | null;
   deadline: number;
 }
-type PrivateRecord = PurchaseRecord | RecoveryRecord | SellRecord | SellerKeyRecord;
+type PrivateRecord =
+  | PurchaseRecord
+  | RecoveryRecord
+  | SellRecord
+  | SellerKeyRecord
+  | BrowserIndex
+  | BrowserRecoveryArchiveIndex
+  | BrowserPurchaseIndex
+  | StoredBrowserPurchase;
 function validate(r: PrivateRecord) {
+  if ('kind' in r && r.kind === 'browser-recovery-archives') {
+    bytes(r.purchaseId, 32);
+    if (
+      r.id !== `recovery-archives:${r.purchaseId}` ||
+      !Number.isSafeInteger(r.revision) ||
+      r.revision < 0 ||
+      !Array.isArray(r.names) ||
+      new Set(r.names).size !== r.names.length ||
+      r.names.some(
+        (name) =>
+          typeof name !== 'string' ||
+          !name.startsWith(`recovery:${r.purchaseId}:revision:`) ||
+          !/^[0-9]+$/.test(name.slice(name.lastIndexOf(':') + 1)),
+      )
+    )
+      throw new TypeError('invalid recovery archive index');
+    return;
+  }
+  if ('kind' in r && r.kind === 'browser-purchase') {
+    validate({
+      kind: 'browser-index',
+      id: 'browser-index',
+      revision: 0,
+      entries: [r],
+      backups: {},
+    });
+    return;
+  }
+  if ('kind' in r && r.kind === 'browser-purchase-index') {
+    if (
+      r.id !== 'browser-index' ||
+      !Number.isSafeInteger(r.revision) ||
+      r.revision < 0 ||
+      !Array.isArray(r.entries) ||
+      new Set(r.entries.map((e) => e.id)).size !== r.entries.length
+    )
+      throw new TypeError('invalid browser purchase index');
+    for (const entry of r.entries) {
+      if (
+        !/^[a-zA-Z0-9_-]{1,128}$/.test(entry.id) ||
+        !Number.isSafeInteger(entry.revision) ||
+        entry.revision < 0 ||
+        !purchaseStates.includes(entry.state) ||
+        !['near-usdc', 'base-usdc', 'oneclick'].includes(entry.route) ||
+        !Number.isSafeInteger(entry.createdAt) ||
+        !Number.isSafeInteger(entry.updatedAt) ||
+        entry.createdAt < 0 ||
+        entry.updatedAt < entry.createdAt
+      )
+        throw new TypeError('invalid browser index entry');
+      bytes(entry.fileId, 32);
+      if (entry.purchaseId !== undefined) bytes(entry.purchaseId, 32);
+      const url = new URL(entry.resourceUrl);
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password)
+        throw new TypeError('invalid resource URL');
+      if (
+        Object.keys(entry).some(
+          (key) =>
+            ![
+              'id',
+              'revision',
+              'fileId',
+              'route',
+              'state',
+              'resourceUrl',
+              'purchaseId',
+              'createdAt',
+              'updatedAt',
+            ].includes(key),
+        )
+      )
+        throw new TypeError('index must contain metadata only');
+    }
+    if (utf8.encode(JSON.stringify(r)).length > MAX_BYTES)
+      throw new TypeError('browser index too large');
+    return;
+  }
+  if ('kind' in r && r.kind === 'browser-index') {
+    if (
+      r.id !== 'browser-index' ||
+      !Number.isSafeInteger(r.revision) ||
+      r.revision < 0 ||
+      !Array.isArray(r.entries) ||
+      !r.backups ||
+      typeof r.backups !== 'object' ||
+      Array.isArray(r.backups)
+    )
+      throw new TypeError('invalid browser index');
+    const ids = new Set<string>();
+    for (const entry of r.entries) {
+      if (
+        !/^[a-zA-Z0-9_-]{1,128}$/.test(entry.id) ||
+        ids.has(entry.id) ||
+        !Number.isSafeInteger(entry.revision) ||
+        entry.revision < 0 ||
+        !purchaseStates.includes(entry.state) ||
+        !['near-usdc', 'base-usdc', 'oneclick'].includes(entry.route) ||
+        typeof entry.header !== 'string' ||
+        !/^0x(?:[0-9a-f]{2}){1,65536}$/.test(entry.header) ||
+        (entry.needsProof !== undefined && typeof entry.needsProof !== 'boolean') ||
+        (entry.submission !== undefined &&
+          !['not_submitted', 'uncertain', 'submitted'].includes(entry.submission))
+      )
+        throw new TypeError('invalid browser purchase');
+      ids.add(entry.id);
+      if (entry.paymentStarted !== undefined && typeof entry.paymentStarted !== 'boolean')
+        throw new TypeError('invalid payment boundary');
+      if (
+        entry.lease &&
+        (!/^[a-zA-Z0-9_-]{1,128}$/.test(entry.lease.owner) ||
+          !Number.isSafeInteger(entry.lease.expiresAt) ||
+          entry.lease.expiresAt < 0)
+      )
+        throw new TypeError('invalid purchase lease');
+      if (entry.recoveryArchives !== undefined) {
+        if (
+          !Array.isArray(entry.recoveryArchives) ||
+          new Set(entry.recoveryArchives.map((r) => r.revision)).size !==
+            entry.recoveryArchives.length
+        )
+          throw new TypeError('invalid recovery archives');
+        for (const archive of entry.recoveryArchives) {
+          if (archive.kind !== 'recovery') throw new TypeError('invalid recovery archive');
+          validate(archive);
+          if (
+            !entry.purchase ||
+            archive.purchase_id !== entry.purchase.id ||
+            archive.file_id !== entry.fileId
+          )
+            throw new TypeError('recovery archive mismatch');
+        }
+      }
+      bytes(entry.fileId, 32);
+      if (uint(entry.maxPrice, 128) === 0n) throw new TypeError('invalid browser price');
+      const url = new URL(entry.resourceUrl);
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password)
+        throw new TypeError('invalid resource URL');
+      if (entry.purchase) {
+        validatePurchaseRecord(entry.purchase);
+        if (
+          entry.purchase.purchase.file_id !== entry.fileId ||
+          entry.purchase.purchase.route !==
+            (entry.route === 'base-usdc' ? 'base-usdc' : 'near-usdc')
+        )
+          throw new TypeError('browser purchase mismatch');
+      }
+      if (entry.recovery) {
+        validate(entry.recovery);
+        if (
+          !entry.purchase ||
+          entry.recovery.purchase_id !== entry.purchase.id ||
+          entry.recovery.file_id !== entry.fileId
+        )
+          throw new TypeError('browser recovery mismatch');
+      }
+      if (
+        entry.checkpoint &&
+        (!entry.purchase ||
+          !Number.isSafeInteger(entry.checkpoint.attempts) ||
+          entry.checkpoint.attempts < 0 ||
+          !Number.isSafeInteger(entry.checkpoint.errors) ||
+          entry.checkpoint.errors < 0)
+      )
+        throw new TypeError('invalid browser checkpoint');
+    }
+    if (
+      Object.values(r.backups).some((b) => typeof b !== 'string') ||
+      utf8.encode(JSON.stringify(r)).length > MAX_BYTES
+    )
+      throw new TypeError('browser index too large');
+    return;
+  }
   if ('kind' in r && r.kind === 'seller-key') {
     if (
       r.id !== `seller-key:${r.file_id}` ||
@@ -134,6 +321,8 @@ async function derive(secret: Uint8Array, salt: Uint8Array) {
   );
 }
 export function validatePurchaseRecord(r: PurchaseRecord): void {
+  if (r.recoveryProved !== undefined && typeof r.recoveryProved !== 'boolean')
+    throw new TypeError('invalid recovery proof checkpoint');
   if (
     r?.schemaVersion !== 2 ||
     !Number.isSafeInteger(r.revision) ||
@@ -302,3 +491,39 @@ export const encryptedSellerKeyStore = (
   raw: Store<EncryptedRecord>,
   secret: Uint8Array,
 ): Store<SellerKeyRecord> => encryptedStore<SellerKeyRecord>(raw, secret);
+
+/** Browser workflow records use the same authenticated encryption and CAS binding as purchases. */
+export const exportBrowserIndex = (record: BrowserIndex, secret: Uint8Array) =>
+  encrypt(record, secret);
+export async function importBrowserIndex(file: string, secret: Uint8Array): Promise<BrowserIndex> {
+  const record = await decrypt(file, secret);
+  if (!('kind' in record) || record.kind !== 'browser-index')
+    throw new TypeError('not a browser receipt');
+  return record;
+}
+
+export const encryptedBrowserIndexStore = (
+  raw: Store<EncryptedRecord>,
+  secret: Uint8Array,
+): Store<BrowserPurchaseIndex> => encryptedStore<BrowserPurchaseIndex>(raw, secret);
+export const encryptedBrowserPurchaseStore = (
+  raw: Store<EncryptedRecord>,
+  secret: Uint8Array,
+): Store<StoredBrowserPurchase> => encryptedStore<StoredBrowserPurchase>(raw, secret);
+/** Prepare ciphertext outside an IndexedDB transaction; bind it to the same CAS context. */
+export async function sealBrowserRecord(
+  name: string,
+  record: BrowserPurchaseIndex | StoredBrowserPurchase | BrowserRecoveryArchiveIndex,
+  secret: Uint8Array,
+): Promise<EncryptedRecord> {
+  return {
+    id: record.id,
+    revision: record.revision,
+    backup: await encrypt(record, secret, JSON.stringify([name, record.id, record.revision])),
+  };
+}
+
+export const encryptedRecoveryArchiveIndexStore = (
+  raw: Store<EncryptedRecord>,
+  secret: Uint8Array,
+): Store<BrowserRecoveryArchiveIndex> => encryptedStore<BrowserRecoveryArchiveIndex>(raw, secret);

@@ -35,6 +35,7 @@ import {
   type OneClickQuote,
   OneClickQuoteExpired,
   type Origin,
+  validateOrigin,
 } from '../oneclick/oneclick.js';
 import {
   type EncryptedRecord,
@@ -132,7 +133,16 @@ export interface SellOptions<T extends SellData = Uint8Array> {
     terms: Terms;
   }) => Promise<void>;
 }
+export type BuyRoute = 'near-usdc' | 'base-usdc' | 'oneclick';
 export interface BuyOptions {
+  /** Explicit selection never falls back to another payment route. */
+  route?: BuyRoute;
+  /** Persist the workflow association before an SDK write can become uncertain. */
+  beforeSave?: (record: PurchaseRecord) => Promise<void>;
+  /** Awaited after each durable purchase and backup write, before external effects. */
+  onSaved?: (record: PurchaseRecord) => Promise<void>;
+  /** Last durable UI checkpoint before payment submission or releasing deposit instructions. */
+  beforePayment?: (record: PurchaseRecord) => Promise<void>;
   fileId: string;
   header: Uint8Array;
   recovery: IdentityWallet;
@@ -662,8 +672,34 @@ export class Annon {
       throw new PayError('unknown_moderator');
     const checked = await inspectHeader(o.header, listing(o.fileId, f), this.o.contractId);
     if (!checked.usable) throw new PayError('file_invalid');
-    let route: Purchase['route'] = 'near-usdc';
-    if (o.payer?.identity.kind === 'evm' && f.terms.base && 'signTypedData' in o.payer) {
+    if (o.route !== undefined && !['near-usdc', 'base-usdc', 'oneclick'].includes(o.route))
+      throw new TypeError('invalid purchase route');
+    if (o.route === 'near-usdc' && o.payer?.identity.kind !== 'near')
+      throw new TypeError('direct NEAR requires a NEAR payment wallet');
+    if (o.route === 'oneclick' && !o.origin) throw new TypeError('a 1Click origin is required');
+    if (
+      o.route === 'base-usdc' &&
+      (!f.terms.base || o.payer?.identity.kind !== 'evm' || !('signTypedData' in o.payer))
+    )
+      throw new TypeError('Base requires Base terms and an EVM payment wallet');
+    const oneclick =
+      o.route === 'oneclick' || (o.route === undefined && o.payer?.identity.kind !== 'near');
+    const store: Store<PurchaseRecord> = {
+      load: (name) => this.store.load(name),
+      compareAndSet: async (name, expected, next) => {
+        if (next) await o.beforeSave?.(next);
+        const ok = await this.store.compareAndSet(name, expected, next);
+        if (ok && next) await o.onSaved?.(next);
+        return ok;
+      },
+    };
+    let route: Purchase['route'] = o.route === 'base-usdc' ? 'base-usdc' : 'near-usdc';
+    if (
+      o.route === undefined &&
+      o.payer?.identity.kind === 'evm' &&
+      f.terms.base &&
+      'signTypedData' in o.payer
+    ) {
       const h = await head(this.o.baseRpc);
       if (
         !(await hasCode(this.o.baseRpc, o.payer.identity.id, h.number)) &&
@@ -672,6 +708,7 @@ export class Annon {
       )
         route = 'base-usdc';
     }
+    if (route === 'near-usdc' && oneclick && o.origin) validateOrigin(o.origin);
     const price = route === 'base-usdc' && f.terms.base ? f.terms.base.price : f.terms.near.price;
     if (BigInt(price) > o.maxPrice) throw new PayError('price_above_max');
     if (route === 'near-usdc') {
@@ -713,7 +750,7 @@ export class Annon {
         await w.proveControl(proofText, { contractId: this.o.contractId, nearRpc: this.o.nearRpc });
       } else await this.auth(o.recovery, proofText);
     };
-    const deferProof = route === 'near-usdc' && o.payer?.identity.kind !== 'near' && o.onQuote;
+    const deferProof = route === 'near-usdc' && oneclick && o.onQuote;
     if (!deferProof) await proveRecovery();
     if (route === 'base-usdc') {
       if (!o.paymentRequired || !o.url || !o.payer || !('signTypedData' in o.payer))
@@ -737,14 +774,23 @@ export class Annon {
         purchase: p,
         buyerSecret: key.secret,
         wallet: { address: payer.identity.id, signTypedData: (t) => payer.signTypedData(t) },
-        store: this.store,
+        store,
       });
+      const proved = {
+        ...result.purchase,
+        revision: result.purchase.revision + 1,
+        recoveryProved: true,
+      };
+      if (!(await store.compareAndSet(purchaseKey(id), result.purchase, proved)))
+        throw new PayError('store_conflict');
+      await o.beforePayment?.(proved);
       if (o.submitBase) await o.submitBase(result.header);
-      return { route, record: result.purchase, payment: result.header };
+      return { route, record: proved, payment: result.header };
     }
     const headerHash = hex(checked.headerHash);
     let record: PurchaseRecord = {
       schemaVersion: 2,
+      recoveryProved: !deferProof,
       id,
       revision: 0,
       purchase: p,
@@ -770,9 +816,10 @@ export class Annon {
       },
       attempts: [],
     };
-    if (!(await this.store.compareAndSet(purchaseKey(id), null, record)))
+    if (!(await store.compareAndSet(purchaseKey(id), null, record)))
       throw new PayError('store_conflict');
-    if (o.payer?.identity.kind === 'near') {
+    if (!oneclick && o.payer?.identity.kind === 'near') {
+      await o.beforePayment?.(record);
       try {
         await asNear(o.payer).transferPurchase(message, assets);
       } catch (error) {
@@ -782,7 +829,7 @@ export class Annon {
           revision: record.revision + 1,
           nearSubmission: { state: 'uncertain', txHash: error.txHash },
         };
-        if (!(await this.store.compareAndSet(purchaseKey(id), record, next)))
+        if (!(await store.compareAndSet(purchaseKey(id), record, next)))
           throw new TransactionUncertain(error.txHash, id);
         return { route, record: next, uncertain: { purchaseId: id, txHash: error.txHash } };
       }
@@ -791,7 +838,7 @@ export class Annon {
     if (!o.origin) throw new TypeError('a 1Click origin is required for cross-chain payment');
     const quote = await (o.oneClick ?? new OneClick()).quote(message, o.origin);
     const next = { ...record, revision: record.revision + 1, quote };
-    if (!(await this.store.compareAndSet(purchaseKey(id), record, next)))
+    if (!(await store.compareAndSet(purchaseKey(id), record, next)))
       throw new PayError('store_conflict');
     record = next;
     if (o.onQuote) {
@@ -805,7 +852,38 @@ export class Annon {
       await proveRecovery();
       checkDeadline();
     }
+    if (!record.recoveryProved) {
+      const proved = { ...record, revision: record.revision + 1, recoveryProved: true };
+      if (!(await store.compareAndSet(purchaseKey(id), record, proved)))
+        throw new PayError('store_conflict');
+      record = proved;
+    }
+    await o.beforePayment?.(record);
     return { route, record, instructions: quote.deposit };
+  }
+  /** Reprove the same saved purchase after reload, without preparing or submitting a payment. */
+  async proveRecovery(record: PurchaseRecord, wallet: IdentityWallet): Promise<PurchaseRecord> {
+    const current = await this.store.load(purchaseKey(record.id));
+    if (!current || current.revision !== record.revision) throw new PayError('store_conflict');
+    if (
+      current.purchase.contract !== this.o.contractId ||
+      current.purchase.network !==
+        (current.purchase.route === 'base-usdc' ? 'eip155:8453' : this.o.network)
+    )
+      throw new Error('saved purchase is outside this SDK scope');
+    if (identityJson(parseIdentity(wallet.identity)) !== identityJson(current.recovery))
+      throw new Error('purchase recovery identity mismatch');
+    const text = `Annon: verify purchase recovery\ncontract: ${this.o.contractId}\npurchase: ${current.id}\nrecovery: ${identityText(current.recovery)}`;
+    if (current.recovery.kind === 'near') {
+      const w = asNear(wallet);
+      if (!w.proveControl)
+        throw new Error('NEAR recovery requires an account ownership proof before payment');
+      await w.proveControl(text, { contractId: this.o.contractId, nearRpc: this.o.nearRpc });
+    } else await this.auth(wallet, text);
+    const next = { ...current, revision: current.revision + 1, recoveryProved: true };
+    if (!(await this.store.compareAndSet(purchaseKey(current.id), current, next)))
+      throw new PayError('store_conflict');
+    return next;
   }
   /** Resume a paid Base purchase before any host download, which requires a final grant. */
   async accept(record: PurchaseRecord | undefined, id = record?.id): Promise<boolean> {

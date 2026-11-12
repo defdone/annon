@@ -476,7 +476,11 @@ describe('high-level one-model API', () => {
         recovery,
         refund: wallet.identity,
         maxPrice: 200000n,
-        origin: { asset: 'nep141:source', chain: 'solana', refundTo: 'test-refund' },
+        origin: {
+          asset: 'nep141:source',
+          chain: 'solana',
+          refundTo: base58.encode(new Uint8Array(32).fill(9)),
+        },
         oneClick: { quote } as never,
         onQuote,
       });
@@ -1677,3 +1681,710 @@ it.each(['none', 'header', 'locked header', 'cancel', 'swallow failure'] as cons
     ).toMatchObject({ published: true, fileKey: null, sellerSecret: null, ckdSecret: null });
   },
 );
+
+it.each(['near-usdc', 'base-usdc', 'oneclick'] as const)(
+  'honors explicit %s selection without fallback',
+  async (route) => {
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'route-test',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      base: { price: '200000', sendTransaction: async () => {} },
+      publish: h.publish,
+    });
+    const quote = vi.fn(async () => ({
+      request: {},
+      response: {},
+      deposit: { address: 'synthetic-deposit' },
+    }));
+    const transferPurchase = vi.fn();
+    const payer =
+      route === 'near-usdc'
+        ? {
+            identity: { kind: 'near', id: 'synthetic-buyer.test' },
+            authorize: vi.fn(),
+            call: vi.fn(),
+            transferPurchase,
+          }
+        : { ...wallet, signTypedData: vi.fn() };
+    const operation = h.sdk.buy({
+      route,
+      fileId: h.terms.file_id,
+      header: h.header,
+      payer: payer as never,
+      recovery: wallet,
+      refund: wallet.identity,
+      maxPrice: 200000n,
+      origin: { asset: 'nep141:synthetic', chain: 'evm', refundTo: wallet.identity.id },
+      oneClick: { quote } as never,
+    });
+    if (route === 'base-usdc') await expect(operation).rejects.toThrow(/Base requires/);
+    else {
+      await expect(operation).resolves.toMatchObject({ route: 'near-usdc' });
+      const result = await operation;
+      expect(result.route).toBe('near-usdc');
+      expect(quote).toHaveBeenCalledTimes(route === 'oneclick' ? 1 : 0);
+      expect(transferPurchase).toHaveBeenCalledTimes(route === 'near-usdc' ? 1 : 0);
+    }
+  },
+);
+it('rejects explicit direct NEAR without a NEAR wallet instead of using 1Click', async () => {
+  const h = harness();
+  await h.sdk.sell({
+    data: body,
+    name: 'route-test',
+    mime: '',
+    seller: wallet,
+    near: {
+      price: '200000',
+      recipients: [{ identity: wallet.identity, bps: 10000 }],
+      remainder: wallet.identity,
+    },
+    publish: h.publish,
+  });
+  const quote = vi.fn();
+  await expect(
+    h.sdk.buy({
+      route: 'near-usdc',
+      fileId: h.terms.file_id,
+      header: h.header,
+      recovery: wallet,
+      refund: wallet.identity,
+      maxPrice: 200000n,
+      origin: { asset: 'nep141:synthetic', chain: 'evm', refundTo: wallet.identity.id },
+      oneClick: { quote },
+    }),
+  ).rejects.toThrow(/NEAR.*wallet/);
+  expect(quote).not.toHaveBeenCalled();
+});
+
+it.each(['record', 'before-payment', 'proof-record'] as const)(
+  'blocks direct payment when %s persistence fails',
+  async (failure) => {
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'guard-test',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    });
+    const transferPurchase = vi.fn();
+    const payer = {
+      identity: { kind: 'near', id: 'synthetic-buyer.test' } as const,
+      authorize: vi.fn(),
+      call: vi.fn(),
+      transferPurchase,
+    };
+    await expect(
+      h.sdk.buy({
+        route: 'near-usdc',
+        fileId: h.terms.file_id,
+        header: h.header,
+        payer,
+        recovery: wallet,
+        refund: wallet.identity,
+        maxPrice: 200000n,
+        onSaved: async (record) => {
+          if (failure === 'record' || (failure === 'proof-record' && record.recoveryProved))
+            throw new Error('quota');
+        },
+        beforePayment: async () => {
+          if (failure === 'before-payment') throw new Error('quota');
+        },
+      }),
+    ).rejects.toThrow('quota');
+    expect(transferPurchase).not.toHaveBeenCalled();
+  },
+);
+it('saves recovery proof before releasing 1Click instructions and can reprove a saved purchase', async () => {
+  const h = harness();
+  await h.sdk.sell({
+    data: body,
+    name: 'guard-test',
+    mime: '',
+    seller: wallet,
+    near: {
+      price: '200000',
+      recipients: [{ identity: wallet.identity, bps: 10000 }],
+      remainder: wallet.identity,
+    },
+    publish: h.publish,
+  });
+  const saved: import('../pay/purchase.js').PurchaseRecord[] = [];
+  const result = await h.sdk.buy({
+    route: 'oneclick',
+    fileId: h.terms.file_id,
+    header: h.header,
+    recovery: wallet,
+    refund: wallet.identity,
+    maxPrice: 200000n,
+    origin: { asset: 'nep141:synthetic', chain: 'evm', refundTo: wallet.identity.id },
+    oneClick: {
+      quote: async () => ({
+        request: {},
+        response: {},
+        deposit: {
+          address: 'synthetic',
+          depositBefore: new Date((now + 3000) * 1000).toISOString(),
+        },
+      }),
+    } as never,
+    onQuote: async () => {},
+    onSaved: async (r) => {
+      saved.push(r);
+    },
+    beforePayment: async (r) => {
+      expect(r.recoveryProved).toBe(true);
+      expect(saved.at(-1)).toEqual(r);
+    },
+  });
+  expect(result.record.recoveryProved).toBe(true);
+  const unproved = {
+    ...result.record,
+    revision: result.record.revision + 1,
+    recoveryProved: false,
+  };
+  await h.sdk.store.compareAndSet(purchaseKey(unproved.id), result.record, unproved);
+  const restored = await h.sdk.proveRecovery(unproved, wallet);
+  expect(restored.recoveryProved).toBe(true);
+  expect(restored.id).toBe(result.record.id);
+  const otherContract = new Annon({ ...h.config, contractId: 'different.test' });
+  await expect(otherContract.proveRecovery(restored, wallet)).rejects.toThrow(/scope/);
+});
+
+it.each(['near-usdc', 'base-usdc', 'oneclick'] as const)(
+  'runs the browser controller through %s, acceptance and file readiness with contract stubs',
+  async (route) => {
+    vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+    const { IDBFactory } = await import('fake-indexeddb');
+    const { browserAnnon, browserPurchaseStorage, BrowserPurchaseController } = await import(
+      '../browser/purchases.js'
+    );
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'browser-fixture',
+      mime: 'text/plain',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      base: { price: '200000', sendTransaction: async () => {} },
+      publish: h.publish,
+    });
+    const options = { factory: new IDBFactory(), name: 'synthetic-integration' };
+    const storage = await browserPurchaseStorage(options);
+    const sdk = browserAnnon(storage, h.config);
+    const controller = await BrowserPurchaseController.create(
+      { storage, sdk, now: () => now },
+      {
+        id: 'synthetic-checkout',
+        fileId: h.terms.file_id,
+        header: h.header,
+        resourceUrl: 'https://files.example/f',
+        route,
+        maxPrice: 200000n,
+      },
+    );
+    const transferPurchase = vi.fn();
+    const submitBase = vi.fn(async () => {});
+    const payer =
+      route === 'near-usdc'
+        ? {
+            identity: { kind: 'near', id: 'synthetic-buyer.test' },
+            authorize: vi.fn(),
+            call: vi.fn(),
+            transferPurchase,
+          }
+        : {
+            ...wallet,
+            signTypedData: (data: ReturnType<typeof typedData>) =>
+              account.signTypedData(data as never),
+          };
+    const required = paymentRequired(
+      {
+        nearRpc: h.config.nearRpc,
+        contractId: h.config.contractId,
+        fileId: h.terms.file_id,
+        url: 'https://files.example/f',
+        header: 'https://files.example/header',
+      },
+      must(await getFile(h.config.nearRpc, h.config.contractId, h.terms.file_id)),
+      must(initial.base).usdc,
+    );
+    await controller.start({
+      recovery: wallet,
+      refund: wallet.identity,
+      payer: payer as never,
+      paymentRequired: required,
+      submitBase,
+      origin: { asset: 'nep141:synthetic', chain: 'evm', refundTo: wallet.identity.id },
+      oneClick: {
+        quote: async (message: string) => ({
+          request: { customRecipientMsg: message },
+          response: {},
+          deposit: {
+            address: 'synthetic-deposit',
+            memo: 'synthetic-memo',
+            amount: '250000',
+            asset: 'nep141:synthetic',
+            chain: 'evm',
+            qrData: '{}',
+            depositBefore: new Date((now + 3000) * 1000).toISOString(),
+            purchaseExpiresAt: new Date((now + 3600) * 1000).toISOString(),
+          },
+        }),
+      } as never,
+    });
+    const stored = must((await storage.load('synthetic-checkout'))?.purchase);
+    expect(stored.recoveryProved).toBe(true);
+    expect(await sdk.store.load(purchaseKey(stored.id))).toEqual(stored);
+    const restoredStorage = await browserPurchaseStorage(options);
+    const restoredSdk = browserAnnon(restoredStorage, h.config);
+    const restored = new BrowserPurchaseController({
+      storage: restoredStorage,
+      sdk: restoredSdk,
+      id: 'synthetic-checkout',
+      now: () => now,
+    });
+    expect((await restored.snapshot()).state).toBe(
+      route === 'oneclick' ? 'awaiting_deposit' : 'payment_uncertain',
+    );
+    await expect(restored.start({ recovery: wallet, refund: wallet.identity })).rejects.toThrow(
+      /resume/,
+    );
+    h.purchases.set(stored.id, {
+      purchase_id: stored.id,
+      file_id: stored.purchase.file_id,
+      terms_hash: stored.purchase.terms_hash,
+      recovery: stored.recovery,
+      buyer_key: stored.purchase.buyer_key,
+      grants: 1,
+    });
+    h.grants.set(`${stored.id}:0`, stored.purchase.buyer_key);
+    await restored.resume();
+    expect((await restored.snapshot()).state).toBe('accepted');
+    expect((await restored.open(h.file)).data).toEqual(body);
+    expect((await restored.snapshot()).state).toBe('file_ready');
+    expect(transferPurchase).toHaveBeenCalledTimes(route === 'near-usdc' ? 1 : 0);
+    expect(submitBase).toHaveBeenCalledTimes(route === 'base-usdc' ? 1 : 0);
+  },
+);
+
+it.each(['insufficient balance', 'smart wallet'] as const)(
+  'explicit Base refuses %s without switching to 1Click',
+  async (reason) => {
+    vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'route-test',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      base: { price: '200000', sendTransaction: async () => {} },
+      publish: h.publish,
+    });
+    const required = paymentRequired(
+      {
+        nearRpc: h.config.nearRpc,
+        contractId: h.config.contractId,
+        fileId: h.terms.file_id,
+        url: 'https://files.example/f',
+        header: 'https://files.example/header',
+      },
+      must(await getFile(h.config.nearRpc, h.config.contractId, h.terms.file_id)),
+      must(initial.base).usdc,
+    );
+    if (reason === 'smart wallet') h.baseCode = '0x1234';
+    else h.baseBalance = 0n;
+    const quote = vi.fn();
+    const signTypedData = vi.fn();
+    await expect(
+      h.sdk.buy({
+        route: 'base-usdc',
+        fileId: h.terms.file_id,
+        header: h.header,
+        recovery: wallet,
+        refund: wallet.identity,
+        payer: { ...wallet, signTypedData } as never,
+        maxPrice: 200000n,
+        paymentRequired: required,
+        url: 'https://files.example/f',
+        oneClick: { quote },
+        origin: { asset: 'nep141:synthetic', chain: 'evm', refundTo: wallet.identity.id },
+      }),
+    ).rejects.toMatchObject({
+      code: reason === 'smart wallet' ? 'smart_wallet_unsupported' : 'insufficient_balance',
+    });
+    expect(quote).not.toHaveBeenCalled();
+    expect(signTypedData).not.toHaveBeenCalled();
+  },
+);
+
+async function round2Listing() {
+  const h = harness();
+  await h.sdk.sell({
+    data: body,
+    name: 'round-two',
+    mime: '',
+    seller: wallet,
+    near: {
+      price: '200000',
+      recipients: [{ identity: wallet.identity, bps: 10000 }],
+      remainder: wallet.identity,
+    },
+    base: { price: '200000', sendTransaction: async () => {} },
+    publish: h.publish,
+  });
+  return h;
+}
+it.each([
+  { chain: 'evm', refundTo: 'bad' },
+  { chain: 'solana', refundTo: 'bad' },
+  { chain: 'near', refundTo: 'Bad Account' },
+  { chain: 'other', refundTo: 'bad refund' },
+  { chain: 'evm', refundTo: wallet.identity.id, depositMode: 'invalid' },
+  { chain: 'evm', refundTo: wallet.identity.id, blockchain: 'btc' },
+] as const)('rejects an invalid origin before proof or purchase writes: %j', async (invalid) => {
+  const h = await round2Listing();
+  const beforeSave = vi.fn();
+  const authorize = vi.fn(wallet.authorize);
+  const quote = vi.fn();
+  await expect(
+    h.sdk.buy({
+      route: 'oneclick',
+      fileId: h.terms.file_id,
+      header: h.header,
+      recovery: { ...wallet, authorize },
+      refund: wallet.identity,
+      maxPrice: 200000n,
+      origin: { asset: 'nep141:synthetic', ...invalid } as never,
+      oneClick: { quote },
+      beforeSave,
+    }),
+  ).rejects.toThrow();
+  expect(beforeSave).not.toHaveBeenCalled();
+  expect(authorize).not.toHaveBeenCalled();
+  expect(quote).not.toHaveBeenCalled();
+  expect([...h.backups.keys()].filter((k) => !k.startsWith('sell:'))).toHaveLength(0);
+});
+it('keeps a bad refund retryable in the real browser controller without a saved purchase', async () => {
+  const h = await round2Listing();
+  const { IDBFactory } = await import('fake-indexeddb');
+  const { browserAnnon, browserPurchaseStorage, BrowserPurchaseController } = await import(
+    '../browser/purchases.js'
+  );
+  const storage = await browserPurchaseStorage({
+    factory: new IDBFactory(),
+    name: 'synthetic-validation',
+  });
+  const sdk = browserAnnon(storage, h.config);
+  const controller = await BrowserPurchaseController.create(
+    { storage, sdk, now: () => now },
+    {
+      id: 'synthetic-checkout',
+      fileId: h.terms.file_id,
+      header: h.header,
+      resourceUrl: 'https://files.example/f',
+      route: 'oneclick',
+      maxPrice: 200000n,
+    },
+  );
+  const authorize = vi.fn(wallet.authorize);
+  const quote = vi.fn();
+  await expect(
+    controller.start({
+      recovery: { ...wallet, authorize },
+      refund: wallet.identity,
+      origin: { asset: 'nep141:synthetic', chain: 'evm', refundTo: 'bad' },
+      oneClick: { quote },
+    }),
+  ).rejects.toThrow();
+  expect((await controller.snapshot()).state).toBe('terms_review');
+  expect((await storage.load('synthetic-checkout'))?.purchase).toBeUndefined();
+  expect(authorize).not.toHaveBeenCalled();
+  expect(quote).not.toHaveBeenCalled();
+});
+it('M7 honors explicit oneclick with a NEAR payer without a direct transfer', async () => {
+  const h = await round2Listing();
+  const transferPurchase = vi.fn();
+  const quote = vi.fn(async () => ({
+    request: {},
+    response: {},
+    deposit: { address: 'synthetic', depositBefore: new Date((now + 3000) * 1000).toISOString() },
+  }));
+  const result = await h.sdk.buy({
+    route: 'oneclick',
+    fileId: h.terms.file_id,
+    header: h.header,
+    recovery: wallet,
+    refund: wallet.identity,
+    maxPrice: 200000n,
+    payer: {
+      identity: { kind: 'near', id: 'synthetic-buyer.test' },
+      authorize: vi.fn(),
+      call: vi.fn(),
+      transferPurchase,
+    } as never,
+    origin: { asset: 'nep141:synthetic', chain: 'evm', refundTo: wallet.identity.id },
+    oneClick: { quote } as never,
+  });
+  expect(quote).toHaveBeenCalledTimes(1);
+  expect(transferPurchase).not.toHaveBeenCalled();
+  expect(result.instructions).toBeDefined();
+});
+it('M10 awaits the Base checkpoint before submitBase and blocks submission when it fails', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+  const h = await round2Listing();
+  const required = paymentRequired(
+    {
+      nearRpc: h.config.nearRpc,
+      contractId: h.config.contractId,
+      fileId: h.terms.file_id,
+      url: 'https://files.example/f',
+      header: 'https://files.example/header',
+    },
+    must(await getFile(h.config.nearRpc, h.config.contractId, h.terms.file_id)),
+    must(initial.base).usdc,
+  );
+  const beforePayment = vi.fn(async () => {
+    throw new Error('checkpoint quota');
+  });
+  const submitBase = vi.fn();
+  await expect(
+    h.sdk.buy({
+      route: 'base-usdc',
+      fileId: h.terms.file_id,
+      header: h.header,
+      recovery: wallet,
+      refund: wallet.identity,
+      maxPrice: 200000n,
+      payer: {
+        ...wallet,
+        signTypedData: (data: ReturnType<typeof typedData>) => account.signTypedData(data as never),
+      } as never,
+      url: 'https://files.example/f',
+      paymentRequired: required,
+      beforePayment,
+      submitBase,
+    }),
+  ).rejects.toThrow('checkpoint quota');
+  expect(beforePayment).toHaveBeenCalledTimes(1);
+  expect(submitBase).not.toHaveBeenCalled();
+});
+it('M11 refuses reproof from a different recovery identity before authorization', async () => {
+  const h = await round2Listing();
+  const result = await h.sdk.buy({
+    route: 'oneclick',
+    fileId: h.terms.file_id,
+    header: h.header,
+    recovery: wallet,
+    refund: wallet.identity,
+    maxPrice: 200000n,
+    origin: { asset: 'nep141:synthetic', chain: 'evm', refundTo: wallet.identity.id },
+    oneClick: {
+      quote: async () => ({ request: {}, response: {}, deposit: { address: 'synthetic' } }),
+    } as never,
+  });
+  const authorize = vi.fn();
+  await expect(
+    h.sdk.proveRecovery(result.record, {
+      identity: { kind: 'near', id: 'different.test' },
+      authorize,
+    }),
+  ).rejects.toThrow(/identity mismatch/);
+  expect(authorize).not.toHaveBeenCalled();
+});
+
+it('keeps automatic Base selection working when an unused fallback origin is invalid', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+  const h = await round2Listing();
+  const required = paymentRequired(
+    {
+      nearRpc: h.config.nearRpc,
+      contractId: h.config.contractId,
+      fileId: h.terms.file_id,
+      url: 'https://files.example/f',
+      header: 'https://files.example/header',
+    },
+    must(await getFile(h.config.nearRpc, h.config.contractId, h.terms.file_id)),
+    must(initial.base).usdc,
+  );
+  await expect(
+    h.sdk.buy({
+      fileId: h.terms.file_id,
+      header: h.header,
+      recovery: wallet,
+      refund: wallet.identity,
+      maxPrice: 200000n,
+      payer: {
+        ...wallet,
+        signTypedData: (data: ReturnType<typeof typedData>) => account.signTypedData(data as never),
+      } as never,
+      url: 'https://files.example/f',
+      paymentRequired: required,
+      origin: { asset: 'nep141:synthetic', chain: 'solana', refundTo: 'bad' },
+    }),
+  ).resolves.toMatchObject({ route: 'base-usdc' });
+});
+
+it('retains r0 through rotation to r1 and opens a late final grant for r0', async () => {
+  const h = await round2Listing();
+  const { IDBFactory } = await import('fake-indexeddb');
+  const { browserAnnon, browserPurchaseStorage } = await import('../browser/purchases.js');
+  const { encryptedRecoveryStore } = await import('../pay/backup.js');
+  const { keyFromSecret } = await import('../keys/near-ckd.js');
+  const storage = await browserPurchaseStorage({
+    factory: new IDBFactory(),
+    name: 'synthetic-rotation',
+  });
+  const sdk = browserAnnon(storage, {
+    ...h.config,
+    send: async (method, args) => {
+      if (method === 'reopen') throw new Error('synthetic offline');
+      return h.send(method, args);
+    },
+  });
+  const id = `0x${'93'.repeat(32)}`;
+  const key = keyFromSecret(new Uint8Array(32).fill(3));
+  h.purchases.set(id, {
+    purchase_id: id,
+    file_id: h.terms.file_id,
+    terms_hash: termsHash(h.terms),
+    recovery: wallet.identity,
+    buyer_key: hex(bls.G1.Point.BASE.toBytes(true)),
+    grants: 1,
+  });
+  const r0 = {
+    kind: 'recovery' as const,
+    id: `recovery:${id}`,
+    revision: 0,
+    purchase_id: id,
+    file_id: h.terms.file_id,
+    recovery: wallet.identity,
+    buyerSecret: hex(key.secret),
+    fresh_key: hex(key.publicKeyBytes),
+    nonce: `0x${'35'.repeat(32)}`,
+    deadline: now - 1,
+    grant: null,
+  };
+  const recoveryStore = encryptedRecoveryStore(storage.rawStore, storage.backupSecret);
+  await recoveryStore.compareAndSet(`annon/recovery/${id}`, null, r0);
+  await expect(sdk.recover({ wallet, purchaseId: id })).rejects.toThrow('synthetic offline');
+  const r1 = must(await recoveryStore.load(`annon/recovery/${id}`));
+  expect(r1.buyerSecret).not.toBe(r0.buyerSecret);
+  const archive = must(await storage.rawStore.load(`annon/browser/backup/${r0.id}:revision:0`));
+  const restored = await importRecovery(archive.backup, storage.backupSecret);
+  expect(restored.buyerSecret).toBe(r0.buyerSecret);
+  const accepted = must(h.purchases.get(id));
+  accepted.grants = 2;
+  h.grants.set(`${id}:1`, r0.fresh_key);
+  expect((await sdk.open({ file: h.file, recovery: { ...restored, grant: 1 } })).data).toEqual(
+    body,
+  );
+});
+it('marks signed Base payloads uncertain before dryRun and accepts a payment that lands after its error', async () => {
+  vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+  const h = await round2Listing();
+  const { IDBFactory } = await import('fake-indexeddb');
+  const { browserAnnon, browserPurchaseStorage, BrowserPurchaseController } = await import(
+    '../browser/purchases.js'
+  );
+  const storageOptions = { factory: new IDBFactory(), name: 'synthetic-dry-run' };
+  const storage = await browserPurchaseStorage(storageOptions);
+  const sdk = browserAnnon(storage, h.config);
+  const controller = await BrowserPurchaseController.create(
+    { storage, sdk, now: () => now },
+    {
+      id: 'synthetic-checkout',
+      fileId: h.terms.file_id,
+      header: h.header,
+      resourceUrl: 'https://files.example/f',
+      route: 'base-usdc',
+      maxPrice: 200000n,
+    },
+  );
+  const required = paymentRequired(
+    {
+      nearRpc: h.config.nearRpc,
+      contractId: h.config.contractId,
+      fileId: h.terms.file_id,
+      url: 'https://files.example/f',
+      header: 'https://files.example/header',
+    },
+    must(await getFile(h.config.nearRpc, h.config.contractId, h.terms.file_id)),
+    must(initial.base).usdc,
+  );
+  const transport = globalThis.fetch;
+  const observed: string[] = [];
+  const submitBase = vi.fn();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url, init) => {
+      const request = JSON.parse(String(init?.body));
+      if (request.method === 'eth_call' && request.params[0]?.from) {
+        const saved = must(await storage.load('synthetic-checkout'));
+        expect(saved.purchase?.attempts[0]?.payload).toBeTruthy();
+        observed.push(saved.submission ?? 'missing');
+        throw new Error('synthetic dry-run response lost');
+      }
+      return transport(url, init);
+    }),
+  );
+  await expect(
+    controller.start({
+      recovery: wallet,
+      refund: wallet.identity,
+      payer: {
+        ...wallet,
+        signTypedData: (data: ReturnType<typeof typedData>) => account.signTypedData(data as never),
+      } as never,
+      paymentRequired: required,
+      submitBase,
+    }),
+  ).rejects.toThrow();
+  expect(observed).toEqual(['uncertain']);
+  expect(submitBase).not.toHaveBeenCalled();
+  const saved = must((await storage.load('synthetic-checkout'))?.purchase);
+  expect(saved.attempts[0]?.payload).toBeTruthy();
+  h.purchases.set(saved.id, {
+    purchase_id: saved.id,
+    file_id: saved.purchase.file_id,
+    terms_hash: saved.purchase.terms_hash,
+    recovery: saved.recovery,
+    buyer_key: saved.purchase.buyer_key,
+    grants: 1,
+  });
+  const freshStorage = await browserPurchaseStorage(storageOptions);
+  const freshSdk = browserAnnon(freshStorage, h.config);
+  const accept = vi.spyOn(freshSdk, 'accept');
+  const reload = new BrowserPurchaseController({
+    storage: freshStorage,
+    sdk: freshSdk,
+    id: 'synthetic-checkout',
+    now: () => now,
+  });
+  await reload.resume();
+  expect(accept).toHaveBeenCalledTimes(1);
+  expect((await reload.snapshot()).state).toBe('accepted');
+});
