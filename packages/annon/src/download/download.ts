@@ -11,7 +11,9 @@ export type DownloadErrorCode =
   /** The bytes are not the file whose header was checked before paying. */
   | 'file_mismatch'
   /** The caller cancelled the download. */
-  | 'cancelled';
+  | 'cancelled'
+  /** In-memory browser opening is limited; use the CLI for larger files. */
+  | 'too_large';
 
 export class DownloadError extends Error {
   readonly code: DownloadErrorCode;
@@ -56,6 +58,8 @@ export interface DownloadOptions {
   fetch?: typeof fetch;
   /** Unix seconds; defaults to now. */
   now?: () => number;
+  maxBytes?: number;
+  signal?: AbortSignal;
 }
 
 const b64json = (s: string | null): unknown => {
@@ -74,7 +78,6 @@ const b64json = (s: string | null): unknown => {
  */
 export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   secureUrl(o.url);
-  const wait = o.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const header = copy(o.header);
   const h = parseHeader(header);
   const lengths = Array.from({ length: h.n - 1 }, (_, i) =>
@@ -84,13 +87,52 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
         ? h.previewLen + TAG
         : 2 ** h.chunkLog2 + TAG,
   );
+  const limit = o.maxBytes ?? Number.POSITIVE_INFINITY;
+  const sizeCheck = (size: number) => {
+    if (size > limit)
+      fail('too_large', 'File exceeds the browser size limit. Use the CLI for larger files.');
+  };
+  sizeCheck(header.length + lengths.reduce((sum, n) => sum + n, 0) + TAG);
   const maxLast = 2 ** h.chunkLog2 + TAG;
   const fetcher = o.fetch ?? globalThis.fetch;
   // Cancelling aborts any request in flight and stops before the next signature or request.
   const abort = new AbortController();
+  const cancelExternal = () => {
+    abort.abort();
+    void activeReader?.cancel().catch(() => {});
+  };
+  if (o.signal?.aborted) fail('cancelled');
+  const cleanup = () => o.signal?.removeEventListener('abort', cancelExternal);
   const live = () => {
     if (abort.signal.aborted) fail('cancelled');
   };
+  async function untilAbort<T>(pending: Promise<T>): Promise<T> {
+    let stop: () => void = () => {};
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      stop = () => reject(new DownloadError('cancelled'));
+      abort.signal.addEventListener('abort', stop, { once: true });
+      if (abort.signal.aborted) stop();
+    });
+    try {
+      return await Promise.race([pending, cancelled]);
+    } finally {
+      abort.signal.removeEventListener('abort', stop);
+    }
+  }
+  async function wait(ms: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await untilAbort(
+        o.wait
+          ? o.wait(ms)
+          : new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, ms);
+            }),
+      );
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
   let chunk = 0; // next chunk to check
   let offset = header.length; // its first byte in the file
   let sentHeader = false;
@@ -107,6 +149,8 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
     named = u;
   }
 
+  o.signal?.addEventListener('abort', cancelExternal, { once: true });
+
   // Where the current response ends, when the host says (Content-Range or Content-Length).
   let pos = 0;
   let end: number | undefined;
@@ -115,12 +159,17 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
     live();
     // No redirects: one could move the request to plain HTTP or another host.
     // No cookies either: the grant proof travels in `Annon-Buyer-Proof` (profile section 9).
-    return fetcher(o.url, {
-      redirect: 'error',
-      credentials: 'omit',
-      signal: abort.signal,
-      headers: { ...headers, range: `bytes=${offset}-` },
-    });
+    return untilAbort(
+      fetcher(o.url, {
+        redirect: 'error',
+        credentials: 'omit',
+        signal: abort.signal,
+        headers: { ...headers, range: `bytes=${offset}-` },
+      }).then(async (response) => {
+        if (abort.signal.aborted) await response.body?.cancel().catch(() => {});
+        return response;
+      }),
+    );
   };
   const body = (r: Response) => r.body && (r.status === 200 || r.status === 206);
 
@@ -132,6 +181,10 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
         [BUYER_PROOF_HEADER]: proof,
         ...(payment ? { 'PAYMENT-SIGNATURE': payment.header } : {}),
       });
+      if (abort.signal.aborted) {
+        await r.body?.cancel().catch(() => {});
+        live();
+      }
       if (body(r)) return r;
       const pending = r.status === 503 || r.status === 402;
       await r.body?.cancel().catch(() => {});
@@ -144,17 +197,46 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   }
 
   async function request(): Promise<{
-    reader: ReadableStreamDefaultReader<Uint8Array>;
+    reader: BodyReader;
     rest: Uint8Array;
   }> {
     const r = await authorized();
-    const reader = (r.body as ReadableStream<Uint8Array>).getReader();
+    const length = Number(r.headers.get('content-length') ?? Number.NaN);
+    const total = Number((/\/(\d+)$/.exec(r.headers.get('content-range') ?? '') ?? [])[1]);
+    try {
+      sizeCheck(r.status === 200 ? length : offset + length);
+      if (r.status === 206) sizeCheck(total);
+    } catch (error) {
+      await r.body?.cancel().catch(() => {});
+      throw error;
+    }
+    const source = (r.body as ReadableStream<Uint8Array>).getReader();
+    let received = r.status === 200 ? 0 : offset;
+    const reader = {
+      cancel: () => source.cancel(),
+      async read() {
+        const result = await source.read();
+        live();
+        if (!result.done) {
+          received += result.value.length;
+          try {
+            sizeCheck(received);
+          } catch (error) {
+            await source.cancel().catch(() => {});
+            throw error;
+          }
+        }
+        return result;
+      },
+    };
+    // Retain immediately, so external cancellation also interrupts header skipping.
+    activeReader = reader;
     // A host without Range support sends everything: skip what was already checked.
     if (r.status === 200) {
       const length = Number(r.headers.get('content-length') ?? Number.NaN);
       end = Number.isSafeInteger(length) ? length : undefined;
       pos = offset;
-      return { reader, rest: await skip(reader, offset) };
+      return { reader, rest: await skip(reader, offset, header) };
     }
     const range = /^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(r.headers.get('content-range') ?? '');
     // RFC 9110 section 14.4: first <= last < complete length, or the range is invalid.
@@ -168,13 +250,16 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
       return fail('bad_response', 'the host resumed from another offset');
     }
     end = Number(range[2]) + 1;
+    sizeCheck(end);
     pos = offset;
     return { reader, rest: new Uint8Array(0) };
   }
 
-  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let reader: BodyReader | undefined;
+  let activeReader: BodyReader | undefined;
   let pending: Uint8Array = new Uint8Array(0);
   async function read(n: number, eofOk: boolean): Promise<Bytes> {
+    n = Math.min(n, Math.max(0, limit - offset) + 1);
     const out = new Uint8Array(n);
     let at = 0;
     while (at < n) {
@@ -184,7 +269,7 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
         pending = got.rest;
       }
       if (pending.length === 0) {
-        const r = await (reader as ReadableStreamDefaultReader<Uint8Array>).read();
+        const r = await (reader as BodyReader).read();
         if (r.done) {
           // Retried: a connection can end cleanly in the middle, also before the end it announced.
           if (eofOk && (end === undefined || pos >= end)) break;
@@ -204,6 +289,7 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
+        live();
         if (!sentHeader) {
           sentHeader = true;
           controller.enqueue(copy(header));
@@ -226,6 +312,7 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
             chunk++;
             offset += wire.length;
             if (last) {
+              cleanup();
               controller.close();
               await reader?.cancel().catch(() => {});
             }
@@ -233,14 +320,18 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
           } catch (e) {
             // Only a broken connection is retried: fetch's network TypeError, a stream error, or
             // an early end. A mismatch, a refusal or a cancellation ends the download.
-            await reader?.cancel().catch(() => {});
+            await activeReader?.cancel().catch(() => {});
             reader = undefined;
             pending = new Uint8Array(0);
-            if (abort.signal.aborted) fail('cancelled');
+            if (abort.signal.aborted) {
+              cleanup();
+              fail('cancelled');
+            }
             if (e instanceof DownloadError || retries-- <= 0) {
               // Final: abort every request of this download, including a response rejected
               // before its reader was kept.
               abort.abort();
+              cleanup();
               throw e;
             }
           }
@@ -248,23 +339,27 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
       },
       async cancel() {
         abort.abort();
-        await reader?.cancel().catch(() => {});
+        cleanup();
+        await activeReader?.cancel().catch(() => {});
       },
     },
     { highWaterMark: 0 },
   );
 }
 
+type BodyReader = Pick<ReadableStreamDefaultReader<Uint8Array>, 'read' | 'cancel'>;
+
 /** Drops the first `n` bytes; returns what came after them in the same read. */
-async function skip(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  n: number,
-): Promise<Uint8Array> {
+async function skip(reader: BodyReader, n: number, header: Uint8Array): Promise<Uint8Array> {
   // Note: a host without Range costs bandwidth on a resume, not memory.
   let left = n;
   for (;;) {
     const r = await reader.read();
     if (r.done) throw new Error('the connection ended before the resume point');
+    const at = n - left;
+    const check = Math.min(r.value.length, left, Math.max(0, header.length - at));
+    if (!equal(r.value.subarray(0, check), header.subarray(at, at + check)))
+      fail('file_mismatch', 'the host sent another header');
     if (r.value.length >= left) return r.value.subarray(left);
     left -= r.value.length;
   }

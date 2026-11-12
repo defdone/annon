@@ -2388,3 +2388,231 @@ it('marks signed Base payloads uncertain before dryRun and accepts a payment tha
   expect(accept).toHaveBeenCalledTimes(1);
   expect((await reload.snapshot()).state).toBe('accepted');
 });
+
+it.each(['evm', 'solana', 'near'] as const)(
+  'browser %s connector recovers on a fresh device, reopens, and decrypts without another payment',
+  async (kind) => {
+    const { browserEvmWallet, browserSolanaWallet, browserNearWallet } = await import(
+      '../browser/wallets.js'
+    );
+    const { ed25519 } = await import('@noble/curves/ed25519.js');
+    const { base64 } = await import('@scure/base');
+    const { nep413Hash } = await import('../near/nep413.js');
+    const rpc = await import('../near/rpc.js');
+    const { verifyAuthorization } = await import('../settle-near/identity.js');
+    const { reopenText } = await import('../near/texts.js');
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'synthetic.txt',
+      mime: 'text/plain',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    });
+    const secret = new Uint8Array(32).fill(9);
+    const publicKey = ed25519.getPublicKey(secret);
+    const signMessage = vi.fn(async (message: Uint8Array) => ({
+      signature: ed25519.sign(message, secret),
+    }));
+    let reply: unknown;
+    const transaction = vi.fn(
+      async (tx: import('../browser/wallets.js').BrowserNearTransaction) => {
+        const action = must(tx.actions[0]).functionCall;
+        const args = JSON.parse(new TextDecoder().decode(action.args));
+        reply = await h.send(action.methodName, args);
+        return { transaction: { signer_id: 'buyer.synthetic.near', hash: 'synthetic-reopen' } };
+      },
+    );
+    const nep413 = vi.fn(async (payload: import('../near/nep413.js').NearMessage) => ({
+      accountId: 'buyer.synthetic.near',
+      publicKey: `ed25519:${base58.encode(publicKey)}`,
+      signature: base64.encode(ed25519.sign(nep413Hash(payload), secret)),
+    }));
+    const recovery =
+      kind === 'evm'
+        ? browserEvmWallet(
+            {
+              request: async (q) => {
+                if (q.method === 'eth_chainId') return '0x2105';
+                if (q.method === 'eth_accounts') return [account.address];
+                if (q.method === 'personal_sign')
+                  return account.signMessage({
+                    message: { raw: must((q.params as `0x${string}`[])[0]) },
+                  });
+                throw new Error('unexpected provider call');
+              },
+            },
+            account.address,
+          )
+        : kind === 'solana'
+          ? browserSolanaWallet(
+              { publicKey: { toBytes: () => publicKey }, signMessage },
+              base58.encode(publicKey),
+            )
+          : browserNearWallet(
+              {
+                getAccounts: async () => [{ accountId: 'buyer.synthetic.near' }],
+                signMessage: nep413,
+                signAndSendTransaction: transaction,
+              },
+              'buyer.synthetic.near',
+            );
+    if (kind === 'near') {
+      vi.spyOn(rpc, 'isFullAccessKey').mockResolvedValue(true);
+      await must((recovery as import('../wallet/wallet.js').NearWallet).proveControl)(
+        'synthetic ownership proof',
+        { contractId: h.terms.contract, nearRpc: h.config.nearRpc },
+      );
+      expect(nep413).toHaveBeenCalledTimes(1);
+    }
+    const id = `0x${'78'.repeat(32)}`;
+    h.purchases.set(id, {
+      purchase_id: id,
+      file_id: h.terms.file_id,
+      terms_hash: termsHash(h.terms),
+      recovery: recovery.identity,
+      buyer_key: hex(bls.G1.Point.BASE.toBytes(true)),
+      grants: 1,
+    });
+    h.grants.set(`${id}:0`, hex(bls.G1.Point.BASE.toBytes(true)));
+    const send = vi.fn(
+      async (method: string, args: object, near?: import('../wallet/wallet.js').NearWallet) => {
+        if (method === 'reopen') {
+          const request = args as {
+            args: { purchase_id: string; fresh_key: string; nonce: string; deadline: number };
+            auth?: import('../settle-near/identity.js').Authorization;
+          };
+          if (kind !== 'near')
+            expect(
+              verifyAuthorization(
+                recovery.identity,
+                reopenText({
+                  ...request.args,
+                  contract: h.terms.contract,
+                  file_id: h.terms.file_id,
+                  recovery: recovery.identity,
+                }),
+                request.auth,
+              ),
+            ).toBe(true);
+          else {
+            await must(near).call({ receiverId: h.terms.contract, method, args });
+            return reply;
+          }
+        }
+        return h.send(method, args);
+      },
+    );
+    const fresh = new Annon({
+      ...h.config,
+      rawStore: memoryStore<EncryptedRecord>(),
+      backupSecret: newBackupSecret(),
+      send,
+    });
+    const recovered = must((await fresh.recover({ wallet: recovery, purchaseId: id }))[0]);
+    expect(recovered.grant).toBe(1);
+    expect((await fresh.open({ recovery: recovered, file: h.file })).data).toEqual(body);
+    await fresh.recover({ wallet: recovery, purchaseId: id });
+    expect(send.mock.calls.filter(([method]) => method === 'reopen')).toHaveLength(1);
+    expect(
+      send.mock.calls.some(([method]) => method === 'unlock' || method === 'ft_transfer_call'),
+    ).toBe(false);
+    if (kind === 'near') expect(transaction).toHaveBeenCalledTimes(1);
+    if (kind === 'solana') expect(signMessage).toHaveBeenCalledTimes(1);
+  },
+);
+
+it('browser controller downloads a granted file and verifies final terms and CKD release before returning plaintext', async () => {
+  const { IDBFactory } = await import('fake-indexeddb');
+  const { BrowserPurchaseController, browserPurchaseStorage, browserAnnon } = await import(
+    '../browser/purchases.js'
+  );
+  const { readPurchaseProof, verifyBuyerProof } = await import('../download/proof.js');
+  const h = harness();
+  await h.sdk.sell({
+    data: body,
+    name: 'synthetic.txt',
+    mime: 'text/plain',
+    seller: wallet,
+    near: {
+      price: '200000',
+      recipients: [{ identity: wallet.identity, bps: 10000 }],
+      remainder: wallet.identity,
+    },
+    publish: h.publish,
+  });
+  const storage = await browserPurchaseStorage({
+    factory: new IDBFactory(),
+    name: 'synthetic-download',
+  });
+  const sdk = browserAnnon(storage, h.config);
+  const payer = {
+    identity: { kind: 'near' as const, id: 'buyer.synthetic.near' },
+    authorize: async () => undefined,
+    call: vi.fn(),
+    transferPurchase: vi.fn(async (message: string) => {
+      const p = parsePurchaseMessage(message);
+      const id = purchaseId(p);
+      h.purchases.set(id, {
+        purchase_id: id,
+        file_id: p.file_id,
+        terms_hash: p.terms_hash,
+        recovery: p.recovery,
+        buyer_key: p.buyer_key,
+        grants: 1,
+      });
+      h.grants.set(`${id}:0`, p.buyer_key);
+    }),
+  };
+  const controller = await BrowserPurchaseController.create(
+    { storage, sdk, now: () => now },
+    {
+      id: 'synthetic-granted-file',
+      fileId: h.terms.file_id,
+      header: h.header,
+      resourceUrl: 'https://files.example/synthetic',
+      route: 'near-usdc',
+      maxPrice: 200000n,
+    },
+  );
+  await controller.start({ recovery: wallet, payer, refund: payer.identity });
+  await controller.resume();
+  expect((await controller.snapshot()).state).toBe('accepted');
+  const record = must((await storage.load('synthetic-granted-file'))?.purchase);
+  const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+    expect(url).toBe('https://files.example/synthetic');
+    const proof = must(readPurchaseProof(new Headers(init?.headers).get('annon-buyer-proof')));
+    expect(
+      verifyBuyerProof(
+        proof.grant === 0
+          ? record.purchase.buyer_key
+          : must(h.grants.get(`${record.id}:${proof.grant}`)),
+        String(url),
+        proof.signature,
+      ),
+    ).toBe(true);
+    expect(proof.purchase_id).toBe(record.id);
+    return new Response(new Uint8Array(h.file));
+  });
+  const result = await controller.open({ fetch });
+  expect(result).toMatchObject({ data: body, meta: { name: 'synthetic.txt', mime: 'text/plain' } });
+  expect((await controller.snapshot()).state).toBe('file_ready');
+  expect(h.calls.filter((c) => c.method === 'claim_key')).toHaveLength(1);
+  expect(payer.transferPurchase).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(await storage.load('synthetic-granted-file'))).not.toContain('"data"');
+  // Final chain terms remain authoritative even after a successful download.
+  const old = h.grants.get(`${record.id}:0`);
+  h.grants.set(`${record.id}:0`, hex(bls.G1.Point.BASE.toBytes(true)));
+  await expect(controller.open({ fetch })).rejects.toThrow(/final grant/);
+  h.grants.set(`${record.id}:0`, must(old));
+  expect((await controller.open({ fetch })).data).toEqual(body);
+  await controller.recover(wallet);
+  expect((await storage.load('synthetic-granted-file'))?.recovery?.grant).toBe(1);
+  expect((await controller.open({ fetch })).data).toEqual(body);
+  expect(payer.transferPurchase).toHaveBeenCalledTimes(1);
+});

@@ -1083,3 +1083,345 @@ it('saves the payment boundary marker before direct NEAR effects', async () => {
   });
   await c.start({ recovery: wallet, refund: fixture.refund });
 });
+
+it.each(['recover', 'open', 'poll'] as const)(
+  '%s respects another tab lease and exposes its expiry',
+  async (operation) => {
+    const h = setup();
+    const c = await h.create();
+    const before = await c.storage.load('synthetic-checkout');
+    if (!before) throw new Error('missing fixture');
+    const held = {
+      ...before,
+      revision: 1,
+      purchase: h.r,
+      state: 'accepted' as const,
+      lease: { owner: 'another-tab', expiresAt: now + 120 },
+    };
+    await c.storage.save(before, held);
+    const events: unknown[] = [];
+    c.subscribe((event) => events.push(event));
+    const poll = vi.fn();
+    const action =
+      operation === 'recover'
+        ? c.recover(wallet)
+        : operation === 'open'
+          ? c.open(new Uint8Array([1]))
+          : c.poll({ oneClick: { poll } });
+    await expect(action).rejects.toMatchObject({ code: 'lease_busy', waitUntil: now + 120 });
+    expect((await c.snapshot()).leaseWaitUntil).toBe(now + 120);
+    expect(events).toContainEqual(expect.objectContaining({ leaseWaitUntil: now + 120 }));
+    expect(await c.storage.load(before.id)).toEqual(held);
+    expect(h.sdk.recover).not.toHaveBeenCalled();
+    expect(h.sdk.open).not.toHaveBeenCalled();
+    expect(poll).not.toHaveBeenCalled();
+  },
+);
+it('resume exposes the wait after a crash without rewriting the live lease', async () => {
+  const h = setup();
+  const c = await h.create();
+  const before = await c.storage.load('synthetic-checkout');
+  if (!before) throw new Error('missing fixture');
+  await c.storage.save(before, {
+    ...before,
+    revision: 1,
+    state: 'preparing',
+    lease: { owner: 'crashed-tab', expiresAt: now + 120 },
+  });
+  const events: unknown[] = [];
+  c.subscribe((event) => events.push(event));
+  await c.resume();
+  expect(events).toContainEqual(expect.objectContaining({ leaseWaitUntil: now + 120 }));
+  expect((await c.snapshot()).revision).toBe(1);
+});
+it('requires recoveryProved at the controller payment boundary even for the saved identity', async () => {
+  const h = setup();
+  const c = await h.create();
+  const effect = vi.fn();
+  h.sdk.buy = vi.fn(async (o) => {
+    await o.beforeSave?.(h.r);
+    await o.beforePayment?.(h.r);
+    effect();
+    return { route: h.r.purchase.route, record: h.r };
+  });
+  await expect(c.start({ recovery: wallet, refund: fixture.refund })).rejects.toThrow(/proof/);
+  expect(effect).not.toHaveBeenCalled();
+});
+it.each(['message', 'buyerSecret'] as const)(
+  'restorePurchase refuses a mismatched %s',
+  async (field) => {
+    const h = setup();
+    const storage = await h.storage();
+    await storage.restorePurchase(h.r);
+    await expect(
+      storage.restorePurchase({
+        ...h.r,
+        [field]: field === 'message' ? 'wrong' : `0x${'03'.repeat(32)}`,
+      }),
+    ).rejects.toThrow(/conflict/);
+  },
+);
+it('poll keeps an expired checkout expired even when its deposit cutoff is in the future', async () => {
+  const h = setup();
+  const c = await h.create();
+  await c.start({ recovery: wallet, refund: fixture.refund });
+  const before = await c.storage.load('synthetic-checkout');
+  if (!before) throw new Error('missing fixture');
+  await c.storage.save(before, { ...before, revision: before.revision + 1, state: 'expired' });
+  await c.poll({
+    oneClick: {
+      poll: vi.fn(async (_address, options) => {
+        await options?.onProgress?.({
+          attempts: 1,
+          errors: 0,
+          lastStatus: { status: 'PENDING_DEPOSIT' },
+        } as PollCheckpoint);
+        return { status: 'PENDING_DEPOSIT' } as SwapStatus;
+      }),
+    },
+  });
+  expect((await c.snapshot()).state).toBe('expired');
+});
+it.each([true, false])(
+  'Base submission uncertain=%s has an explicit durable label',
+  async (uncertain) => {
+    const h = setup();
+    const c = await h.create();
+    const before = await c.storage.load('synthetic-checkout');
+    if (!before) throw new Error('missing fixture');
+    await c.storage.save(before, { ...before, revision: 1, route: 'base-usdc' });
+    h.sdk.buy = vi.fn(async (o) => {
+      const purchase = { ...recordForBase(), recoveryProved: true };
+      await o.beforeSave?.(purchase);
+      await o.beforePayment?.(purchase);
+      return {
+        route: 'base-usdc' as const,
+        record: purchase,
+        ...(uncertain ? { uncertain: { purchaseId: purchase.id, txHash: 'synthetic-hash' } } : {}),
+      };
+    });
+    await c.start({ recovery: wallet, refund: fixture.refund, submitBase: vi.fn() });
+    expect((await c.storage.load(before.id))?.submission).toBe(
+      uncertain ? 'uncertain' : 'submitted',
+    );
+  },
+);
+
+it('open downloads from the saved URL, retries after abort, and persists only workflow state', async () => {
+  const { seal, open, sha256 } = await import('../envelope/pay2.js');
+  const { bls12_381: bls } = await import('@noble/curves/bls12-381.js');
+  const { bytes } = await import('../settle-near/codec.js');
+  const ckdSecret = bls.G1.Point.BASE.multiply(5n).toBytes(true);
+  const data = new TextEncoder().encode('synthetic download plaintext');
+  const h = setup();
+  const seller = { kind: 'near' as const, id: 'seller.synthetic.near' };
+  const sealed = await seal(data, {
+    fileId: bytes(fixture.file_id, 32),
+    name: 'synthetic.txt',
+    mime: 'text/plain',
+    authKind: 2,
+  });
+  const wire = await sealed.finish({ contractId: fixture.contract, ckdSecret, seller });
+  const header = wire.slice(0, new DataView(wire.buffer).getUint32(8));
+  const listing = {
+    fileId: fixture.file_id,
+    cipherHash: hex(sealed.cipherHash),
+    seller,
+    publishedHeaderHash: hex(await sha256(header.subarray(0, -65))),
+  };
+  const c = await h.create();
+  const before = await c.storage.load('synthetic-checkout');
+  if (!before) throw new Error('missing fixture');
+  const purchase = {
+    ...h.r,
+    checkedHeaderHash: hex(await sha256(header)),
+    terms: {
+      ...h.r.terms,
+      seller,
+      cipherHash: listing.cipherHash,
+      headerHash: hex(await sha256(header)),
+    },
+  };
+  await c.storage.save(before, {
+    ...before,
+    revision: 1,
+    state: 'accepted',
+    header: hex(header),
+    purchase,
+  });
+  h.sdk.open = vi.fn(async (o) =>
+    open(o.file, { listing, contractId: fixture.contract, ckdSecret: async () => ckdSecret }),
+  );
+  const abort = new AbortController();
+  const pending = c.open({
+    signal: abort.signal,
+    fetch: vi.fn(async () => {
+      abort.abort();
+      return new Response(wire);
+    }),
+  });
+  await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
+  expect((await c.snapshot()).state).toBe('accepted');
+  expect(h.sdk.open).not.toHaveBeenCalled();
+  const progress: unknown[] = [];
+  const result = await c.open({
+    fetch: vi.fn(async (url) => {
+      expect(url).toBe(before.resourceUrl);
+      return new Response(wire);
+    }),
+    onProgress: (event) => progress.push(event),
+  });
+  expect(result.data).toEqual(data);
+  expect(result.meta).toMatchObject({ name: 'synthetic.txt', mime: 'text/plain' });
+  expect(progress).toContainEqual(expect.objectContaining({ phase: 'decrypting' }));
+  expect(progress).toContainEqual(expect.objectContaining({ phase: 'ready' }));
+  expect((await c.snapshot()).state).toBe('file_ready');
+  const stored = JSON.stringify(await c.storage.load(before.id));
+  expect(stored).not.toContain('synthetic download plaintext');
+  expect(stored).not.toContain(hex(ckdSecret));
+  expect(stored).not.toContain('"data"');
+  expect(h.sdk.buy).not.toHaveBeenCalled();
+});
+
+it.each(['recover', 'open', 'poll'] as const)(
+  'an active %s holds its lease through completion and releases it after failure',
+  async (operation) => {
+    const h = setup();
+    const c = await h.create();
+    await c.start({ recovery: wallet, refund: fixture.refund });
+    if (operation !== 'poll') {
+      const before = await c.storage.load('synthetic-checkout');
+      if (!before) throw new Error('missing fixture');
+      await c.storage.save(before, { ...before, revision: before.revision + 1, state: 'accepted' });
+    }
+    let release!: () => void;
+    let started!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const failure = async () => {
+      started();
+      await held;
+      throw new Error('synthetic retryable failure');
+    };
+    h.sdk.open = vi.fn(failure);
+    h.sdk.recover = vi.fn(failure);
+    const other = await h.make('synthetic-checkout');
+    const pending =
+      operation === 'recover'
+        ? c.recover(wallet)
+        : operation === 'open'
+          ? c.open(new Uint8Array([1]))
+          : c.poll({ oneClick: { poll: vi.fn(failure) } });
+    const rejected = expect(pending).rejects.toThrow('synthetic retryable failure');
+    await entered;
+    const before = await c.storage.load('synthetic-checkout');
+    await expect(other.recover(wallet)).rejects.toMatchObject({ code: 'lease_busy' });
+    await other.resume();
+    expect(await c.storage.load('synthetic-checkout')).toEqual(before);
+    release();
+    await rejected;
+    expect((await c.storage.load('synthetic-checkout'))?.lease).toBeUndefined();
+    if (operation === 'open') {
+      h.sdk.open = vi.fn(async () => ({
+        data: new Uint8Array([1]),
+        meta: { name: 'f', mime: '', size: 1 },
+      }));
+      await c.open(new Uint8Array([1]));
+      expect((await c.snapshot()).state).toBe('file_ready');
+    }
+    expect(h.sdk.buy).toHaveBeenCalledTimes(1);
+  },
+);
+it('a long open renews its lease and keeps its final write compatible with heartbeats', async () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  try {
+    let clock = now;
+    const h = setup(() => clock);
+    const c = await h.create();
+    const before = await c.storage.load('synthetic-checkout');
+    if (!before) throw new Error('missing fixture');
+    await c.storage.save(before, { ...before, revision: 1, purchase: h.r, state: 'accepted' });
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    h.sdk.open = vi.fn(async () => {
+      entered();
+      await held;
+      return { data: new Uint8Array([1]), meta: { name: 'f', mime: '', size: 1 } };
+    });
+    const pending = c.open(new Uint8Array([1]));
+    await started;
+    clock += 60;
+    await vi.advanceTimersByTimeAsync(30000);
+    await vi.waitFor(async () =>
+      expect((await c.storage.load(before.id))?.lease?.expiresAt).toBe(clock + 120),
+    );
+    release();
+    await pending;
+    expect((await c.snapshot()).state).toBe('file_ready');
+    expect((await c.storage.load(before.id))?.lease).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it('resuming a submitted Base payload preserves its submission label while acquiring a lease', async () => {
+  const h = setup();
+  const c = await h.create();
+  const before = await c.storage.load('synthetic-checkout');
+  if (!before) throw new Error('missing fixture');
+  const purchase = recordForBase();
+  purchase.attempts = [
+    {
+      attemptId: 'synthetic-attempt',
+      preparedAt: now,
+      searchFromBlock: 1,
+      validBefore: String(now + 100),
+      paymentRequired: {} as never,
+      payload: 'synthetic-signed-payload',
+    },
+  ];
+  await c.storage.save(before, {
+    ...before,
+    revision: 1,
+    route: 'base-usdc',
+    purchase,
+    state: 'payment_uncertain',
+    submission: 'submitted',
+  });
+  await c.resume();
+  expect((await c.storage.load(before.id))?.submission).toBe('submitted');
+  expect((await c.snapshot()).state).toBe('accepting');
+});
+
+it('an open whose lease expires cannot publish a final state and remains retryable', async () => {
+  let clock = now;
+  const h = setup(() => clock);
+  const c = await h.create();
+  const before = await c.storage.load('synthetic-checkout');
+  if (!before) throw new Error('missing fixture');
+  await c.storage.save(before, { ...before, revision: 1, purchase: h.r, state: 'accepted' });
+  h.sdk.open = vi.fn(async () => {
+    clock += 121;
+    return { data: new Uint8Array([1]), meta: { name: 'f', mime: '', size: 1 } };
+  });
+  await expect(c.open(new Uint8Array([1]))).rejects.toThrow(/lease expired/);
+  expect((await c.snapshot()).state).toBe('accepted');
+  h.sdk.open = vi.fn(async () => ({
+    data: new Uint8Array([1]),
+    meta: { name: 'f', mime: '', size: 1 },
+  }));
+  await c.open(new Uint8Array([1]));
+  expect((await c.snapshot()).state).toBe('file_ready');
+  expect(h.sdk.buy).not.toHaveBeenCalled();
+});
