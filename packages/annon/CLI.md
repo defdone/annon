@@ -108,7 +108,9 @@ The optional
 entry for that blockchain in 1Click's token list. Symbols such as `sUSDC` are not USDC matches. For BTC, other tokens, or ambiguous USDC
 entries, specify `--from-asset`. `--refund-to` must name a refund address on the source
 chain; it defaults to the selected wallet's address only when the chain family matches.
-These also have `ANNON_FROM_CHAIN`, `ANNON_FROM_ASSET`, `ANNON_REFUND_TO` equivalents.
+These also have `ANNON_FROM_CHAIN`, `ANNON_FROM_ASSET`, `ANNON_REFUND_TO` equivalents. Only
+`--from-chain` or `--origin` selects 1Click automatically: with `ANNON_FROM_CHAIN`, name
+`--route 1click` explicitly, or a NEAR wallet pays directly on NEAR.
 Human configuration can define named `origins`, for example `{"base-usdc":{"fromChain":"base","fromAsset":"nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near"}}`, or the same JSON in `ANNON_ORIGINS`. Select one with `--origin base-usdc`. Each may specify `refundTo`; otherwise the configured `ANNON_REFUND_TO` or matching wallet address is used.
 
 For a human 1Click purchase, the SDK saves the live EXACT_OUTPUT quote and encrypted purchase record before confirmation. The terms show the source chain, asset, symbol and token contract when known, input amount in human and base units, and deposit cutoff. No funds are sent by quoting or confirming these instructions. Recovery proof follows review. Declining buys nothing and leaves an unpaid encrypted purchase record. The same live quote supplies the returned instructions. After review and recovery proof, at least ten minutes must remain before the deposit cutoff, otherwise the CLI returns `quote_expired`: "The 1Click quote expired. Run buy again." Human terminal mode requires a prompt before requesting a quote. Explicit assets bypass token lookup; human units then use the quote's formatted amount when available.
@@ -130,8 +132,10 @@ execution time after deposit confirmation. Late delivery can be refused by Annon
 alone does not prove acceptance. `status` resumes a saved paid Base purchase by requesting unlock, then checks final NEAR acceptance. An unsafe payment returns `payment_not_safe` immediately with exit code 4 (pending); 1Click SUCCESS alone
 does not grant access.
 
-The signing wallet is also the recovery identity. `--recovery kind:id` on buy explicitly
-checks that identity against the selected wallet. Refunds from Annon itself go to that
+The signing wallet is also the recovery identity. With a local key named on the command line,
+`--recovery kind:id` on buy checks that identity against it. With a configured signer (file,
+environment, browser or remote), recovery uses `signer.identity` and `--recovery` is not currently
+enforced against it: check the saved public identity before buying. Refunds from Annon itself go to that
 wallet's Intents identity; 1Click source-chain refunds use `--refund-to`.
 For moderated files, pass `--moderator account.near` on buy only after deciding to trust
 that moderator, who can block release. A seller sets it with the same flag on sell.

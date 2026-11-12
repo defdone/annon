@@ -1,95 +1,121 @@
 # @defdone/annon
 
-The SDK and `annon` CLI encrypt files, register terms, and release file keys after verified payment. Build with `pnpm build`; in this checkout use `node packages/annon/dist/node/main.js` for `annon`. Source execution (with your TypeScript runner) reads the generated `dist/browser/login-bundle.js`; run `pnpm --filter @defdone/annon build` first. Without the bundle login gives that build instruction. See [CLI.md](CLI.md) for deployment configuration, encrypted purchase backups, and existing commands. Humans buying files should use the browser purchase flow. The CLI serves developers and agents.
+The Annon SDK and the `annon` command line tool. A seller encrypts a file into PAY2 and registers
+its terms on the Annon contract on NEAR. A buyer pays in USDC on NEAR, on Base through x402, or from
+another chain through NEAR Intents, and the contract releases the file key to the buyer alone. The
+SDK runs in Node.js and in browsers; the CLI is built on it for developers and agents. People buying
+files in a browser should use the browser purchase flow.
 
-## RPC configuration
+Protocol overview and a full walkthrough: the [repository README](https://github.com/defdone/annon/blob/master/README.md). Command
+reference: [CLI.md](CLI.md). Security model and known limits: [SECURITY.md](https://github.com/defdone/annon/blob/master/SECURITY.md).
 
-A file host, the CLI for Base purchases, and the relayer need a Base RPC endpoint with an API key. The public `https://mainnet.base.org` rate-limits the burst of reads made during settlement and unlocking. Set `baseRpc` in SDK/host options or CLI config, `ANNON_BASE_RPC` for the CLI, and `BASE_RPC` for the relayer. Keep API keys out of public files.
+## Contents
 
-A keeper polling every few seconds also needs a NEAR RPC endpoint with an API key. Set `nearRpc` in SDK/CLI config, `ANNON_NEAR_RPC` for the CLI, or `NEAR_RPC` for the relayer.
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Browser purchases](#browser-purchases)
+- [CLI browser wallet login](#cli-browser-wallet-login)
+- [Agent initialization and spending policy](#agent-initialization-and-spending-policy)
+- [Remote signer, HTTP JSON v1](#remote-signer-http-json-v1)
+- [Durable keeper](#durable-keeper)
+- [RPC configuration](#rpc-configuration)
+- [Base splits](#base-splits)
+- [Security notes](#security-notes)
 
-Base `sell` results include `baseSplit: { address, kind, salt }` beside `terms`; encrypted sell records retain it through resume and publication. To call `readSplit` later, use `address` and `{ salt }`, and reconstruct the split from `terms.near.recipients` in their saved order: recipient identity IDs, allocations equal to `bps`, `totalAllocation: 10000n`, and `distributionIncentive: 0`. This metadata is outside the on-chain terms and their hash. Older sell records do not have it.
+## Install
 
-## Browser wallet login
-
-```sh
-annon login --wallet evm
-annon login --wallet near --network near:testnet
-annon login --wallet near --no-open
-```
-
-Login proves control of your existing browser wallet. It installs no wallet key and grants no ongoing signing authority. EVM uses an injected EIP-1193 wallet on Base; NEAR uses MyNearWallet through Wallet Selector, with account-only sign-in (no `contractId` or function-call key). Every subsequent signing action opens a new local session and needs wallet approval. EVM supports `personal_sign` for the SDK's authorization texts and `eth_signTypedData_v4` for the exact EIP-3009/x402 payload. NEAR supports NEP-413 and `signAndSendTransaction`, including the required deposit `"1"` on `ft_transfer_call`. Browser/remote EVM split-deployment transactions and browser/remote Solana signing are not included; existing local-key adapters remain available for those workflows.
-
-The listener binds `127.0.0.1` on an OS-assigned port before opening the browser. Match the short pairing code with the terminal and review the action, amount, recipients, file and chain on the page before approving in the wallet. Host (including port), Origin and an unpredictable RAM-only capability are checked on action/result API calls. In open mode, a same-origin POST bootstraps that capability once into the opened page, then the bootstrap route closes; in `--no-open` mode bootstrap is disabled and the capability is available only in the printed URL fragment; it is never passed to the browser launcher in argv. Bundled scripts, a restrictive CSP, no framing, no-store and no-referrer are enforced. Actions expire after two minutes and are verified once; identical popup/opener result submissions return the same outcome; sessions close after the command or five idle minutes. Active approvals retain their own expiry, and each completed approval restarts the idle timer. A rejected/uncertain action must be reviewed at the terminal before starting another session. No wallet results are accepted without local signature checks or an independent finalized RPC outcome check.
-
-`--no-open` prints the full URL and pairing code to stderr. For SSH, forward the printed port with `ssh -L PORT:127.0.0.1:PORT host`, then open that exact URL locally. Keep the capability URL private. The page removes capabilities and NEAR redirect fragments from browser history immediately; MyNearWallet receives only a random per-action nonce as `state`. The callback posts the nonce and proof to its same-origin opener, where the capability remains in RAM; nonce matching and local signature verification are required. No capability is sent to the wallet. The callback URL is included in the signed NEP-413 hash as specified by [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md).
-
-Only public identity, network and configuration are saved in the config file. Login works before choosing a contract; NEAR ownership checks use a public mainnet/testnet RPC by default for login only. Configure and trust your reviewed deployment before other commands. Wallet/browser internals have their own storage behavior. Browser approval remains required even with `--json`; terminal prompts are disabled in that mode.
-
-## Agent initialization and spending policy
-
-Choose one signer source; secrets are referenced, never copied into configuration:
+Node.js 22 or newer.
 
 ```sh
-annon init --agent --wallet evm --recovery evm:0x1111111111111111111111111111111111111111 --key-env BOT_EVM_KEY --daily-budget 2
-annon init --agent --wallet near --near-account bot.near --near-key-file /absolute/credentials.json --daily-budget 2
-annon init --agent --wallet near --near-account bot.near --keychain-entry 'near-mainnet-bot.near/bot.near:ed25519:PUBLIC_KEY' --daily-budget 2
-annon init --agent --wallet near --near-account bot.near --new-key --keychain-entry annon-bot --daily-budget 2
-annon init --agent --signer https://signer.example --recovery evm:0x1111111111111111111111111111111111111111 --credential-env SIGNER_TOKEN --daily-budget 2
+npm i @defdone/annon@beta        # the SDK
+npm i -g @defdone/annon@beta     # the annon CLI
 ```
 
-Saved file/env signers require a public identity (`--recovery` or `--near-account`), which is checked against the loaded key. When a signer is configured, per-call `--evm-key-file`, `--near-key-file` and `--solana-key-file` overrides are refused. `--key-env` stores only an environment variable's name. EVM variables/files contain hex private keys; NEAR variables/files contain credential JSON, as in CLI.md. `--new-key` generates directly into an injectable OS-keychain interface and returns only public identity/key metadata. The shipped OS adapter supports macOS; other platforms can inject an adapter or use file/env/remote references. A new NEAR key is **not installed on-chain** by this command: the owner must authorize its public key separately. A function-call key cannot attach the one yoctoNEAR required for an FT purchase. Agent payment keys must have the authority required by that action. Tests always inject a fake keychain/process. New macOS entries use `security`’s `-T ""` ACL, removing automatic access for the creator executable. `-T ""` makes every agent-key read prompt for macOS user approval. **Never click Always Allow for agent keys**: doing so restores automatic access. A generic `security` executable cannot isolate trusted callers. Existing entries need their ACL reviewed in Keychain Access. For unattended use, choose a policy-enforcing remote signer rather than granting `security` automatic access.
-
-Agent configuration includes `agent: true`, `dailyBudget` (decimal USDC), and `signer`. Keep the deployment settings, `maxPrice`, `allowedResources` and named `origins` in that same public config. Agents never prompt; missing trust, price cap, allowlist or budget causes refusal. The full price is reserved atomically before preparing any payment/deposit instructions. UTC daily usage lives in `stateDir/budgets`, survives restarts, and is shared across chains/identities using that state directory. Concurrent writers use the file store's CAS/locking. Over-budget requests return stable `budget_exceeded`; missing policy returns `budget_required`. Reservations remain charged after failures and ambiguous outcomes; there is no automatic refund. Protect the config and state directory from changes by untrusted tools. The trusted launcher pins `ANNON_CONFIG` (or the default config path) and `ANNON_STATE_DIR` (or the configured/default state directory). Once that config has `agent: true`, per-call `--config` changes, `--state-dir`, `init`, and `login` are refused, and TTY prompts remain disabled. Launch with `ANNON_AGENT=true` to force the policy even if the config lacks `agent: true`. In this mode the pinned config is `~/.config/annon/config.json`; its saved `stateDir` (or `~/.local/share/annon`) pins the ledger. Differing `ANNON_CONFIG` and `ANNON_STATE_DIR` overrides are ignored. Custom agent config paths must be set through `ANNON_CONFIG` before initialization; alternate `init --config` paths are rejected. Human initialization must happen before handing off this launcher environment. **Limit:** an agent with shell access as the same OS user can edit config/ledgers, change environment variables, invoke the SDK directly, or use accessible signing credentials. An agent with shell access is outside this protection. CLI budgets are not a security boundary against that agent; use OS isolation and a remote signer with independent spending policy for that boundary.
-
-Before human payments the CLI confirms the current price, split recipients/remainder, resource/file, token and network. Browser mode presents these exact terms with each signing request for approval in the page and wallet. Local/remote human signing requires an explicit terminal confirmation. Purchase/recovery secrets still need the independent backup secret documented in CLI.md; login does not derive one from a signature.
-
-## Remote signer HTTP JSON v1
-
-`init --agent --signer` persists an HTTPS origin and either `--credential-env NAME` or `--credential-keychain SERVICE/ACCOUNT`. Signer origins and credential references can only be set during `init`; all per-command overrides are rejected before credential lookup. URL credentials, query/fragment tokens, plaintext credential fields and HTTP are rejected. The bearer value is read at use time and never saved or printed. Redirects are refused.
-
-A provider adapter implements:
-
-| Request | Response |
+| Entry point | Use |
 | --- | --- |
-| `GET /v1/capabilities` | `{version:1, chain, account, operations:[...]}` |
-| `POST /v1/requests` | `{version:1, id, status:"pending"\|"approved"\|"rejected", result?}` |
-| `GET /v1/requests/{id}` | Same status response; idempotent polling, no new signing |
+| `@defdone/annon` | SDK core: `Annon`, wallets, identities, terms, 1Click, encrypted stores |
+| `@defdone/annon/browser` | Browser purchase controller, downloads, wallet adapters (`dist/browser/purchase-bundle.js` is the standalone ESM bundle) |
+| `@defdone/annon/<path>` | Any module under `dist/`, for example `@defdone/annon/pay/store-node` or `@defdone/annon/relay/relay` |
 
-Every request uses `Authorization: Bearer <credential>` over HTTPS. JSON request fields are `version:1`, unique `id`, `operation`, `chain`, `account`, `expiresAt` (Unix milliseconds), `payload`, and optional `terms` (display/policy context). Integers too large for JSON numbers are decimal strings; nonces are byte arrays. IDs may never be reused for a different exact request. Repeated POSTs must return the same job, including during approval. Expired, rejected and mismatched responses are refused locally. Transport failure does not authorize a new signing request. The client discovers capabilities before posting, retries lost create responses with the same immutable ID/payload (up to three attempts), and polls that ID every second until its deadline. HTTP refusals do not trigger retries.
+### From source
 
-| Operation | Exact payload | Approved result |
-| --- | --- | --- |
-| `evm.personalSign` | `{message}`: literal SDK authorization text | `{signature}`: 65-byte hex EIP-191 signature |
-| `evm.signTypedData` | EIP-712 `{domain,types,primaryType,message}` | `{signature}`: checked against the domain/chain and selected account |
-| `near.nep413` | `{message,recipient,nonce,callbackUrl?}` | `{accountId,publicKey,signature}`: base64 Ed25519 signature, checked with final full-access membership |
-| `near.signTransaction` | `{receiverId,method,args,gas,deposit,transaction}`; `transaction` is the exact unsigned Borsh bytes in base64 | `{signedTransaction}`: signed Borsh bytes in base64; exact bytes, fields, signature and final full-access key membership are checked before submission |
+Build with `pnpm build`. In a checkout, run `node packages/annon/dist/node/main.js` in place of
+`annon`. Running the source with a TypeScript runner reads the generated
+`dist/browser/login-bundle.js`, so run `pnpm --filter @defdone/annon build` first; without the bundle,
+`annon login` prints that build instruction.
 
-Chains are `eip155:8453` for the supported EVM payment route and `near:mainnet`/`near:testnet` for NEAR. Remote NEAR transaction configuration also needs `signer.publicKey` (`--near-public-key` during init), so the CLI constructs the exact nonce/block/actions before approval. Providers must apply their own independent policy to these semantic operations; discovery is not permission to sign arbitrary bytes. The browser bridge returns `{txHash}` for wallet-submitted NEAR calls; the CLI independently checks the final signer, receiver, single action, args, gas and deposit through RPC. No returned transaction hash alone proves success. Definite mismatches or failed finalized transactions are rejected without saving the supplied hash as `nearSubmission` evidence; only RPC unavailability or a non-final status retains uncertainty. If submission or finalized verification is ambiguous, the CLI returns `state: "uncertain"`, `purchaseId` and `txHash`, and retains `nearSubmission: {state:"uncertain",txHash}` in the encrypted purchase backup. Check status for that saved purchase before buying again. Signing errors with a known hash also expose safe hash/purchase evidence and exit code 4.
+## Quick start
 
-`node/signer-mock` exports `signerMock`, a reference authenticated HTTP `Request -> Response` handler with injected approval/signing, duplicate-ID claims, immutable request checks, and `decide(id, result)` for pending approvals. Use it in tests or wrap it in your provider's HTTPS server. It keeps jobs in RAM and is not a production durable signer. Production adapters must persist idempotency state and provide an approval/status UI as appropriate. See `node/signing.test.ts` for fake-key examples; no provider credentials or real signing service are needed by tests.
+The shortest path is the CLI: the [repository README](https://github.com/defdone/annon/blob/master/README.md#from-the-command-line) buys,
+opens and recovers a demo file in a few commands, and [CLI.md](CLI.md) covers configuration,
+encrypted purchase backups and every command.
 
-## Durable keeper
+In code, an `Annon` instance needs a deployment, a durable record store, a persisted backup secret, a
+place to write encrypted backups, and a transport for contract calls. In Node, with a NEAR account
+that signs its own calls:
 
-`keep` is exported from `@defdone/annon/relay/relay`. Supply a stable `network` (`near:mainnet`, `near:testnet` or `near:sandbox`), a dedicated account/key, durable `store` and `budgetStore`, hourly/daily yoctoNEAR budgets, and a maximum gas price. For Node, create private directories and use `fileStore<KeeperRecord>` and `fileStore<BudgetRecord>`. See the [relayer README](../../apps/relayer/README.md) for environment configuration.
+```ts
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { Annon, nearKeyPairWallet, storageDeposit } from '@defdone/annon';
+import { fileStore } from '@defdone/annon/pay/store-node';
 
-Discovery reads `open_delivery_count` and `list_open_deliveries` against one finalized block. The block/count/cursor are persisted across bounded passes (default 20 pages of 50). A new finalized snapshot begins after each complete sweep, covering swap-removals and later materializations without a historical-ID eligibility cap. Before sending, current finalized state is re-read. `settle` uses 600 Tgas while unfunded, 450 Tgas when funded. InFlight funding/slots are never reset or newly submitted. Calls for other pending slots can proceed; the contract guards InFlight slots.
+const contractId = 'v1.annon.defdone.near';
+const stateDir = '/absolute/private/annon-state';
+const backups = join(stateDir, 'backups');
+for (const dir of [join(stateDir, 'records'), backups])
+  await mkdir(dir, { recursive: true, mode: 0o700 });
 
-Signed bytes/hash, signer and the reference block hash/height are persisted before sending. The retained reference height permits expiry checks even after the RPC garbage-collects that block. Inclusion is uncertainty, not success: outstanding submissions remain monitored even after open-index retirement. Retry counts/deadlines live per network/contract/delivery/funding phase or payment slot. RPC changes preserve both jobs and network/account gas reservations. Successful finalized trusted-executor `funding_failed`/`payment_failed` events and current state distinguish failures, partial progress and InFlight uncertainty. Delay is 1, 2, 4, 8, 16, then 30 minutes, with ±10% jitter; only verified funding/slot progress clears its delay. A shared contract/dependency breaker slows pause/locked-sender failures and permits a probe after its deadline. Separate account/key queues keep relay traffic independent.
+// 64 hex characters (32 random bytes), created once with a cryptographic generator and kept
+// outside the repository. Records and backups are unreadable without it.
+const backupSecret = Buffer.from(
+  (await readFile('/absolute/private/annon-backup-secret', 'utf8')).trim(),
+  'hex',
+);
 
-Gas reservations use twice the attached gas times the configured price ceiling, with no automatic reimbursement. Current gas price must be within the ceiling before signing. Hourly/daily UTC reservations persist across restarts; uncertain operations retain their reservation. Refund materialization additionally reserves `storagePerRefund` (default 0.04096 NEAR) against the same spending limits. These are conservative caps, not measured gas burn. Bounds default to 20 new transactions and 50 unresolved submissions; refund sources reserve half of a pass for refund work. Storage on the contract must already be prepaid. Monitor `reserve_low`, `in_flight`, `uncertain` and breaker alerts; `reserveLowWater` is configurable. Reserve exhaustion creates refund leaves that the open index cannot discover.
+// `account` is a near-api-js Account for your NEAR account.
+const near = nearKeyPairWallet(account);
 
-Refund automation accepts a pluggable `RefundSource.leaves({nearRpc,contractId,limit})` returning current `MaterializeRefundArgs` (leaf/index/32-sibling proof). It calls the SDK `materializeRefund` binding with deposit zero to spend prepaid storage. No indexer/archive integration is bundled. The operator must provide complete durable leaf history and refresh proofs before the last-32-root window expires. Without a source, keep services open deliveries only. A permanently paused/locked dependency or an uncertain InFlight callback cannot be repaired by retries. For an unknown transaction the keeper checks its signed nonce against the keeper access key at a finalized block, and its reference block height against that finalized height and the protocol transaction validity period plus a two-block margin. Age-based retirement requires `final.height - ref.height > transaction_validity_period + 2`. A consumed nonce or expired block hash makes the transaction unable to land: finalized delivery state is re-read, the hash is cleared by CAS, backoff is saved and unresolved capacity is released. Otherwise only the same durable bytes may be resent, while no affected step is InFlight. Unavailable or malformed validity evidence leaves the transaction tracked. Older records without a retained reference height need an RPC that can still serve that block, unless the finalized key nonce already proves the transaction cannot land. The validity period is measured in blocks, as described by [nearcore](https://near.github.io/nearcore/architecture/how/tx_routing.html). Do not share one signing key across independent processes; use independent funded keeper accounts and RPC infrastructure.
+const annon = new Annon({
+  contractId,
+  network: 'near:mainnet',
+  nearRpc: 'https://rpc.mainnet.fastnear.com',
+  baseRpc: process.env.BASE_RPC!, // an endpoint with an API key, see RPC configuration
+  rawStore: fileStore(join(stateDir, 'records')),
+  backupSecret,
+  writeBackup: (name, encrypted) =>
+    writeFile(join(backups, encodeURIComponent(name)), encrypted, { mode: 0o600 }),
+  // Contract calls (register, claim_key, reopen and others) are signed by the call's NEAR owner,
+  // or by your account when the caller is not a NEAR wallet.
+  send: (method, args, owner) => (owner ?? near).call({ receiverId: contractId, method, args }),
+});
 
-The browser build fails if a post-build scan of emitted JavaScript detects `eval`, `Function` construction/calls or string-argument timers. CSP compatibility is also checked statically against the actual built minified bundle and the HTTP page/CSP header: no dynamic `eval`/`Function` calls, string timers, inline scripts or HTML event handlers are allowed. The browser build removes legacy dynamic-code fallbacks from the pinned Wallet Selector and js-sha256 copies, with guards that require review when their source changes. VM tests disable string/Wasm code generation and exercise fake wallet flows. **Real-browser execution was not tested.** Tests never launch browsers or GUI applications and always stub the login opener; no real wallet, RPC, transaction or Keychain is used.
+// Direct calls use your prepaid storage balance on the contract. Fund it once, with an amount you
+// choose (yoctoNEAR); insufficient storage is reported as `storage_required`.
+await storageDeposit(near, contractId, 100_000_000_000_000_000_000_000n);
+```
+
+`annon.sell`, `annon.buy`, `annon.open`, `annon.openTo` and `annon.recover` then drive listings and
+purchases with the wallet you pass in (`evmWallet`, `solanaWallet`, `nearKeyPairWallet`,
+`nearSelectorWallet`). Without `send`, a call whose signer is not a NEAR wallet fails with
+"configure a transaction transport for relayed calls".
+
+For sponsored calls through a relayer instead of your own NEAR account, `send` posts to the
+relayer's `/v1/relay` endpoint and waits for its result. The CLI's adapter,
+[`packages/annon/src/node/adapter.ts`](https://github.com/defdone/annon/blob/master/packages/annon/src/node/adapter.ts),
+implements that transport and is the complete reference integration, including trust, prompts and
+backups.
 
 ## Browser purchases
 
-Import the headless purchase controller from `@defdone/annon/browser`. A seller supplies its own screen, verified offer and wallet adapters. There is no hosted checkout. `dist/browser/purchase-bundle.js` is a standalone browser ESM bundle, built with the same CSP checks as the CLI approval bridge.
+Import the headless purchase controller from `@defdone/annon/browser`. A seller or marketplace
+supplies its own screen, a verified offer and wallet adapters. There is no hosted checkout.
+`dist/browser/purchase-bundle.js` is built with the same CSP checks as the CLI approval bridge.
 
 ```ts
 import {
   browserAnnon,
+  browserEvmWallet,
   browserPurchaseStorage,
   BrowserPurchaseController,
 } from '@defdone/annon/browser';
@@ -107,14 +133,423 @@ const controller = await BrowserPurchaseController.create({ storage, sdk }, {
 controller.subscribe(renderProgress);
 await controller.start({ recovery: recoveryWallet, refund: refundIdentity, origin });
 const instructions = await controller.instructions();
+
+// Later, once the purchase is accepted:
+const { meta, data } = await controller.open({ onProgress: renderDownload });
 ```
 
-Use a stable, caller-owned checkout ID for each terms review. Creation refuses an existing ID. After a reload, construct `new BrowserPurchaseController({ storage, sdk, id })` and call `resume()`. Never call `buy()` or create another checkout to resume an uncertain payment. `storage.list()` supplies the purchases list. A renewable two-minute lease protects active preparations across tabs. After an expired lease, an unsigned preparation that never reached the payment boundary becomes `abandoned`; the UI may explicitly create a fresh checkout ID. Signed Base payloads and purchases that crossed the payment boundary remain resumable and must never be replaced. Base starts require `submitBase`; signed payloads become uncertain before the SDK dry run. `snapshot()` and progress events contain public metadata; persistence records contain private recovery material. `instructions()` releases only a saved, proved 1Click quote with the required time margin.
+### Checkouts, reloads and tabs
 
-Use `OneClick.tokens()` and `originFromToken(tokens, assetId, blockchain, refundTo)` for exact source selection. Supported sources are the explicitly listed EVM chains, Solana and NEAR. Catalog selection refuses unsupported families and slow chains. Legacy caller-specified origins in the other family retain the existing nonempty, whitespace-free refund validation. NEAR catalog selections explicitly request `ORIGIN_CHAIN` refunds. Legacy direct `quote()` callers keep their existing NEAR `INTENTS` default. A 1Click source refund and an Annon rejection refund are different obligations. The latter remains in NEAR Intents.
+- Use a stable, caller-owned checkout ID for each terms review. Creation refuses an existing ID.
+- After a reload, construct `new BrowserPurchaseController({ storage, sdk, id })` and call
+  `resume()`. Never call `buy()` or create another checkout to resume an uncertain payment.
+- `storage.list()` supplies the purchases list.
+- A renewable two-minute lease protects an active checkout across tabs. `poll`, `recover` and `open`
+  refuse a live lease held by another tab with `PurchaseLeaseBusy` (code `lease_busy`, with
+  `waitUntil`); `resume` returns without writing. `snapshot()` and progress events carry
+  `leaseWaitUntil` (Unix seconds) so the page can say why it is waiting, for example after a crashed
+  tab.
+- After an expired lease, an unsigned preparation that never reached the payment boundary becomes
+  `abandoned`; the UI may then explicitly create a fresh checkout ID. Signed Base payloads and
+  purchases that crossed the payment boundary remain resumable and must never be replaced.
+- Base starts require `submitBase`. Signed payloads become uncertain before the SDK dry run.
+- `snapshot()` and progress events contain public metadata only; persistence records contain private
+  recovery material.
+- `instructions()` releases only a saved, proved 1Click quote with the required time margin.
 
-`OneClick.preview()` returns amounts and timing without a deposit address. `poll()` awaits progress callbacks, saves memo-aware checkpoints and retries transport errors and rate limits with backoff. The controller persists checkpoints automatically. Polling remains available after expiry to track late deposits and refunds; expiry never extends the purchase or permits a new deposit. `SUCCESS` still requires contract acceptance.
+### Paying from another chain (1Click)
 
-Each workflow is stored in its own encrypted IndexedDB record, with a small metadata index committed atomically alongside it. Index contention retries without weakening purchase revision checks. Latest purchase and recovery snapshots are retained alongside every recovery revision archive created before an expired key is replaced. Portable receipts carry those archives too. The local random backup secret is persisted in IndexedDB for reload recovery. It protects encrypted storage from accidental disclosure, and shares the embedding page's trust boundary. Export with `controller.exportReceipt(portableSecret)` using a separate random 32-byte `newBackupSecret()`, and retain that secret separately. Import with `storage.importReceipt(file, portableSecret)`. Import restores the header, resource URL and recovery records and requires a fresh recovery proof before releasing deposit instructions. IndexedDB failures and stale writes reject before payment effects.
+- Use `OneClick.tokens()` and `originFromToken(tokens, assetId, blockchain, refundTo)` for exact
+  source selection. Supported sources are the explicitly listed EVM chains, Solana and NEAR.
+- Catalog selection refuses unsupported families and slow chains. Legacy caller-specified origins in
+  the other family keep the existing nonempty, whitespace-free refund validation.
+- NEAR catalog selections explicitly request `ORIGIN_CHAIN` refunds. Legacy direct `quote()` callers
+  keep their existing NEAR `INTENTS` default.
+- A 1Click source refund and an Annon rejection refund are different obligations. The latter stays
+  in NEAR Intents.
+- `OneClick.preview()` returns amounts and timing without a deposit address.
+- `poll()` awaits progress callbacks, saves memo-aware checkpoints and retries transport errors and
+  rate limits with backoff. The controller persists checkpoints automatically.
+- Polling remains available after expiry to track late deposits and refunds. Expiry never extends
+  the purchase or permits a new deposit. `SUCCESS` still requires contract acceptance.
 
-For accepted purchases, `recover(wallet)` resumes recovery and `open(file)` delegates a caller-supplied PAY2 file to the existing SDK. `file_ready` records successful opening; plaintext is never persisted. Browser downloads, file size limits, saving and wallet connectors are separate integrations.
+### Storage and receipts
+
+- Each checkout is stored in its own encrypted IndexedDB record, with a small metadata index
+  committed atomically alongside it. Index contention retries without weakening purchase revision
+  checks.
+- Latest purchase and recovery snapshots are kept alongside every recovery revision archive created
+  before an expired key is replaced. Portable receipts carry those archives too.
+- The local random backup secret is persisted in IndexedDB for reload recovery. It protects
+  encrypted storage from accidental disclosure and shares the embedding page's trust boundary.
+- Export with `controller.exportReceipt(portableSecret)`, using a separate random 32-byte
+  `newBackupSecret()` that you keep separately. Import with
+  `storage.importReceipt(file, portableSecret)`. Import restores the header, resource URL and
+  recovery records, and requires a fresh recovery proof before releasing deposit instructions.
+- IndexedDB failures and stale writes reject before any payment effect.
+
+### Downloading and opening
+
+- `recover(wallet)` resumes recovery of an accepted purchase on a new device.
+- `open()` downloads the PAY2 file from the saved resource URL with the buyer's grant proof. It
+  checks the header against the one pinned before payment and each chunk against that header while
+  downloading; the SDK then checks the on-chain listing and grant before it decrypts in memory.
+  `open(bytes)` opens a PAY2 file the page already has.
+- The result is `{ meta, data }`. Plaintext and file keys are never written to storage; the record
+  only moves to `file_ready`.
+- Browser decryption is capped at `BROWSER_DOWNLOAD_LIMIT`, 50 MiB of PAY2 bytes including the
+  header. A known larger size is refused before downloading, and a stream that passes the cap is
+  aborted. Both raise `DownloadError` with code `too_large`; use the CLI for larger files.
+- Pass `signal` to cancel and `onProgress` to follow the `downloading`, `decrypting` and `ready`
+  phases. A failed or cancelled download leaves the purchase accepted, so `open` can be retried
+  without paying again.
+- `browserDownload` is the same bounded, proof-authorized download without the controller.
+
+### Wallet adapters
+
+The adapters wrap the provider object a page already has. The SDK imports no wallet library.
+
+| Adapter | Provider | Used for |
+| --- | --- | --- |
+| `browserEvmWallet(provider, address)` | EIP-1193 `request` (MetaMask, Coinbase Wallet and others) | Recovery signatures with `personal_sign` on any chain; Base x402 payments with `eth_signTypedData_v4`, after checking or requesting a switch to Base |
+| `browserSolanaWallet(provider, address)` | Injected `publicKey` and `signMessage` | Recovery signatures |
+| `browserNearWallet(provider, accountId)` | NEAR Wallet Selector style: required `getAccounts`, `signMessage` (NEP-413) and `signAndSendTransaction` | Recovery signatures and USDC payments on the NEAR route |
+
+Each adapter checks what the wallet returns: the signature is verified against the expected
+identity, the account is still the selected one, and Base payments are signed for chain 8453.
+Failures raise `BrowserWalletError` with a code a page can show: `rejected`, `wrong_chain`,
+`wrong_identity`, `invalid_signature`, `missing_method`, `invalid_response` or `wallet_error`.
+
+## CLI browser wallet login
+
+```sh
+annon login --wallet evm
+annon login --wallet near --network near:testnet
+annon login --wallet near --no-open
+```
+
+Login proves control of a browser wallet you already use. It installs no wallet key and grants no
+ongoing signing authority. Every later signing action opens a new local session and needs approval
+in the wallet.
+
+| Wallet | How | Signing supported |
+| --- | --- | --- |
+| EVM | Injected EIP-1193 wallet on Base | `personal_sign` for the SDK's authorization texts, `eth_signTypedData_v4` for the exact EIP-3009/x402 payload |
+| NEAR | MyNearWallet through Wallet Selector, account-only sign-in (no `contractId`, no function-call key) | NEP-413 and `signAndSendTransaction`, including the required deposit `"1"` on `ft_transfer_call` |
+
+Browser and remote EVM split-deployment transactions and browser and remote Solana signing are not
+included; the local-key adapters remain available for those workflows.
+
+**The local page.** The listener binds `127.0.0.1` on an OS-assigned port before opening the browser.
+Match the short pairing code with the terminal, and review the action, amount, recipients, file and
+chain on the page before approving in the wallet.
+
+- Host (including port), Origin and an unpredictable RAM-only capability are checked on action and
+  result API calls.
+- In open mode, a same-origin POST bootstraps the capability once into the opened page, then the
+  bootstrap route closes. With `--no-open`, bootstrap is disabled and the capability exists only in
+  the printed URL fragment. It is never passed to the browser launcher in argv.
+- Bundled scripts, a restrictive CSP, no framing, `no-store` and `no-referrer` are enforced.
+- Actions expire after two minutes and are verified once. Identical popup and opener result
+  submissions return the same outcome.
+- Sessions close after the command or after five idle minutes. Active approvals keep their own
+  expiry, and each completed approval restarts the idle timer.
+- A rejected or uncertain action must be reviewed at the terminal before another session starts.
+- No wallet result is accepted without a local signature check or an independent finalized RPC
+  outcome check.
+
+**Remote machines.** `--no-open` prints the full URL and pairing code to stderr. Over SSH, forward
+the printed port with `ssh -L PORT:127.0.0.1:PORT host` and open that exact URL locally. Keep the
+capability URL private.
+
+**NEAR redirects.** The page removes capabilities and NEAR redirect fragments from browser history
+immediately. MyNearWallet receives only a random per-action nonce as `state`. The callback posts the
+nonce and proof to its same-origin opener, where the capability stays in RAM; nonce matching and
+local signature verification are required. No capability is sent to the wallet. The callback URL is
+included in the signed NEP-413 hash, as [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md)
+specifies.
+
+**What is saved.** Only public identity, network and configuration go into the config file. Login
+works before you choose a contract; NEAR ownership checks use a public mainnet or testnet RPC by
+default, for login only. Configure and trust your reviewed deployment before other commands. Wallet
+and browser internals have their own storage behaviour. Browser approval is still required with
+`--json`; terminal prompts are disabled in that mode.
+
+## Agent initialization and spending policy
+
+Choose one signer source. Secrets are referenced, never copied into configuration:
+
+```sh
+annon init --agent --wallet evm --recovery evm:0x1111111111111111111111111111111111111111 --key-env BOT_EVM_KEY --daily-budget 2
+annon init --agent --wallet near --near-account bot.near --near-key-file /absolute/credentials.json --daily-budget 2
+annon init --agent --wallet near --near-account bot.near --keychain-entry 'near-mainnet-bot.near/bot.near:ed25519:PUBLIC_KEY' --daily-budget 2
+annon init --agent --wallet near --near-account bot.near --new-key --keychain-entry annon-bot --daily-budget 2
+annon init --agent --signer https://signer.example --recovery evm:0x1111111111111111111111111111111111111111 --credential-env SIGNER_TOKEN --daily-budget 2
+```
+
+### Signer sources
+
+- Saved file and environment signers require a public identity (`--recovery` or `--near-account`),
+  which is checked against the loaded key.
+- When a signer is configured, per-call `--evm-key-file`, `--near-key-file` and `--solana-key-file`
+  overrides are refused.
+- `--key-env` stores only an environment variable's name. EVM variables and files contain hex
+  private keys; NEAR variables and files contain credential JSON, as in CLI.md.
+- `--new-key` generates directly into an injectable OS keychain interface and returns only public
+  identity and key metadata. The shipped OS adapter supports macOS; other platforms can inject an
+  adapter or use file, environment or remote references. Tests always inject a fake keychain and
+  process.
+- A new NEAR key is **not installed on-chain** by this command: the owner must authorize its public
+  key separately. A function-call key cannot attach the one yoctoNEAR required for an FT purchase.
+  Agent payment keys must have the authority the action requires.
+
+**macOS Keychain.** New entries use `security`'s `-T ""` ACL, which removes automatic access for the
+creator executable, so every agent key read prompts for macOS user approval. **Never click Always
+Allow for agent keys**: doing so restores automatic access. A generic `security` executable cannot
+isolate trusted callers. Review the ACL of existing entries in Keychain Access. For unattended use,
+choose a policy-enforcing remote signer rather than granting `security` automatic access.
+
+### Spending policy
+
+Agent configuration includes `agent: true`, `dailyBudget` (decimal USDC), `signer` and `workDir`, a
+directory the owner creates and every agent file path must stay inside (`work_dir_required` without
+it). Keep the deployment settings, `maxPrice`, `allowedResources`, named `origins` and trusted
+`moderators` in that same public config.
+
+Order matters, because agent mode refuses `init`, `login` and per-call trust or deployment flags:
+
+1. Create the working directory.
+2. Write the deployment, `maxPrice`, `workDir` and, after reviewing the contract,
+   `trustContract: true` (or trust it once with a human command and `--trust-contract`). Do not set
+   `agent: true` yourself.
+3. Run one `annon init --agent ...` from the examples above. It saves the signer, the daily budget
+   and `agent: true`.
+
+- Agents never prompt. Missing trust, price cap or daily budget causes a refusal.
+- `allowedResources` is optional. Without it, any secure resource URL is allowed within the
+  spending limits; an empty list denies every purchase.
+- The full price is reserved atomically before any payment or deposit instructions are prepared.
+- UTC daily usage lives in `stateDir/budgets`, survives restarts, and is shared across chains and
+  identities that use that state directory. Concurrent writers use the file store's CAS and locking.
+- Over-budget requests return `budget_exceeded`; missing policy returns `budget_required`.
+- NEAR and Base reservations stay charged after failures and ambiguous outcomes. A 1Click failure
+  before deposit instructions are returned releases its reservation; returned instructions keep it
+  reserved. There is no other automatic refund.
+
+### Pinning the configuration
+
+Protect the config and state directory from changes by untrusted tools. The trusted launcher pins
+`ANNON_CONFIG` (or the default config path) and `ANNON_STATE_DIR` (or the configured or default state
+directory).
+
+- Once that config has `agent: true`, per-call `--config` changes, `--state-dir`, `init` and `login`
+  are refused, and TTY prompts stay disabled.
+- Launch with `ANNON_AGENT=true` to force the policy even if the config lacks `agent: true`. In this
+  mode the pinned config is `~/.config/annon/config.json`, and its saved `stateDir` (or
+  `~/.local/share/annon`) pins the ledger. A differing `ANNON_CONFIG` is an error
+  (`config_conflict`); `ANNON_STATE_DIR` is ignored, and the saved configuration or the default
+  owns the ledger location.
+- Custom agent config paths must be set through `ANNON_CONFIG` before initialization; alternate
+  `init --config` paths are rejected. Human initialization must happen before handing off this
+  launcher environment.
+
+**Limit.** An agent with shell access as the same OS user can edit config and ledgers, change
+environment variables, call the SDK directly or use accessible signing credentials. It is outside
+this protection, and CLI budgets are not a security boundary against it. Use OS isolation and a
+remote signer with its own spending policy for that boundary.
+
+### Human payments
+
+Before a human payment the CLI confirms the current price, split recipients and remainder, resource
+and file, token and network. Browser mode shows these exact terms with each signing request for
+approval in the page and the wallet. Local and remote human signing require an explicit terminal
+confirmation. Purchase and recovery secrets still need the independent backup secret described in
+CLI.md; login does not derive one from a signature.
+
+## Remote signer, HTTP JSON v1
+
+`init --agent --signer` persists an HTTPS origin and either `--credential-env NAME` or
+`--credential-keychain SERVICE/ACCOUNT`.
+
+- Signer origins and credential references can only be set during `init`. Every per-command
+  override is rejected before credential lookup.
+- URL credentials, query or fragment tokens, plaintext credential fields and HTTP are rejected.
+  Redirects are refused.
+- The bearer value is read at use time and never saved or printed.
+
+A provider adapter implements:
+
+| Request | Response |
+| --- | --- |
+| `GET /v1/capabilities` | `{version:1, chain, account, operations:[...]}` |
+| `POST /v1/requests` | `{version:1, id, status:"pending"\|"approved"\|"rejected", result?}` |
+| `GET /v1/requests/{id}` | Same status response; idempotent polling, no new signing |
+
+Every request uses `Authorization: Bearer <credential>` over HTTPS. JSON request fields are
+`version:1`, a unique `id`, `operation`, `chain`, `account`, `expiresAt` (Unix milliseconds),
+`payload`, and optional `terms` (display and policy context). Integers too large for JSON numbers are
+decimal strings; nonces are byte arrays.
+
+- An ID is never reused for a different exact request. Repeated POSTs must return the same job,
+  including during approval.
+- Expired, rejected and mismatched responses are refused locally. A transport failure does not
+  authorize a new signing request.
+- The client discovers capabilities before posting, retries a lost create response with the same
+  immutable ID and payload (up to three attempts), and polls that ID every second until its
+  deadline. HTTP refusals are not retried.
+
+| Operation | Exact payload | Approved result |
+| --- | --- | --- |
+| `evm.personalSign` | `{message}`: literal SDK authorization text | `{signature}`: 65-byte hex EIP-191 signature |
+| `evm.signTypedData` | EIP-712 `{domain,types,primaryType,message}` | `{signature}`: checked against the domain, chain and selected account |
+| `near.nep413` | `{message,recipient,nonce,callbackUrl?}` | `{accountId,publicKey,signature}`: base64 Ed25519 signature, checked with final full-access membership |
+| `near.signTransaction` | `{receiverId,method,args,gas,deposit,transaction}`; `transaction` is the exact unsigned Borsh bytes in base64 | `{signedTransaction}`: signed Borsh bytes in base64; exact bytes, fields, signature and final full-access key membership are checked before submission |
+
+Chains are `eip155:8453` for the supported EVM payment route and `near:mainnet` or `near:testnet` for
+NEAR. Remote NEAR transaction configuration also needs `signer.publicKey` (`--near-public-key`
+during init), so the CLI builds the exact nonce, block and actions before approval. Providers must
+apply their own independent policy to these semantic operations; discovery is not permission to
+sign arbitrary bytes.
+
+**Transaction outcomes.** The browser bridge returns `{txHash}` for wallet-submitted NEAR calls, and
+the CLI independently checks the final signer, receiver, single action, args, gas and deposit through
+RPC. A returned transaction hash alone never proves success.
+
+- Definite mismatches and failed finalized transactions are rejected without saving the hash as
+  `nearSubmission` evidence. Only RPC unavailability or a non-final status keeps the outcome
+  uncertain.
+- If submission or finalized verification is ambiguous, the CLI returns `state: "uncertain"`,
+  `purchaseId` and `txHash`, and keeps `nearSubmission: {state:"uncertain",txHash}` in the encrypted
+  purchase backup. Check status for that saved purchase before buying again.
+- Signing errors with a known hash also expose safe hash and purchase evidence, with exit code 4.
+
+**Reference handler.** `node/signer-mock` exports `signerMock`, an authenticated HTTP
+`Request -> Response` handler with injected approval and signing, duplicate-ID claims, immutable
+request checks, and `decide(id, result)` for pending approvals. Use it in tests or wrap it in your
+provider's HTTPS server. It keeps jobs in RAM and is not a durable production signer: production
+adapters must persist idempotency state and provide an approval and status UI as appropriate. See
+[`node/signing.test.ts`](https://github.com/defdone/annon/blob/master/packages/annon/src/node/signing.test.ts) for fake-key examples; tests need no provider credentials or real signing
+service.
+
+## Durable keeper
+
+`keep` is exported from `@defdone/annon/relay/relay`. Supply a stable `network` (`near:mainnet`,
+`near:testnet` or `near:sandbox`), a dedicated account and key, durable `store` and `budgetStore`,
+hourly and daily yoctoNEAR budgets, and a maximum gas price. In Node, create private directories and
+use `fileStore<KeeperRecord>` and `fileStore<BudgetRecord>`. Environment configuration is in the
+[relayer README](https://github.com/defdone/annon/blob/master/apps/relayer/README.md).
+
+### Discovery and settlement
+
+- Discovery reads `open_delivery_count` and `list_open_deliveries` against one finalized block. The
+  block, count and cursor are persisted across bounded passes (default 20 pages of 50).
+- A new finalized snapshot begins after each complete sweep. This covers swap-removals and later
+  materializations without a historical-ID eligibility cap.
+- Current finalized state is re-read before sending. `settle` uses 600 Tgas while unfunded and 450
+  Tgas when funded.
+- InFlight funding and slots are never reset or newly submitted. Calls for other pending slots can
+  proceed; the contract guards InFlight slots.
+
+### Submissions and retries
+
+- Signed bytes and hash, signer, and the reference block hash and height are persisted before
+  sending. The retained reference height permits expiry checks even after the RPC garbage-collects
+  that block.
+- Inclusion is uncertainty, not success: outstanding submissions stay monitored even after
+  open-index retirement.
+- Retry counts and deadlines live per network, contract, delivery, funding phase or payment slot.
+  RPC changes preserve both jobs and network and account gas reservations.
+- Successful finalized trusted-executor `funding_failed` and `payment_failed` events, together with
+  current state, distinguish failures, partial progress and InFlight uncertainty.
+- Delay is 1, 2, 4, 8, 16, then 30 minutes, with ±10% jitter. Only verified funding or slot progress
+  clears its delay.
+- A shared contract and dependency breaker slows pause and locked-sender failures and permits a probe
+  after its deadline. Separate account and key queues keep relay traffic independent.
+
+### Spending limits
+
+- Gas reservations use twice the attached gas times the configured price ceiling, with no automatic
+  reimbursement. The current gas price must be within the ceiling before signing.
+- Hourly and daily UTC reservations persist across restarts; uncertain operations keep their
+  reservation.
+- Refund materialization also reserves `storagePerRefund` (default 0.04096 NEAR) against the same
+  limits.
+- These are conservative caps, not measured gas burn. Bounds default to 20 new transactions and 50
+  unresolved submissions; refund sources reserve half of a pass for refund work.
+- Storage on the contract must already be prepaid. Monitor `reserve_low`, `in_flight`, `uncertain`
+  and breaker alerts; `reserveLowWater` is configurable. Reserve exhaustion creates refund leaves
+  that the open index cannot discover.
+
+### Refunds
+
+Refund automation accepts a pluggable `RefundSource.leaves({nearRpc,contractId,limit})` that returns
+current `MaterializeRefundArgs` (leaf, index and 32-sibling proof). It calls the SDK
+`materializeRefund` binding with deposit zero to spend prepaid storage.
+
+- No indexer or archive integration is bundled. The operator must provide complete durable leaf
+  history and refresh proofs before the last-32-root window expires. Without a source, `keep`
+  services open deliveries only.
+- A permanently paused or locked dependency, or an uncertain InFlight callback, cannot be repaired by
+  retries.
+
+### Unknown transactions
+
+For an unknown transaction the keeper checks its signed nonce against the keeper access key at a
+finalized block, and its reference block height against that finalized height and the protocol
+transaction validity period plus a two-block margin. Age-based retirement requires
+`final.height - ref.height > transaction_validity_period + 2`. The validity period is measured in
+blocks, as [nearcore](https://near.github.io/nearcore/architecture/how/tx_routing.html) describes.
+
+- A consumed nonce or an expired block hash means the transaction can no longer land: finalized
+  delivery state is re-read, the hash is cleared by CAS, backoff is saved and unresolved capacity is
+  released.
+- Otherwise only the same durable bytes may be resent, and only while no affected step is InFlight.
+- Unavailable or malformed validity evidence leaves the transaction tracked.
+- Older records without a retained reference height need an RPC that can still serve that block,
+  unless the finalized key nonce already proves the transaction cannot land.
+
+Do not share one signing key across independent processes. Use independent funded keeper accounts
+and RPC infrastructure.
+
+## RPC configuration
+
+| Who | Needs | Setting |
+| --- | --- | --- |
+| A file host, the CLI for Base purchases, the relayer | A Base RPC endpoint with an API key | `baseRpc` in SDK and host options or CLI config; `ANNON_BASE_RPC` for the CLI; `BASE_RPC` for the relayer |
+| A keeper polling every few seconds | A NEAR RPC endpoint with an API key | `nearRpc` in SDK and CLI config; `ANNON_NEAR_RPC` for the CLI; `NEAR_RPC` for the relayer |
+
+The public `https://mainnet.base.org` rate-limits the burst of reads made during settlement and
+unlocking. Keep API keys out of public files.
+
+## Base splits
+
+Base `sell` results include `baseSplit: { address, kind, salt }` beside `terms`. Encrypted sell
+records keep it through resume and publication; older sell records do not have it. This metadata is
+outside the on-chain terms and their hash.
+
+To call `readSplit` later, pass `address` and `{ salt }`, and rebuild the split from
+`terms.near.recipients` in their saved order:
+
+| Split field | Value |
+| --- | --- |
+| `recipients` | The recipient identity IDs |
+| `allocations` | Each recipient's `bps` |
+| `totalAllocation` | `10000n` |
+| `distributionIncentive` | `0` |
+
+## Security notes
+
+- The browser build fails if a post-build scan of the emitted JavaScript finds `eval`, `Function`
+  construction or calls, or string-argument timers.
+- CSP compatibility is also checked statically against the actual built, minified bundle and the HTTP
+  page and CSP header: no dynamic `eval` or `Function` calls, string timers, inline scripts or HTML
+  event handlers.
+- The browser build removes legacy dynamic-code fallbacks from the pinned Wallet Selector and
+  js-sha256 copies, with guards that require review when their source changes.
+- VM tests disable string and Wasm code generation and exercise fake wallet flows.
+- **Real-browser execution is not covered by the test suite.** Tests never launch browsers or GUI
+  applications and always stub the login opener; no real wallet, RPC, transaction or Keychain is
+  used.
+
+The trust model, the upgrade key during the beta and the known protocol limits are in
+[SECURITY.md](https://github.com/defdone/annon/blob/master/SECURITY.md).
