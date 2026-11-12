@@ -1,8 +1,12 @@
 {
   "changelog": "@changesets/cli/changelog",
   "commit": false,
-  "access": "public",
+  "access": "restricted",
   "baseBranch": "master",
   "updateInternalDependencies": "patch",
-  "ignore": []
+  "ignore": [],
+  "privatePackages": {
+    "version": true,
+    "tag": false
+  }
 }

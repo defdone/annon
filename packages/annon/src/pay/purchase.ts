@@ -1,7 +1,7 @@
 import type { Identity } from '../settle-near/identity.js';
 import type { Purchase } from '../settle-near/purchase.js';
 /**
- * A purchase on the buyer's side (profile section 10): what is recorded before the wallet signs,
+ * A purchase on the buyer's side (profile section 5): what is recorded before the wallet signs,
  * and the signed payload recorded before anything else sees it. Records are addressed by purchase commitment; the original grant secret remains available after acceptance.
  */
 

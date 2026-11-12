@@ -6,7 +6,6 @@ import { z } from 'zod/v4';
 
 // Secret values have no tool argument. Only explicitly selected files or server env supply keys.
 // Deployment, trust, wallets, storage and spend limits belong to the server operator.
-const common = {};
 const target = z.string().min(1);
 const urlRule = 'HTTPS URL (HTTP only for localhost, 127.0.0.1 or [::1])';
 const price = z
@@ -19,7 +18,6 @@ export const schemas = {
   }),
   sell: z
     .strictObject({
-      ...common,
       target: target.describe('Local plaintext file'),
       resume: z
         .string()
@@ -39,7 +37,6 @@ export const schemas = {
       { message: 'Provide price/split for a new listing, or resume without new terms.' },
     ),
   buy: z.strictObject({
-    ...common,
     target: target
       .refine((value) => /^https?:/.test(value), { message: 'Buy requires a resource URL.' })
       .describe(`${urlRule} for an allowlisted resource`),
@@ -50,7 +47,6 @@ export const schemas = {
     recovery: z.string().optional(),
   }),
   open: z.strictObject({
-    ...common,
     target: target.describe('Purchase ID, encrypted backup, or PAY2 file with purchase argument'),
     purchase: z.string().optional(),
     file: z.string().optional(),
@@ -58,15 +54,13 @@ export const schemas = {
     output: target.describe('New output file; existing files are never overwritten'),
   }),
   verify: z.strictObject({
-    ...common,
     target: target.describe(`Local PAY2 file or ${urlRule} (header-only verification)`),
   }),
   recover: z.strictObject({
-    ...common,
     recovery: target.describe('Controlled identity as evm:address, solana:key or near:account'),
     purchase: z.string().optional(),
   }),
-  status: z.strictObject({ ...common, target: target.describe('Purchase ID') }),
+  status: z.strictObject({ target: target.describe('Purchase ID') }),
 };
 const descriptions = {
   budget: 'Read the file purchase storage balance and admission requirement.',

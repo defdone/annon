@@ -1,6 +1,5 @@
 {
   "timestamp": "2026-11-10T20:02:24.638Z",
-  "signature": "ed25519:1111111111111111111111111111111111111111111111111111111111111111",
   "quoteRequest": {
     "dry": false,
     "swapType": "EXACT_OUTPUT",

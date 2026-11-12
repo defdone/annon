@@ -31,8 +31,8 @@ const origin = {
   refundTo: base.refund.id,
 };
 describe('1Click with synthetic response fixtures', () => {
-  it.each(['quote', 'quote-t2', 'quote-t5'])(
-    'quotes EXACT_OUTPUT with recorded %s timing and a byte-identical message',
+  it.each(['quote', 'quote-base', 'quote-solana'])(
+    'quotes EXACT_OUTPUT with the %s fixture timing and a byte-identical message',
     async (name) => {
       const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
         Response.json(recorded(JSON.parse(String(_init?.body)), name), { status: 201 }),
@@ -44,7 +44,7 @@ describe('1Click with synthetic response fixtures', () => {
       });
       const result = await c.quote(
         perQuoteMessage,
-        name === 'quote-t5'
+        name === 'quote-solana'
           ? { ...origin, chain: 'solana', asset: 'nep141:solana-usdc', refundTo: 'solana-wallet' }
           : origin,
       );
@@ -90,7 +90,7 @@ describe('1Click with synthetic response fixtures', () => {
     const c = new OneClick({ fetch: fetcher as typeof fetch, wait });
     expect((await c.poll('0xdeposit', { maxPolls: 3 })).status).toBe('SUCCESS');
     expect(wait).toHaveBeenCalledTimes(2);
-    expect(done.swapDetails.refundedAmount).toBe('0'); // Real refused delivery: funds stayed in the quote's Intents account.
+    expect(done.swapDetails.refundedAmount).toBe('0'); // A refused delivery can leave funds in the quote's Intents account.
   });
   it('fails closed on HTTP, amount, expiry and status errors and supports cancellation', async () => {
     const c = new OneClick({

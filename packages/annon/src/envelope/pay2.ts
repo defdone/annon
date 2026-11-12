@@ -221,13 +221,8 @@ export function hexBytes(hex: string | Uint8Array, bytes = 32): Uint8Array {
     ? Uint8Array.from(h.match(/../g) ?? [], (x) => Number.parseInt(x, 16))
     : hex;
 }
-const toHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 
-/** Spec 4.1: the EIP-191 text the seller signs once the header is final. */
-export const publishText = (contractId: string, fileId: Uint8Array, headerHash: Uint8Array) =>
-  `Annon: publish a file\ncontract: ${contractId}\nfile: 0x${toHex(fileId)}\nheader: 0x${toHex(headerHash)}`;
-
-export { signedBy, signerOf } from './evm.js';
+export { signedBy } from './evm.js';
 
 export function sellerAddress(seller: string): string {
   if (!/^0x[0-9a-f]{40}$/i.test(seller)) throw new TypeError('seller must be a 0x EVM address');
@@ -655,7 +650,7 @@ export function seal(data: Uint8Array, opts: SealOptions): Promise<Sealed> {
   return sealWithKey(globalThis.crypto.getRandomValues(new Uint8Array(32)), data, opts);
 }
 
-/** @internal For the spec vectors only. A reused key breaks every guarantee; use `seal`. */
+/** Encrypts with a caller-supplied fresh key, including deterministic replay. Never reuse it for another file. */
 export async function sealWithKey(
   K: Uint8Array,
   data: Uint8Array,

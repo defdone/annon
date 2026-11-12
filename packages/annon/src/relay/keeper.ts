@@ -81,12 +81,6 @@ export async function listDeliveries(
     }
   });
 }
-/** How many delivery ids exist; some have no record yet (refund leaves), so scan them all. */
-export async function deliveryCount(url: string, contract: string): Promise<number> {
-  const n = await view(url, contract, 'delivery_count', {});
-  integer(n as number);
-  return n as number;
-}
 /** Unordered positions, capped at 50. Pin every page and count to ONE finalized block ID;
  * removal swaps the last entry into the hole. Moving-block forward scans can skip entries.
  * New deliveries after the snapshot are discovered on the next sweep. */

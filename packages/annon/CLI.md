@@ -14,7 +14,7 @@ Create a public configuration file and name it with `--config /path/config.json`
   "contractId": "your-reviewed-contract.near",
   "network": "near:mainnet",
   "nearRpc": "https://rpc.mainnet.fastnear.com",
-  "baseRpc": "https://mainnet.base.org",
+  "baseRpc": "https://base.example/rpc-with-key",
   "stateDir": "/absolute/private/annon-state",
   "relayer": "https://your-reviewed-relayer.example",
   "maxPrice": "0.2"

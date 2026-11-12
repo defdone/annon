@@ -1,18 +1,15 @@
 /** Download a final purchase grant with Range retries and checked chunks. */
-import { keccak_256 } from '@noble/hashes/sha3.js';
 import { type Bytes, copy, equal, parseHeader, sha256, TAG } from '../envelope/pay2.js';
 import { BUYER_PROOF_HEADER, purchaseProof, sameResource } from './proof.js';
 export type DownloadErrorCode =
   /** The host answered something this protocol does not allow. */
   | 'bad_response'
-  /** No payment, session or sign-in this host takes: the wallet did not buy, or none was given. */
+  /** The host did not accept the payment or purchase grant proof. */
   | 'not_authorized'
   /** The payment is still settling after every retry; send the same payload again later. */
   | 'settling'
   /** The bytes are not the file whose header was checked before paying. */
   | 'file_mismatch'
-  /** The wallet did not sign; not retried. */
-  | 'wallet_refused'
   /** The caller cancelled the download. */
   | 'cancelled';
 
@@ -27,19 +24,6 @@ export class DownloadError extends Error {
 const fail = (code: DownloadErrorCode, message?: string): never => {
   throw new DownloadError(code, message);
 };
-
-/** EIP-55: the address with its checksum casing, as EIP-4361 requires. */
-export function checksumAddress(address: string): string {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new TypeError('address must be 0x and 20 bytes');
-  const lower = address.slice(2).toLowerCase();
-  const h = keccak_256(new TextEncoder().encode(lower));
-  let out = '0x';
-  for (let i = 0; i < 40; i++) {
-    const nibble = ((h[i >> 1] as number) >> (i % 2 === 0 ? 4 : 0)) & 0xf;
-    out += nibble >= 8 ? (lower[i] as string).toUpperCase() : lower[i];
-  }
-  return out;
-}
 
 /**
  * Gated downloads go over HTTPS only: on plain HTTP anyone on the path reads the body or races the
@@ -130,7 +114,7 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   const get = (headers: Record<string, string>) => {
     live();
     // No redirects: one could move the request to plain HTTP or another host.
-    // No cookies either: a session travels only in `Authorization` (profile section 9).
+    // No cookies either: the grant proof travels in `Annon-Buyer-Proof` (profile section 9).
     return fetcher(o.url, {
       redirect: 'error',
       credentials: 'omit',
@@ -276,7 +260,7 @@ async function skip(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   n: number,
 ): Promise<Uint8Array> {
-  // ponytail: a host without Range costs bandwidth on a resume, not memory.
+  // Note: a host without Range costs bandwidth on a resume, not memory.
   let left = n;
   for (;;) {
     const r = await reader.read();

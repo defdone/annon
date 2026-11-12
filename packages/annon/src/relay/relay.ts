@@ -444,7 +444,7 @@ const RETRY_WAIT = 1_000;
 /** Requests waiting for their turn; past this the relayer answers busy. */
 const MAX_WAITING = 32;
 
-// ponytail: state in memory, one process; a restart forgets limits and holds, bounded by the key's
+// Note: state in memory, one process; a restart forgets limits and holds, bounded by the key's
 // allowance and the sender's prepaid balance. The contract refuses an operation done twice.
 const accounts = new Map<string, Account>();
 const held = new Map<string, number>();
@@ -469,9 +469,6 @@ const queues = new Map<string, Promise<unknown>>();
 let waiting = 0;
 let checking = 0;
 
-/** How many operations and limit counters are kept; for tests. */
-export const relayCounters = () => counts.size + held.size;
-
 /** Clears the in-memory limits; for tests. */
 export function resetRelayState() {
   held.clear();
@@ -491,7 +488,7 @@ export function resetRelayState() {
  * that sends a transaction or looks one up goes through `rpcReply` instead (its id checked, one
  * fetch, aborted at the deadline).
  */
-// ponytail: the timer ends the wait, not the request (near-api-js 7.4 takes no AbortSignal).
+// Note: the timer ends the wait, not the request (near-api-js 7.4 takes no AbortSignal).
 function signingProvider(url: string) {
   const p = new JsonRpcProvider({ url });
   const send = p.sendJsonRpc.bind(p);
@@ -603,7 +600,7 @@ function enqueue<T>(job: () => Promise<T>, scope = 'relay'): Promise<T> {
  * anything is held, and an unlock
  * includes the buyer's key, which only the buyer knows before it is sent.
  */
-const identity = (r: RelayRequest, _contract: string) => {
+const identity = (r: RelayRequest) => {
   if (r.method === 'unlock') return `unlock:${JSON.parse(r.args.purchase).purchase.purchase_id}`;
   if (r.method === 'claim_key') return `claim:${r.args.purchase_id}:${r.args.grant ?? 0}`;
   if (r.method === 'reopen')
@@ -651,7 +648,7 @@ export async function relayStatus(
   try {
     const assets = { baseUsdc: o.usdc, ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}) };
     const r = canonicalRequest(input, assets);
-    const operation = `${o.nearRpc}|${o.contractId}|${identity(r, o.contractId)}`;
+    const operation = `${o.nearRpc}|${o.contractId}|${identity(r)}`;
     // Cheap miss first: this runs before the IP limiter, so unknown requests never reach a signature check.
     if ((held.get(operation) ?? 0) <= Date.now()) return null;
     signedByItsWallet(r, o.contractId, assets);
@@ -732,7 +729,7 @@ export async function relay(
     baseUsdc: o.usdc,
     ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
   });
-  const operation = `${o.nearRpc}|${o.contractId}|${identity(r, o.contractId)}`;
+  const operation = `${o.nearRpc}|${o.contractId}|${identity(r)}`;
   const previous = await relayStatus(r, o);
   if (previous === 'pending')
     return fail('in_flight', 'this operation is in flight; retry shortly');
@@ -764,7 +761,7 @@ export async function relay(
   if (waiting >= (o.policy.maxWaiting ?? MAX_WAITING))
     fail('unavailable', 'the relayer is busy; try again shortly');
   // Per contract: relayers for other contracts in the same process don't share operations.
-  const id = `${o.nearRpc}|${o.contractId}|${identity(r, o.contractId)}`;
+  const id = `${o.nearRpc}|${o.contractId}|${identity(r)}`;
   if ((held.get(id) ?? 0) > now) fail('duplicate', 'this operation was just sent or is on its way');
   const quotaOf = quota(r, o.policy);
   const q: [string, number] | null = quotaOf && [`${o.contractId}|${quotaOf[0]}`, quotaOf[1]];
@@ -1053,7 +1050,7 @@ async function send(
         if (next === 'pending') look = true;
         if (next === 'later') later = true;
       }
-      // ponytail: sends wait in line meanwhile, at most 3 s per transaction.
+      // Note: sends wait in line meanwhile, at most 3 s per transaction.
       if (attempt < RESENDS && (later || look))
         await new Promise((r) => setTimeout(r, RETRY_WAIT * (attempt + 1)));
     }
@@ -1066,7 +1063,6 @@ async function send(
 export {
   type DeliveryInfo,
   type DeliveryStep,
-  deliveryCount,
   fundDelivery,
   getDelivery,
   listDeliveries,

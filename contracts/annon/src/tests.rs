@@ -323,8 +323,8 @@ pub(crate) const AUTH_USED_TOPIC: &str =
     "98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5";
 pub(crate) const TRANSFER_TOPIC: &str =
     "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-// A payment with this nonce and the logs of `logs_with_nonce` has this payload hash: computed by
-// the reference code, which matched NEAR MPC byte for byte on mainnet. `payload_hash` must agree.
+// A fixed nonce and the synthetic logs of `logs_with_nonce` have this MPC payload hash.
+// `payload_hash` must agree with this independent expected value.
 pub(crate) const TEST_NONCE: &str =
     "52112c22da1c1cb9865e7e136a5162eca47f68141120192b9b448b228fc7c059";
 pub(crate) const TEST_PAYLOAD_HASH: &str =
@@ -552,7 +552,7 @@ pub(crate) fn ckd_answered(result: PromiseResult) {
 pub(crate) const CKD_ANSWER: &str = r#"{"big_y":"bls12381g1:Y","big_c":"bls12381g1:C"}"#;
 
 #[test]
-fn payload_hash_matches_what_mpc_signed_on_mainnet() {
+fn payload_hash_matches_the_fixed_mpc_payload() {
     assert_eq!(
         payload_hash(&logs_with_nonce(TEST_NONCE)),
         TEST_PAYLOAD_HASH

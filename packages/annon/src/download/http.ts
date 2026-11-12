@@ -3,10 +3,6 @@
  * framework that can hand over a method, headers and a response writer. CORS only for origins the
  * host lists; the grant proof travels in a header, so credentialed CORS is unnecessary.
  */
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import { type FileHostOptions, type HostResponse, serveFile } from './host.js';
 
 const ALLOW_HEADERS = 'PAYMENT-SIGNATURE, Annon-Buyer-Proof, Range, Content-Type';
@@ -63,43 +59,4 @@ export async function handle(
   if (method !== 'GET') return { status: 405, headers: { ...cors, Allow: 'GET, OPTIONS' } };
   const r = await serveFile({ headers }, o);
   return { ...r, headers: { ...cors, ...r.headers } };
-}
-
-/** A Node `http` request handler for the file URL. */
-export function nodeHandler(o: HttpHostOptions) {
-  return async (req: IncomingMessage, res: ServerResponse) => {
-    const get = (name: string) => {
-      const v = req.headers[name.toLowerCase()];
-      return v === undefined ? null : Array.isArray(v) ? v.join(', ') : v;
-    };
-    let r: HostResponse;
-    try {
-      r = await handle(req.method ?? 'GET', { get }, o);
-    } catch {
-      r = {
-        status: 500,
-        headers: {
-          'Cache-Control': 'no-store',
-          ...corsHeaders(get('Origin'), o.allowedOrigins ?? []),
-        },
-      };
-    }
-    // Lists set earlier (by middleware) are merged, never replaced (profile section 9).
-    for (const name of ['Access-Control-Expose-Headers', 'Vary']) {
-      const before = res.getHeader(name);
-      if (before === undefined || r.headers[name] === undefined) continue;
-      const all = [String(before), r.headers[name]]
-        .join(',')
-        .split(',')
-        .map((v) => v.trim());
-      r.headers[name] = [
-        ...new Map(all.filter(Boolean).map((v) => [v.toLowerCase(), v])).values(),
-      ].join(', ');
-    }
-    res.writeHead(r.status, r.headers);
-    if (!r.body) return void res.end();
-    // pipeline waits for the socket, cancels the file when the client goes, and on a read error
-    // destroys the response, so the client sees a cut file, never a whole one.
-    await pipeline(Readable.fromWeb(r.body as NodeReadableStream<Uint8Array>), res).catch(() => {});
-  };
 }

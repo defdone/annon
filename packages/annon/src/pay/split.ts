@@ -74,7 +74,7 @@ export type SplitOrigin = { salt: string } | { nonce: bigint };
  * The 0xSplits V2.2 factories on Base (`deployments/8453.json` at 0159376) and the implementation
  * each clones (`SPLIT_WALLET_IMPLEMENTATION()`, read 6 Nov 2026). Push pays recipients' wallets at
  * `distribute`; pull credits them in the SplitsWarehouse, from which they withdraw.
- * ponytail: V2.2 only; older factories after their clones are checked on chain.
+ * Note: V2.2 only; older factories after their clones are checked on chain.
  */
 export const SPLIT_FACTORIES = [
   {

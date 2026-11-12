@@ -25,7 +25,6 @@ export interface SellerArgs {
   key: string | null;
   deadline: number;
 }
-export type StopSalesArgs = SellerArgs;
 /** The contract's `hex0x(bytes::<N>(s))`: optional lowercase `0x`, any case, printed lowercase. */
 export function hex0x(s: string, bytes: number, name: string): string {
   const h = s.startsWith('0x') ? s.slice(2) : s;

@@ -174,7 +174,7 @@ export function parseCli(argv: string[]): Input {
 }
 export const HELP = `annon <command> [options]
 login [--wallet evm|near] [--no-open]
-init --agent --daily-budget <USDC> [--key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> --credential-env <name>]
+init --agent --daily-budget <USDC> [--recovery <kind:id>] [--key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> (--credential-env <name> | --credential-keychain <name>)]
 sell <file> --resume <file-id> [--output <PAY2>]
 fund <file-id> <NEAR>
 budget <file-id>

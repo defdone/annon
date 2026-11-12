@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the contract wasm (and the MPC and token stand-ins for sandbox tests), shrinks it with wasm-opt and
 # checks it only imports host functions mainnet has.
-# ponytail: plain cargo build for dev deploys; the final deploy uses cargo near reproducible-wasm
+# Note: plain cargo build for dev deploys; the final deploy uses cargo near reproducible-wasm
 set -e
 cd "$(dirname "$0")/../.."
 RUSTFLAGS="--cfg near -C target-cpu=mvp -C link-arg=-s" \
