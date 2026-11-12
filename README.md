@@ -276,7 +276,9 @@ To report a vulnerability, use GitHub's private reporting on this repository.
 ## Built at NEAR HACKATHON
 
 All code in this repository was written during the hackathon, starting on 2 November 2026; the
-`pre-hackathon` tag marks the empty initial commit.
+`pre-hackathon` tag marks the empty initial commit. Before the hackathon our team built Payaion, a
+closed file-selling app on Base, and the PAY1 file format that PAY2 extends. No Payaion code is in
+this repository; Payaion will be the first app to adopt Annon.
 
 **Libraries.** The SDK uses [@noble/curves](https://github.com/paulmillr/noble-curves),
 [@noble/hashes](https://github.com/paulmillr/noble-hashes), [@scure/base](https://github.com/paulmillr/scure-base),
