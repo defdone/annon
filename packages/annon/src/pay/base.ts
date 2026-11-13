@@ -97,6 +97,7 @@ async function rpc(url: string, method: string, params: unknown[]) {
   let body: { jsonrpc?: unknown; id?: unknown; result?: unknown; error?: RpcError };
   try {
     const res = await fetch(url, {
+      credentials: 'omit',
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),

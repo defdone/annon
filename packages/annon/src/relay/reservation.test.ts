@@ -38,14 +38,17 @@ const options = {
   publicKey: hex(ed25519.getPublicKey(seed)).slice(2),
   now: 1000,
 };
-const live = (reservation: ReturnType<typeof fixture>) => async () =>
-  Response.json({
-    state: 'reserved',
-    fileId: reservation.fileId,
-    termsHash: reservation.termsHash,
-    expiresAt: reservation.expiresAt,
-    reservation,
-  });
+const live =
+  (reservation: ReturnType<typeof fixture>) => async (_url: unknown, init?: RequestInit) => {
+    expect(init?.credentials).toBe('omit');
+    return Response.json({
+      state: 'reserved',
+      fileId: reservation.fileId,
+      termsHash: reservation.termsHash,
+      expiresAt: reservation.expiresAt,
+      reservation,
+    });
+  };
 it('verifies signed live fixed-origin reservations and refuses replay, tampering and redirects', async () => {
   const r = fixture();
   expect(await verifyReservation(r, terms, { ...options, fetch: live(r) })).toEqual(r);

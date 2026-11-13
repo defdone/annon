@@ -71,6 +71,7 @@ export async function rpcReply(url: string, method: string, params: unknown): Pr
   const timer = setTimeout(() => abort.abort(new Error('timed out')), RPC_TIMEOUT_MS);
   try {
     response = await fetch(url, {
+      credentials: 'omit',
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),

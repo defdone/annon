@@ -82,6 +82,7 @@ it('checks frozen eligibility at the inclusive minimum and binds a fresh client 
   const h = fixture();
   const checked = await checkBaseSponsorship(h.options);
   expect(h.read).toHaveBeenCalledTimes(1);
+  for (const [, init] of h.fetcher.mock.calls) expect(init?.credentials).toBe('omit');
   expect(h.fetcher.mock.calls[1]?.[1]).toMatchObject({
     method: 'POST',
     body: JSON.stringify({

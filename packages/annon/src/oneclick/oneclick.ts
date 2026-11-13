@@ -244,6 +244,7 @@ export class OneClick {
       response = await (this.options.fetch ?? fetch)(
         `${this.options.endpoint ?? 'https://1click.chaindefuser.com/v0'}${path}`,
         {
+          credentials: 'omit',
           method: body === undefined ? 'GET' : 'POST',
           ...(body === undefined
             ? {}
