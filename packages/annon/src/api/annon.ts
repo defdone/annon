@@ -738,14 +738,12 @@ export class Annon {
     if (!checked.usable) throw new PayError('file_invalid');
     if (o.route !== undefined && !['near', 'base', '1click'].includes(o.route))
       throw new AnnonError('invalid_arguments', 'invalid purchase route');
+    if (o.route === 'base' && !f.terms.base) throw new AnnonError('route_unavailable');
     if (o.route === 'near' && o.payer?.identity.kind !== 'near')
       throw new AnnonError('near_wallet_required', 'direct NEAR requires a NEAR payment wallet');
     if (o.route === '1click' && !o.origin)
       throw new AnnonError('origin_required', 'a 1Click origin is required');
-    if (
-      o.route === 'base' &&
-      (!f.terms.base || o.payer?.identity.kind !== 'evm' || !('signTypedData' in o.payer))
-    )
+    if (o.route === 'base' && (o.payer?.identity.kind !== 'evm' || !('signTypedData' in o.payer)))
       throw new AnnonError(
         'base_wallet_required',
         'Base requires Base terms and an EVM payment wallet',

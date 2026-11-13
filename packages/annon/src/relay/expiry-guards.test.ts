@@ -4,7 +4,7 @@ import { getFile, getGrant, getPurchase, rpcReply } from '../near/rpc.js';
 import { memoryStore } from '../pay/store.js';
 import { buildPurchaseMessage } from '../settle-near/purchase.js';
 import { RelayLedger, type RelayState } from './ledger.js';
-import { type CheckOptions, reconcileRelayStorage } from './relay.js';
+import { type CheckOptions, RelayError, reconcileRelayStorage } from './relay.js';
 import { relayLimits } from './sponsorship.js';
 
 vi.mock('../near/rpc.js', async (original) => ({
@@ -443,46 +443,52 @@ it.each([
   expect(await ledger.pendingStorage()).toBe(rejected ? 0n : 100n);
 });
 
-it.each(['full', 'other'] as const)('reports the specific reconcile failure: %s', async (mode) => {
-  const ledger = new RelayLedger(memoryStore<RelayState>(), 'scope');
-  await ledger.prepare({
-    id: 'op',
-    requestHash: 'h',
-    method: 'unlock',
-    fileId: `0x${'22'.repeat(32)}`,
-    termsHash: `0x${'33'.repeat(32)}`,
-    seller: 'seller',
-    listed: false,
-    ip: '192.0.2.1',
-    storage: '100',
-    allocation: '0',
-    limits: relayLimits({ policy: { minPrice: 1n, maxDeadlineSeconds: 600 } } as CheckOptions),
-  });
-  await ledger.signed('op', {
-    txHash: 'T',
-    signed: 'original',
-    signer: 'relay.test',
-    args: { args: { purchase: buildPurchaseMessage(sample) } },
-  });
-  if (mode === 'full') {
-    for (let i = 0; i < 32; i++) await ledger.defer(`work:${i}`, {}, 'h', 0);
-  } else vi.spyOn(ledger, 'defer').mockRejectedValue(new Error('unavailable'));
-  vi.mocked(rpcReply).mockImplementation(async (_url, name) =>
-    name === 'tx'
-      ? { error: { cause: { name: 'UNKNOWN_TRANSACTION' } } }
-      : { error: { cause: { info: { InvalidTxError: 'Expired' } } } },
-  );
-  const alert = vi.fn();
-  await reconcileRelayStorage({
-    ledger,
-    nearRpc: 'https://rpc.test',
-    contractId: 'market.test',
-    sender: { accountId: 'relay.test', key: 'test-double' },
-    alert,
-  });
-  expect(alert).toHaveBeenCalledExactlyOnceWith(
-    mode === 'full' ? 'paid_work_full' : 'reconcile_held',
-  );
-  expect((await ledger.operation('op'))?.stage).toBe('submitted');
-  expect(await ledger.pendingStorage()).toBe(100n);
-});
+it.each(['full', 'other', 'relay-unavailable'] as const)(
+  'reports the specific reconcile failure: %s',
+  async (mode) => {
+    const ledger = new RelayLedger(memoryStore<RelayState>(), 'scope');
+    await ledger.prepare({
+      id: 'op',
+      requestHash: 'h',
+      method: 'unlock',
+      fileId: `0x${'22'.repeat(32)}`,
+      termsHash: `0x${'33'.repeat(32)}`,
+      seller: 'seller',
+      listed: false,
+      ip: '192.0.2.1',
+      storage: '100',
+      allocation: '0',
+      limits: relayLimits({ policy: { minPrice: 1n, maxDeadlineSeconds: 600 } } as CheckOptions),
+    });
+    await ledger.signed('op', {
+      txHash: 'T',
+      signed: 'original',
+      signer: 'relay.test',
+      args: { args: { purchase: buildPurchaseMessage(sample) } },
+    });
+    if (mode === 'full') {
+      for (let i = 0; i < 32; i++) await ledger.defer(`work:${i}`, {}, 'h', 0);
+    } else
+      vi.spyOn(ledger, 'defer').mockRejectedValue(
+        mode === 'relay-unavailable' ? new RelayError('unavailable') : new Error('unavailable'),
+      );
+    vi.mocked(rpcReply).mockImplementation(async (_url, name) =>
+      name === 'tx'
+        ? { error: { cause: { name: 'UNKNOWN_TRANSACTION' } } }
+        : { error: { cause: { info: { InvalidTxError: 'Expired' } } } },
+    );
+    const alert = vi.fn();
+    await reconcileRelayStorage({
+      ledger,
+      nearRpc: 'https://rpc.test',
+      contractId: 'market.test',
+      sender: { accountId: 'relay.test', key: 'test-double' },
+      alert,
+    });
+    expect(alert).toHaveBeenCalledExactlyOnceWith(
+      mode === 'full' ? 'paid_work_full' : 'reconcile_held',
+    );
+    expect((await ledger.operation('op'))?.stage).toBe('submitted');
+    expect(await ledger.pendingStorage()).toBe(100n);
+  },
+);

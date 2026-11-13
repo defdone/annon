@@ -22,6 +22,7 @@ export const annonErrorCodes = [
   'near_wallet_required',
   'base_wallet_required',
   'base_unavailable',
+  'route_unavailable',
   'file_required',
   'offer_required',
   'purchase_required',
@@ -141,6 +142,7 @@ export interface PublicError {
   retryAfterSeconds?: number;
 }
 const messages: Partial<Record<AnnonErrorCode, string>> = {
+  route_unavailable: 'This file does not support the selected payment route.',
   host_payment_failed:
     'Payment submission failed. Keep the saved purchase and check final status before retrying.',
   bad_request: 'The request is invalid. Check its fields before retrying.',
@@ -271,6 +273,7 @@ const input = new Set<AnnonErrorCode>([
   'near_wallet_required',
   'base_wallet_required',
   'base_unavailable',
+  'route_unavailable',
   'file_required',
   'offer_required',
   'purchase_required',
@@ -310,13 +313,13 @@ export function toPublicError(error: unknown): PublicError {
   return {
     code,
     message:
-      adapter?.message ??
+      (code === 'route_unavailable' ? messages.route_unavailable : adapter?.message) ??
       (messages[code] ?? `${code.replaceAll('_', ' ')}.`) +
         (error instanceof AnnonError && error.name === 'SellError' && code !== 'source_changed'
           ? ' Resume sell with the original plaintext and saved fileId.'
           : ''),
     exitCode:
-      adapter?.exitCode ??
+      (code === 'route_unavailable' ? 2 : adapter?.exitCode) ??
       (waiting.has(code) ? 4 : approval.has(code) ? 3 : input.has(code) ? 2 : 1),
     ...(id(e.fileId) ? { fileId: e.fileId } : {}),
     ...(id(e.purchaseId) ? { purchaseId: e.purchaseId } : {}),

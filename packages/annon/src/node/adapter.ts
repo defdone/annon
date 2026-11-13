@@ -5,7 +5,13 @@ import { Annon, type AnnonOptions } from '../api/annon.js';
 import { download, secureUrl } from '../download/download.js';
 import { sameResource } from '../download/proof.js';
 import { inspect, inspectHeader, MAX_HEADER, parseHeader } from '../envelope/pay2.js';
-import { type AnnonErrorCode, isAnnonErrorCode, isTransient, type PublicError } from '../errors.js';
+import {
+  AnnonError,
+  type AnnonErrorCode,
+  isAnnonErrorCode,
+  isTransient,
+  type PublicError,
+} from '../errors.js';
 import {
   fileStorageBalance,
   getConfig,
@@ -53,6 +59,7 @@ import {
 import { claimPurchase, type PurchaseGuard } from './purchase-guard.js';
 import { resourceAllowed } from './resources.js';
 import { retryGate } from './retry-gate.js';
+import { discoverShops, isDiscovery } from './shops.js';
 import { assertSignerInput, configuredWallet } from './signer-wallet.js';
 import { type SigningResult, signingRequest, verifySigningResult } from './signing.js';
 import {
@@ -396,6 +403,40 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       if (!o.backupSecretFile && !env.ANNON_BACKUP_SECRET_FILE && !env.ANNON_BACKUP_SECRET)
         return pendingSetup(o.target);
     }
+    const prepareBuy = async () => {
+      if (!o.target) throw usage();
+      if (d.agent && !/^https?:/.test(o.target))
+        return fail(
+          'resource_not_allowed',
+          'Agent purchases require a secure resource URL; offer files are refused.',
+          2,
+        );
+      const cap = o.maxPrice ?? c.maxPrice;
+      if (!cap)
+        return fail(
+          'max_price_required',
+          'Set --max-price, ANNON_MAX_PRICE or maxPrice in human configuration before buying.',
+          2,
+        );
+      const maxPrice = BigInt(amount(cap));
+      if (c.maxPrice && maxPrice > BigInt(amount(c.maxPrice)))
+        return fail('price_above_max', 'The requested cap exceeds the configured maximum.', 2);
+      const resource = /^https?:/.test(o.target) ? o.target : o.url;
+      if (d.agent && (!resource || !resourceAllowed(c.allowedResources, resource)))
+        return fail(
+          'resource_not_allowed',
+          'The resource URL is outside the configured agent policy.',
+          2,
+        );
+      if (d.agent && (o.refundTo || o.fromChain || o.fromAsset))
+        return fail('origin_not_allowed', 'Use a human-configured origin name.', 2);
+      const found = await offer(o.target, c, fetcher, undefined, o.url);
+      const { f, listing } = await readListing(found.fileId);
+      await inspectHeader(found.header, listing, c.contractId);
+      if (o.route === 'base' && !f.terms.base) throw new AnnonError('route_unavailable');
+      return { found, f, maxPrice };
+    };
+    const preparedBuy = o.command === 'buy' ? await prepareBuy() : undefined;
     let selected: LocalWallet | undefined;
     if (o.command === 'fund') {
       if (d.agent) return fail('human_only', 'File funding requires a human CLI session.', 2);
@@ -755,36 +796,9 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       };
     }
     if (o.command === 'buy') {
-      if (!o.target) throw usage();
-      if (d.agent && !/^https?:/.test(o.target))
-        return fail(
-          'resource_not_allowed',
-          'Agent purchases require a secure resource URL; offer files are refused.',
-          2,
-        );
-      const cap = o.maxPrice ?? c.maxPrice;
-      if (!cap)
-        return fail(
-          'max_price_required',
-          'Set --max-price, ANNON_MAX_PRICE or maxPrice in human configuration before buying.',
-          2,
-        );
-      const maxPrice = BigInt(amount(cap));
-      if (c.maxPrice && maxPrice > BigInt(amount(c.maxPrice)))
-        return fail('price_above_max', 'The requested cap exceeds the configured maximum.', 2);
-      const resource = /^https?:/.test(o.target) ? o.target : o.url;
-      if (d.agent && (!resource || !resourceAllowed(c.allowedResources, resource)))
-        return fail(
-          'resource_not_allowed',
-          'The resource URL is outside the configured agent policy.',
-          2,
-        );
-      if (d.agent && (o.refundTo || o.fromChain || o.fromAsset))
-        return fail('origin_not_allowed', 'Use a human-configured origin name.', 2);
+      if (!preparedBuy) throw usage();
+      const { found, f, maxPrice } = preparedBuy;
       const buyer = await wallet();
-      const found = await offer(o.target, c, fetcher, undefined, o.url);
-      const { f, listing } = await readListing(found.fileId);
-      await inspectHeader(found.header, listing, c.contractId);
       const route =
         o.route ??
         (o.fromChain || o.origin ? '1click' : buyer.identity.kind === 'near' ? 'near' : 'base');
@@ -796,15 +810,9 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           'The direct NEAR route requires a NEAR wallet; use 1click for another chain.',
           2,
         );
-      if (
-        route === 'base' &&
-        (buyer.identity.kind !== 'evm' || !('signTypedData' in buyer) || !f.terms.base)
-      )
-        return fail(
-          'base_unavailable',
-          'The Base route requires an EVM wallet and a Base offer.',
-          2,
-        );
+      if (route === 'base' && !f.terms.base) throw new AnnonError('route_unavailable');
+      if (route === 'base' && (buyer.identity.kind !== 'evm' || !('signTypedData' in buyer)))
+        return fail('base_wallet_required', 'The Base route requires an EVM payment wallet.', 2);
       if (route === 'base' && !c.baseRpc)
         return fail('base_rpc_required', 'Configure baseRpc before a Base purchase.', 2);
       const origin = route === '1click' ? await originFor(o, env, buyer, fetcher, c) : undefined;
@@ -1230,6 +1238,7 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
         2,
       );
     const agent = await agentPolicy(o, env, d.agent);
+    if (isDiscovery(o)) return discoverShops(o, env, agent, d.fetch);
     if (o.command === 'init') return initAgent(o, env, d.keychain ?? osKeychain);
     const c = await loadConfig(o, env, o.command === 'login', d.agent);
     if (agent || c.agent) o = await confinePaths(o, c.workDir as string);

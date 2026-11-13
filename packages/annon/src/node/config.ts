@@ -4,13 +4,14 @@ import { join, resolve } from 'node:path';
 import { secureUrl } from '../download/download.js';
 import { fileStore } from '../pay/store-node.js';
 import { account, network } from '../settle-near/codec.js';
+import { type DiscoveryConfig, validateDiscoveryConfig } from '../shops/discovery.js';
 import { agentPolicy, configPath, type SignerConfig, validateSigner } from './agent.js';
 import type { Input } from './cli.js';
 import { AdapterError } from './errors.js';
 import { resourceAllowed } from './resources.js';
 import type { Environment } from './wallets.js';
 
-export interface Config {
+export interface Config extends DiscoveryConfig {
   signer?: SignerConfig;
   dailyBudget?: string;
   agent?: boolean;
@@ -85,6 +86,7 @@ export async function loadConfig(
         file.stateDir ??
         join(homedir(), '.local', 'share', 'annon'),
     };
+    Object.assign(c, validateDiscoveryConfig(file));
     const workDir = (env.ANNON_AGENT === 'true' ? env.ANNON_WORK_DIR : undefined) ?? file.workDir;
     if (agent && (typeof workDir !== 'string' || !workDir.trim()))
       throw new AdapterError(

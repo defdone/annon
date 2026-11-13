@@ -131,3 +131,15 @@ it('prints the source-change resume instruction once, including a sell wrapper',
     ).toHaveLength(1);
   }
 });
+
+it('reports route refusal with the exact safe message and exit 2', () => {
+  for (const error of [
+    new AnnonError('route_unavailable', 'PRIVATE'),
+    new AdapterError('route_unavailable', 'PRIVATE', 1),
+  ])
+    expect(toPublicError(error)).toEqual({
+      code: 'route_unavailable',
+      message: 'This file does not support the selected payment route.',
+      exitCode: 2,
+    });
+});

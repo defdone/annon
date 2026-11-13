@@ -226,13 +226,14 @@ async function harness(
   const wait = vi.fn(async (_ms: number) => {});
   const notify = vi.fn();
   const reviews: unknown[] = [];
+  const initializeWallet = vi.fn(async () => buyerWallet ?? wallet);
   const adapter = createAdapter(env, {
     agent,
     ...(prompt ? { prompt } : {}),
     wait,
     notify,
     paymentTerms: (review) => reviews.push(review),
-    wallet: async () => buyerWallet ?? wallet,
+    wallet: initializeWallet,
     file: async () => f,
     purchase: lookupPurchase,
     fetch: fetcher,
@@ -400,6 +401,7 @@ async function harness(
     notify,
     reviews,
     listing: f,
+    initializeWallet,
     baseSplit,
     contractConfig,
     get options() {
@@ -880,9 +882,11 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       expect(tools.map((t) => t.name).sort()).toEqual([
         'annon_budget',
         'annon_buy',
+        'annon_catalog',
         'annon_open',
         'annon_recover',
         'annon_sell',
+        'annon_shops',
         'annon_status',
         'annon_verify',
       ]);
@@ -2965,6 +2969,119 @@ it('declares and preserves pending transaction evidence in its error schema', as
         exitCode: 4,
       },
     });
+  } finally {
+    await connection.close();
+  }
+});
+
+it('exposes read-only discovery without additions, trust or deployment overrides', async () => {
+  const execute = vi.fn(async () => ({ items: [], total: 0, nextOffset: null }));
+  const connection = await connect(execute);
+  try {
+    const tools = (await connection.client.listTools()).tools;
+    for (const name of ['annon_shops', 'annon_catalog']) {
+      const schema = tools.find((t) => t.name === name)?.inputSchema;
+      expect(schema?.properties?.limit).toMatchObject({
+        type: 'integer',
+        minimum: 1,
+        maximum: 100,
+      });
+      expect(schema?.properties?.offset).toMatchObject({ type: 'integer', minimum: 0 });
+      expect(tools.find((t) => t.name === name)?.annotations).toMatchObject({
+        readOnlyHint: true,
+        idempotentHint: true,
+      });
+      const response = await connection.client.callTool({
+        name,
+        arguments: name === 'annon_catalog' ? { shop: 'mine', limit: 2 } : {},
+      });
+      expect(response.structuredContent).toMatchObject({
+        ok: true,
+        result: { items: [], total: 0, nextOffset: null },
+      });
+      for (const args of [
+        { trustContract: true },
+        { contractId: 'other.test' },
+        { manifest: 'https://other.test' },
+      ]) {
+        const invalid = await connection.client.callTool({ name, arguments: args });
+        expect(invalid.isError).toBe(true);
+      }
+    }
+    expect(tools.some((t) => t.name === 'annon_shop')).toBe(false);
+  } finally {
+    await connection.close();
+  }
+});
+it('propagates the safe route refusal through MCP', async () => {
+  const { AnnonError } = await import('../../annon/src/errors.js');
+  const connection = await connect(async () => {
+    throw new AnnonError('route_unavailable', 'PRIVATE');
+  });
+  try {
+    const result = await connection.client.callTool({
+      name: 'annon_buy',
+      arguments: { target: 'https://files.test/file', route: 'base' },
+    });
+    expect(result.structuredContent).toEqual({
+      ok: false,
+      error: {
+        code: 'route_unavailable',
+        message: 'This file does not support the selected payment route.',
+        exitCode: 2,
+      },
+    });
+  } finally {
+    await connection.close();
+  }
+});
+
+it('refuses Base through the adapter from final terms before wallet initialization or sponsorship', async () => {
+  const h = await harness();
+  h.listing.terms.base = null;
+  h.listing.termsHash = termsHash(h.listing.terms);
+  const connection = await connect((input) => h.adapter({ ...h.defaults, ...input }));
+  try {
+    const result = await connection.client.callTool({
+      name: 'annon_buy',
+      arguments: { target: 'https://files.example/file', route: 'base' },
+    });
+    expect(result.structuredContent).toMatchObject({
+      ok: false,
+      error: { code: 'route_unavailable', exitCode: 2 },
+    });
+    expect(h.initializeWallet).not.toHaveBeenCalled();
+    expect(h.calls).toEqual([]);
+    expect(
+      h.fetcher.mock.calls.every(
+        ([url]) => !String(url).includes('relay.example') && !String(url).includes('base.example'),
+      ),
+    ).toBe(true);
+  } finally {
+    await connection.close();
+  }
+});
+
+it('returns invalid_arguments for invalid discovery paging', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'annon-discovery-paging-'));
+  directories.push(dir);
+  const adapter = createAdapter({ ANNON_CONFIG: join(dir, 'missing.json') }, { agent: true });
+  const connection = await connect(adapter);
+  try {
+    for (const args of [
+      { limit: 0 },
+      { limit: 101 },
+      { limit: 0.5 },
+      { offset: -1 },
+      { offset: Number.MAX_SAFE_INTEGER + 1 },
+      { limit: '20' },
+    ]) {
+      const result = await connection.client.callTool({ name: 'annon_catalog', arguments: args });
+      expect(result.structuredContent).toMatchObject({
+        ok: false,
+        error: { code: 'invalid_arguments', exitCode: 2 },
+      });
+    }
   } finally {
     await connection.close();
   }

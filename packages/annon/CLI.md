@@ -306,3 +306,34 @@ approval. Agent URL paths refuse `%2f` and `%5c`, case-insensitively.
 JSON/agent modes return the resulting split in `terms`.
 Self-funded listings have no compulsory protocol fee. An eight-recipient split needs a
 free slot or an existing treasury recipient before sponsorship can add a treasury.
+
+## Shop discovery
+
+Use discovery before configuring a wallet or contract:
+
+```sh
+annon shops
+annon shop add https://shop.example/demo --id example
+annon catalog --shop example --search notes --limit 20 --offset 0
+```
+
+`shop add` saves a local alias for the canonical `/.well-known/annon-shop.json` URL. It grants no deployment trust. Configure `shopDirectoryUrl` to read a directory; no directory is selected by default. Local `shops` and optional `defaultShop` belong to the human configuration and cannot be changed by remote documents.
+
+```json
+{
+  "shopDirectoryUrl": "https://directory.example/shops.json",
+  "shops": [
+    {
+      "id": "example",
+      "manifest": "https://shop.example/.well-known/annon-shop.json"
+    }
+  ],
+  "defaultShop": "example"
+}
+```
+
+Both listing and catalog results contain `items`, `total`, and `nextOffset` (`null` at the end). Search matches name, title and description without case sensitivity. Catalogs sort by newest creation time, then file ID; limits default to 20 and accept 1 through 100. Offsets are nonnegative integers.
+
+Discovery uses HTTPS, omits credentials, rejects redirects and times out after 10 seconds. Limits are 64 KiB per manifest, 256 KiB and 100 shops per directory, and 8 MiB and 10000 entries per catalog. An oversized response fails with `too_large` without partial results.
+
+For a reviewed deployment, a human can add `profile` to a local shop with `network`, `contract`, `nearRpc`, `baseRpc`, `relayer`, and `host`. RPC URLs and service origins come from that local profile. Manifest deployment changes fail with `config_conflict`. Discovery information does not authorize a purchase. Buy a catalog entry using its resource `url` through the normal `annon buy` workflow, which independently verifies the configured deployment, final chain terms, header and price.

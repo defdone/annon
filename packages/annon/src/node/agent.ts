@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { secureUrl } from '../download/download.js';
 import { account, network } from '../settle-near/codec.js';
 import { type Identity, parseIdentity } from '../settle-near/identity.js';
+import { validateDiscoveryConfig } from '../shops/discovery.js';
 import type { Input } from './cli.js';
 import { AdapterError } from './errors.js';
 import { type Keychain, osKeychain } from './keychain.js';
@@ -107,7 +108,11 @@ export async function savePublicConfig(
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
   }
+  validateDiscoveryConfig(old);
   const allowed = [
+    'shopDirectoryUrl',
+    'shops',
+    'defaultShop',
     'contractId',
     'nearRpc',
     'baseRpc',

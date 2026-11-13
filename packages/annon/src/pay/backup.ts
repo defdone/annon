@@ -141,6 +141,7 @@ function validateRecord(r: PrivateRecord) {
     return;
   }
   if ('kind' in r && r.kind === 'seller-key') {
+    exactKeys(r, ['kind', 'id', 'revision', 'file_id', 'seller', 'buyerSecret', 'deadline']);
     if (
       r.id !== `seller-key:${r.file_id}` ||
       !Number.isSafeInteger(r.revision) ||
@@ -150,7 +151,7 @@ function validateRecord(r: PrivateRecord) {
     )
       throw new TypeError('invalid seller key record');
     bytes(r.file_id, 32);
-    if (r.buyerSecret !== null) bytes(r.buyerSecret, 32);
+    if (r.buyerSecret !== null) keyFromSecret(bytes(r.buyerSecret, 32));
     identityJson(r.seller);
     return;
   }
@@ -500,6 +501,16 @@ export const encryptedSellStore = (
 
 export const exportSellerKey = (record: SellerKeyRecord, secret: Uint8Array) =>
   encrypt(record, secret);
+export async function importSellerKey(file: string, secret: Uint8Array): Promise<SellerKeyRecord> {
+  try {
+    const record = await decrypt(file, secret);
+    if (!('kind' in record) || record.kind !== 'seller-key') throw new AnnonError('invalid_record');
+    return record;
+  } catch (cause) {
+    if (cause instanceof AnnonError && cause.code === 'invalid_record') throw cause;
+    throw new AnnonError('invalid_record', undefined, { cause });
+  }
+}
 export const encryptedSellerKeyStore = (
   raw: Store<EncryptedRecord>,
   secret: Uint8Array,

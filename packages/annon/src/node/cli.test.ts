@@ -84,3 +84,23 @@ it('parses sell resume with original plaintext and no new listing terms', () => 
     resume: `0x${'ab'.repeat(32)}`,
   });
 });
+
+it('parses discovery commands and strictly validates paging', () => {
+  expect(parseCli(['shops'])).toMatchObject({ command: 'shops' });
+  expect(parseCli(['shop', 'add', 'https://shop.test/demo', '--id', 'mine'])).toMatchObject({
+    command: 'shop',
+    target: 'https://shop.test/demo',
+    id: 'mine',
+  });
+  expect(
+    parseCli(['catalog', '--shop', 'mine', '--search', 'notes', '--limit', '2', '--offset', '0']),
+  ).toMatchObject({ command: 'catalog', shop: 'mine', search: 'notes', limit: 2, offset: 0 });
+  for (const args of [
+    ['shop', 'remove', 'x'],
+    ['catalog', '--limit', '0'],
+    ['catalog', '--offset', '1.2'],
+    ['catalog', '--limit', '101'],
+    ['shops', 'extra'],
+  ])
+    expect(() => parseCli(args)).toThrow();
+});

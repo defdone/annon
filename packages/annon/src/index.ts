@@ -52,11 +52,14 @@ export {
   exportPurchase,
   exportRecovery,
   exportSell,
+  exportSellerKey,
   importPurchase,
   importRecovery,
   importSell,
+  importSellerKey,
   newBackupSecret,
   type RecoveryRecord,
+  type SellerKeyRecord,
   type SellRecord,
 } from './pay/backup.js';
 export { BaseRpcRateLimited, PayError, type PayErrorCode } from './pay/base.js';
@@ -83,6 +86,20 @@ export {
   type Terms,
   termsHash,
 } from './settle-near/terms.js';
+export {
+  type CatalogEntry,
+  type CatalogQuery,
+  type ConfiguredShop,
+  canonicalManifestUrl,
+  catalog,
+  type DiscoveryConfig,
+  type DiscoveryPage,
+  type DiscoveryQuery,
+  listShops,
+  type Shop,
+  type ShopManifest,
+  type ShopProfile,
+} from './shops/discovery.js';
 export { TransactionUncertain } from './wallet/uncertain.js';
 export {
   type EvmWallet,

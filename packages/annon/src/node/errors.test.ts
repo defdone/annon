@@ -219,3 +219,13 @@ it('does not trust an upstream object claiming to be an adapter error', () => {
   expect(result.message).not.toContain('UPSTREAM');
   expect(toPublicError(new AnnonError('human_only', 'UPSTREAM')).message).not.toContain('UPSTREAM');
 });
+
+it('keeps route refusal separate from wallet and sponsorship errors', () => {
+  expect(publicError(new AnnonError('route_unavailable'))).toEqual({
+    code: 'route_unavailable',
+    message: 'This file does not support the selected payment route.',
+    exitCode: 2,
+  });
+  for (const code of ['base_wallet_required', 'not_sponsored'] as const)
+    expect(publicError(new AnnonError(code)).code).toBe(code);
+});

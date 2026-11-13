@@ -7,8 +7,11 @@ import {
   type EncryptedRecord,
   encryptedPurchaseStore,
   exportPurchase,
+  exportSellerKey,
   importPurchase,
+  importSellerKey,
   newBackupSecret,
+  type SellerKeyRecord,
 } from './backup.js';
 import type { PurchaseRecord } from './purchase.js';
 import { memoryStore } from './store.js';
@@ -142,4 +145,81 @@ it('requires the quote checkpoint to survive JSON serialization', async () => {
   await expect(exportPurchase(edited, newBackupSecret())).rejects.toMatchObject({
     code: 'invalid_record',
   });
+});
+
+const sellerKey: SellerKeyRecord = {
+  kind: 'seller-key',
+  id: `seller-key:${purchase.file_id}`,
+  file_id: purchase.file_id,
+  revision: 0,
+  seller: purchase.recovery,
+  buyerSecret: hex(secret),
+  deadline: 10,
+};
+it('imports only authenticated validated seller-key backups', async () => {
+  const key = newBackupSecret();
+  const backup = await exportSellerKey(sellerKey, key);
+  expect(await importSellerKey(backup, key)).toEqual(sellerKey);
+  await expect(importSellerKey(backup, newBackupSecret())).rejects.toThrow();
+  const edited = JSON.parse(backup);
+  edited.ciphertext = `0x${(parseInt(edited.ciphertext.slice(2, 4), 16) ^ 1).toString(16).padStart(2, '0')}${edited.ciphertext.slice(4)}`;
+  await expect(importSellerKey(JSON.stringify(edited), key)).rejects.toThrow();
+  await expect(importSellerKey(await exportPurchase(record, key), key)).rejects.toMatchObject({
+    code: 'invalid_record',
+  });
+});
+it.each([
+  'id',
+  'revision',
+  'fractional-revision',
+  'deadline',
+  'fractional-deadline',
+  'file_id',
+  'seller',
+  'buyerSecret',
+  'zero-secret',
+  'extra',
+] as const)('rejects an authenticated malformed seller key: %s', async (field) => {
+  const key = newBackupSecret();
+  const original = JSON.parse(await exportSellerKey(sellerKey, key));
+  const value: Record<string, unknown> = { ...sellerKey };
+  if (field === 'extra') value.extra = true;
+  else if (field === 'fractional-revision') value.revision = 0.5;
+  else if (field === 'fractional-deadline') value.deadline = 0.5;
+  else if (field === 'zero-secret') value.buyerSecret = `0x${'00'.repeat(32)}`;
+  else value[field] = field === 'revision' || field === 'deadline' ? -1 : 'invalid';
+  if (field === 'file_id') value.id = `seller-key:${value.file_id}`;
+  const tag = new TextEncoder().encode('annon/purchase-backup/v1');
+  const material = await crypto.subtle.importKey('raw', key, 'HKDF', false, ['deriveKey']);
+  const aes = await crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: Uint8Array.from(Buffer.from(original.salt.slice(2), 'hex')),
+      info: tag,
+    },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt'],
+  );
+  const ciphertext = await crypto.subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: Uint8Array.from(Buffer.from(original.iv.slice(2), 'hex')),
+      additionalData: tag,
+    },
+    aes,
+    new TextEncoder().encode(JSON.stringify(value)),
+  );
+  original.ciphertext = hex(new Uint8Array(ciphertext));
+  await expect(importSellerKey(JSON.stringify(original), key)).rejects.toMatchObject({
+    code: 'invalid_record',
+  });
+});
+
+it('imports a completed seller key with its cleared secret', async () => {
+  const key = newBackupSecret();
+  const completed = { ...sellerKey, buyerSecret: null };
+  expect(await importSellerKey(await exportSellerKey(completed, key), key)).toEqual(completed);
 });

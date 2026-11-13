@@ -21,6 +21,10 @@ afterEach(() => {
 });
 
 it.each([
+  'no-base',
+  'no-base-no-secret',
+  'no-base-auto',
+  'wrong-wallet',
   'disabled',
   'missing',
   'insufficient',
@@ -48,12 +52,13 @@ it.each([
       ckdSecret: bytes(purchase.buyer_key, 48),
       sign: (text) => seller.signMessage({ message: text }),
     });
-    const terms = {
+    const terms: import('../settle-near/terms.js').Terms = {
       ...initial,
       seller: identity,
       cipher_hash: hex(sealed.cipherHash),
       near: applySponsoredFee(initial.near, fee, must(initial.base).price),
     };
+    if (mode.startsWith('no-base')) terms.base = null;
     if (mode === 'missing' || mode === 'self-funded') terms.near = initial.near;
     if (mode === 'insufficient')
       terms.near = {
@@ -87,7 +92,7 @@ it.each([
     vi.spyOn(near, 'getConfig').mockResolvedValue({
       network: terms.network,
       nearUsdc: terms.near.token,
-      usdc: must(terms.base).usdc,
+      usdc: must(initial.base).usdc,
       intents: terms.contract,
       mpc: terms.contract,
       ckdDomain: 2,
@@ -134,7 +139,7 @@ it.each([
         return Response.json({
           network: terms.network,
           nearUsdc: terms.near.token,
-          baseUsdc: must(terms.base).usdc,
+          baseUsdc: must(initial.base).usdc,
           disabled: false,
           acceptingNewBasePayments: mode !== 'disabled',
           contract: terms.contract,
@@ -165,19 +170,27 @@ it.each([
       throw new Error('PAYMENT_REACHED');
     });
     const prompt = vi.fn(async () => true);
+    const initWallet = vi.fn(async () =>
+      mode === 'wrong-wallet'
+        ? { identity: { kind: 'near' as const, id: 'buyer.test' }, authorize: sign }
+        : { identity, authorize: sign, signTypedData: sign },
+    );
     const adapter = createAdapter(
-      { ANNON_CONFIG: config, ANNON_BACKUP_SECRET: '01'.repeat(32) },
+      {
+        ANNON_CONFIG: config,
+        ...(mode === 'no-base-no-secret' ? {} : { ANNON_BACKUP_SECRET: '01'.repeat(32) }),
+      },
       {
         fetch: fetcher,
         prompt,
-        wallet: async () => ({ identity, authorize: sign, signTypedData: sign }),
+        wallet: initWallet,
         file: async () => ({
           terms,
           termsHash: termsHash(terms),
           seller: identity,
           cipherHash: terms.cipher_hash,
           price: BigInt(terms.near.price),
-          payTo: must(terms.base).pay_to,
+          payTo: terms.base?.pay_to ?? '',
           purchaseStorageBalance: 0n,
           moderator: null,
           headerHash: null,
@@ -191,21 +204,38 @@ it.each([
         },
       },
     );
-    const result = adapter({ command: 'buy', target: 'https://files.test/file', maxPrice: '1' });
+    const result = adapter({
+      command: 'buy',
+      target: 'https://files.test/file',
+      maxPrice: '1',
+      ...(mode === 'no-base-auto' ? {} : { route: 'base' as const }),
+    });
     if (mode === 'valid') {
       await expect(result).rejects.toThrow('PAYMENT_REACHED');
       expect(buy).toHaveBeenCalledTimes(1);
     } else {
       await expect(result).rejects.toMatchObject({
-        code:
-          mode === 'self-funded'
-            ? 'transport_required'
-            : ['transport', 'disabled'].includes(mode)
-              ? 'relayer_unavailable'
-              : 'not_sponsored',
+        code: mode.startsWith('no-base')
+          ? 'route_unavailable'
+          : mode === 'wrong-wallet'
+            ? 'base_wallet_required'
+            : mode === 'self-funded'
+              ? 'transport_required'
+              : ['transport', 'disabled'].includes(mode)
+                ? 'relayer_unavailable'
+                : 'not_sponsored',
       });
       expect(buy).not.toHaveBeenCalled();
       expect(prompt).not.toHaveBeenCalled();
+    }
+    if (mode.startsWith('no-base')) {
+      if (mode === 'no-base-auto') expect(initWallet).toHaveBeenCalledTimes(1);
+      else expect(initWallet).not.toHaveBeenCalled();
+      expect(
+        fetcher.mock.calls.every(
+          ([url]) => !String(url).includes('base.test') && !String(url).includes('relay.test'),
+        ),
+      ).toBe(true);
     }
     expect(sign).not.toHaveBeenCalled();
     if (['valid', 'invalid-split', 'transport'].includes(mode))

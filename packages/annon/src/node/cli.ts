@@ -3,6 +3,9 @@ import type { BuyRoute } from '../routes.js';
 import { publicError, usage } from './errors.js';
 
 export type Command =
+  | 'shops'
+  | 'shop'
+  | 'catalog'
   | 'fund'
   | 'budget'
   | 'sell'
@@ -16,6 +19,11 @@ export type Command =
   | 'init';
 export interface Input {
   command: Command;
+  shop?: string;
+  id?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
   storageBudget?: string;
   fundAmount?: string;
   agent?: boolean;
@@ -82,6 +90,9 @@ const common = [
   'backup-secret-file',
 ];
 const perCommand: Record<Command, string[]> = {
+  shops: ['search', 'limit', 'offset'],
+  shop: ['id'],
+  catalog: ['shop', 'search', 'limit', 'offset'],
   fund: [],
   budget: [],
   login: [],
@@ -131,23 +142,38 @@ export function parseCli(argv: string[]): Input {
     if (
       !command ||
       !(command in perCommand) ||
-      (command === 'fund' ? extra.length !== 1 : extra.length !== 0)
+      (command === 'fund' || command === 'shop' ? extra.length !== 1 : extra.length !== 0)
     )
       throw usage();
     const cmd = command as Command;
     if (
-      (['recover', 'login', 'init'].includes(cmd) && target !== undefined) ||
-      (!['recover', 'login', 'init'].includes(cmd) && !target)
+      (['recover', 'login', 'init', 'shops', 'catalog'].includes(cmd) && target !== undefined) ||
+      (!['recover', 'login', 'init', 'shops', 'catalog'].includes(cmd) && !target)
     )
       throw usage();
+    if (cmd === 'shop' && target !== 'add') throw usage();
     const allowed = [...common, ...perCommand[cmd]];
     if (Object.keys(parsed.values).some((k) => !allowed.includes(k))) throw usage();
-    const values = Object.fromEntries(
+    const values: Record<string, string | boolean | number | undefined> = Object.fromEntries(
       Object.entries(parsed.values).map(([k, v]) => [
         k.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()),
         v,
       ]),
     );
+    for (const key of ['limit', 'offset']) {
+      if (values[key] !== undefined) {
+        if (typeof values[key] !== 'string' || !/^(0|[1-9][0-9]*)$/.test(values[key]))
+          throw usage();
+        const n = Number(values[key]);
+        if (
+          !Number.isSafeInteger(n) ||
+          n < (key === 'limit' ? 1 : 0) ||
+          (key === 'limit' && n > 100)
+        )
+          throw usage();
+        values[key] = n;
+      }
+    }
     if (cmd === 'sell') {
       if (values.resume) {
         if (
@@ -167,7 +193,7 @@ export function parseCli(argv: string[]): Input {
     if (values.wallet && !['evm', 'solana', 'near'].includes(String(values.wallet))) throw usage();
     return {
       command: cmd,
-      ...(target === undefined ? {} : { target }),
+      ...(target === undefined ? {} : { target: cmd === 'shop' ? extra[0] : target }),
       ...(cmd === 'fund' ? { fundAmount: extra[0] } : {}),
       ...values,
     } as Input;
@@ -176,6 +202,9 @@ export function parseCli(argv: string[]): Input {
   }
 }
 const HELP = `annon <command> [options]
+shops [--search <q>] [--limit <n>] [--offset <n>]
+shop add <url> [--id <alias>]
+catalog [--shop <id>] [--search <q>] [--limit <n>] [--offset <n>]
 login [--wallet evm|near] [--no-open]
 init --agent --daily-budget <USDC> [--recovery <kind:id>] [--key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> (--credential-env <name> | --credential-keychain <name>)]
 sell <file> --resume <file-id> [--output <PAY2>]

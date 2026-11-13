@@ -2946,3 +2946,38 @@ it.each(['accept', 'open'] as const)(
     await expect(result).rejects.toMatchObject({ code: 'invalid_record' });
   },
 );
+
+it.each([false, true])(
+  'refuses explicit Base without final Base terms before wallet access: %s',
+  async (withWallet) => {
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'near-only',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    });
+    const identity = vi.fn(() => {
+      throw new Error('WALLET_ACCESSED');
+    });
+    const payer = Object.defineProperty({}, 'identity', { get: identity });
+    await expect(
+      h.sdk.buy({
+        route: 'base',
+        fileId: h.terms.file_id,
+        header: h.header,
+        ...(withWallet ? { payer: payer as never } : {}),
+        recovery: wallet,
+        refund: wallet.identity,
+        maxPrice: 200000n,
+      }),
+    ).rejects.toMatchObject({ code: 'route_unavailable' });
+    expect(identity).not.toHaveBeenCalled();
+  },
+);

@@ -36,7 +36,12 @@ export {
   type Token,
   validateRefundAddress,
 } from '../oneclick/oneclick.js';
-export { newBackupSecret } from '../pay/backup.js';
+export {
+  exportSellerKey,
+  importSellerKey,
+  newBackupSecret,
+  type SellerKeyRecord,
+} from '../pay/backup.js';
 export { BaseRpcRateLimited, PayError, type PayErrorCode } from '../pay/base.js';
 export {
   BASE_ELIGIBILITY_MAX_AGE_SECONDS,
@@ -45,6 +50,20 @@ export {
   checkBaseSponsorship,
   validBaseSponsorship,
 } from '../relay/capabilities.js';
+export {
+  type CatalogEntry,
+  type CatalogQuery,
+  type ConfiguredShop,
+  canonicalManifestUrl,
+  catalog,
+  type DiscoveryConfig,
+  type DiscoveryPage,
+  type DiscoveryQuery,
+  listShops,
+  type Shop,
+  type ShopManifest,
+  type ShopProfile,
+} from '../shops/discovery.js';
 export { TransactionUncertain } from '../wallet/uncertain.js';
 export {
   type EvmWallet,

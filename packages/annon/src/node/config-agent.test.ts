@@ -277,3 +277,31 @@ it('refuses ANNON_CONFIG that would disable home-config agent policy', async () 
     read.mockReset();
   }
 });
+
+it('retains validated discovery fields in purchase config without weakening pinned policy', async () => {
+  const { loadConfig } = await import('./config.js');
+  const discovery = {
+    shopDirectoryUrl: 'https://directory.test/list',
+    shops: [{ manifest: 'https://shop.test/.well-known/annon-shop.json', id: 'mine' }],
+    defaultShop: 'mine',
+  };
+  read.mockResolvedValue(
+    JSON.stringify({
+      ...discovery,
+      agent: true,
+      contractId: 'annon.near',
+      nearRpc: 'https://near.test',
+      workDir: '/work',
+      maxPrice: '1',
+    }),
+  );
+  try {
+    expect(await loadConfig({ command: 'buy' }, {})).toMatchObject({
+      ...discovery,
+      agent: true,
+      maxPrice: '1',
+    });
+  } finally {
+    read.mockReset();
+  }
+});

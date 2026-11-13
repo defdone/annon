@@ -14,7 +14,35 @@ const price = z
   .string()
   .regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,6})?$/)
   .describe('USDC decimal amount, up to six decimal places.');
+// Shared discovery validation owns paging errors; metadata describes accepted input.
 export const schemas = {
+  shops: z.strictObject({
+    search: z.string().optional(),
+    limit: z
+      .unknown()
+      .optional()
+      .describe('Page size: a safe integer from 1 through 100; default 20.')
+      .meta({ type: 'integer', minimum: 1, maximum: 100 }),
+    offset: z
+      .unknown()
+      .optional()
+      .describe('Page offset: a nonnegative safe integer; default 0.')
+      .meta({ type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  }),
+  catalog: z.strictObject({
+    shop: z.string().min(1).optional(),
+    search: z.string().optional(),
+    limit: z
+      .unknown()
+      .optional()
+      .describe('Page size: a safe integer from 1 through 100; default 20.')
+      .meta({ type: 'integer', minimum: 1, maximum: 100 }),
+    offset: z
+      .unknown()
+      .optional()
+      .describe('Page offset: a nonnegative safe integer; default 0.')
+      .meta({ type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  }),
   budget: z.strictObject({
     target: target.describe('File ID whose purchase storage budget is read'),
   }),
@@ -66,6 +94,10 @@ export const schemas = {
   status: z.strictObject({ target: target.describe('Purchase ID') }),
 };
 const descriptions = {
+  shops:
+    'Discover configured shops without granting deployment trust. Returns items, total and nextOffset.',
+  catalog:
+    'Browse a shop catalog with client-side search and paging. Does not grant trust or authorize payment. Buy an entry using its resource URL.',
   budget: 'Read the file purchase storage balance and admission requirement.',
   sell: 'Encrypt and register a local file with the SDK. Writes a PAY2 file; seller arranges hosting. May send registration and Base split transactions.',
   buy: 'Prepare and submit a purchase using the SDK. Returns deposit instructions for 1Click; fund them externally, then check annon_status. A submitted payment is not final acceptance.',
@@ -134,7 +166,17 @@ export function createServer(
   }),
 ) {
   const server = new McpServer({ name: 'annon', version });
-  for (const command of ['sell', 'buy', 'open', 'verify', 'recover', 'status', 'budget'] as const) {
+  for (const command of [
+    'sell',
+    'buy',
+    'open',
+    'verify',
+    'recover',
+    'status',
+    'budget',
+    'shops',
+    'catalog',
+  ] as const) {
     server.registerTool(
       `annon_${command}`,
       {
@@ -142,9 +184,9 @@ export function createServer(
         inputSchema: schemas[command],
         outputSchema,
         annotations: {
-          readOnlyHint: command === 'verify' || command === 'budget',
+          readOnlyHint: ['verify', 'budget', 'shops', 'catalog'].includes(command),
           destructiveHint: false,
-          idempotentHint: command === 'verify' || command === 'budget',
+          idempotentHint: ['verify', 'budget', 'shops', 'catalog'].includes(command),
           openWorldHint: true,
         },
       },
