@@ -470,7 +470,7 @@ The 402 for a file lists `annon-near-usdc` (settlement on NEAR at this contract,
 `annon-exact` on Base with `extra.nonceVersion: 2`. 1Click is a way to pay `annon-near-usdc`, not a
 separate offer. Details in `x402-annon.md` §11 (to be updated).
 
-## 11. File budgets and record economics
+## 12. File budgets and record economics
 
 File state adds a fixed-width 16-byte `purchase_storage_balance` outside immutable Terms.
 Registration initializes it to zero or atomically credits optional `args.file_budget`

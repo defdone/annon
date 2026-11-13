@@ -618,7 +618,7 @@ negative.push({
   expected: { sdk: false, contract: 'false' },
 });
 const output = {
-  spec: 'near-settlement.md draft 3 (contract e08df29)',
+  spec: 'near-settlement.md draft 3 (contract ef36b77)',
   encoding:
     'All binary hex uses 0x; Solana JSON id is lowercase hex without prefix. Merkle proofs are bottom-up, indexed from zero. PUBLIC test fixtures only.',
   fixtures: { evm_private_key: evmSeed, solana_seed: hex(edSeed) },
