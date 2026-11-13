@@ -48,6 +48,7 @@ export interface Input {
   price?: string;
   split?: string;
   base?: boolean;
+  force?: boolean;
   moderator?: string;
   route?: 'near' | 'base' | '1click';
   fromChain?: string;
@@ -96,6 +97,7 @@ const perCommand: Record<Command, string[]> = {
   ],
   sell: ['resume', 'price', 'split', 'base', 'moderator', 'output', 'storage-budget'],
   buy: [
+    'force',
     'origin',
     'route',
     'from-chain',
@@ -115,7 +117,7 @@ const perCommand: Record<Command, string[]> = {
 export function parseCli(argv: string[]): Input {
   try {
     const keys = [...new Set([...common, ...Object.values(perCommand).flat()])];
-    const booleans = ['json', 'trust-contract', 'base', 'agent', 'no-open', 'new-key'];
+    const booleans = ['json', 'trust-contract', 'base', 'agent', 'no-open', 'new-key', 'force'];
     const parsed = parseArgs({
       args: argv,
       allowPositionals: true,
@@ -215,8 +217,8 @@ export async function runCli(
       ? 4
       : 0;
   } catch (error) {
-    const { exitCode, ...safe } = publicError(error);
+    const safe = publicError(error);
     write(JSON.stringify({ ok: false, error: safe }, null, json ? undefined : 2));
-    return exitCode;
+    return safe.exitCode;
   }
 }

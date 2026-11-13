@@ -15,6 +15,7 @@ import { createAdapter } from '../../annon/src/node/adapter.js';
 import type { BudgetRecord } from '../../annon/src/node/budget.js';
 import type { Input } from '../../annon/src/node/cli.js';
 import { runCli } from '../../annon/src/node/cli.js';
+import * as guardModule from '../../annon/src/node/purchase-guard.js';
 import { type OneClickQuote, OneClickQuoteExpired } from '../../annon/src/oneclick/oneclick.js';
 import {
   encryptedPurchaseStore,
@@ -26,6 +27,7 @@ import {
 import { block } from '../../annon/src/pay/base.js';
 import { type PurchaseRecord, purchaseKey } from '../../annon/src/pay/purchase.js';
 import { paymentRequired } from '../../annon/src/pay/seller.js';
+import * as splitModule from '../../annon/src/pay/split.js';
 import { fileStore } from '../../annon/src/pay/store-node.js';
 import { bytes, hex } from '../../annon/src/settle-near/codec.js';
 import { parseIdentity } from '../../annon/src/settle-near/identity.js';
@@ -51,7 +53,13 @@ async function harness(
   buyerWallet?: import('../../annon/src/node/wallets.js').LocalWallet,
   realBuy = false,
   afterBuy?: (sdk: Annon, options: AnnonOptions) => void | Promise<void>,
+  beforeStore?: (record: PurchaseRecord, options: AnnonOptions) => Promise<void>,
 ) {
+  vi.spyOn(splitModule, 'readSplitState').mockResolvedValue({
+    kind: 'push',
+    shares: [],
+    distributorPercent: 0,
+  });
   const dir = await mkdtemp(join(tmpdir(), 'annon-mcp-'));
   directories.push(dir);
   await writeFile(join(dir, 'config.json'), JSON.stringify({ dailyBudget: '10' }));
@@ -137,13 +145,57 @@ async function harness(
   let sdk: Annon;
   let options: AnnonOptions;
   let saved: PurchaseRecord | undefined;
+  const accepts = vi.fn();
+  const lookupPurchase = vi.fn(
+    async (
+      _rpc: string,
+      _contract: string,
+      id: string,
+    ): Promise<Awaited<ReturnType<typeof rpcModule.getPurchase>>> => ({
+      purchase_id: id,
+      file_id: terms.file_id,
+      terms_hash: f.termsHash,
+      buyer_key: purchase.buyer_key,
+      recovery: wallet.identity,
+      route: 'near-usdc',
+      delivery: 1,
+      accepted_at: 1,
+      grants: 2,
+    }),
+  );
   const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+    if (String(url).endsWith('/v1/capabilities'))
+      return Response.json({
+        network: f.terms.network,
+        contract: f.terms.contract,
+        nearUsdc: f.terms.near.token,
+        baseUsdc: must(f.terms.base).usdc,
+        disabled: false,
+        baseSponsorship: true,
+        acceptingNewBasePayments: true,
+        methods: ['unlock'],
+      });
+    if (String(url).endsWith('/v1/base-eligibility'))
+      return Response.json({
+        network: f.terms.network,
+        contract: f.terms.contract,
+        fileId: f.terms.file_id,
+        termsHash: f.termsHash,
+        eligible: true,
+        tier: 'legacy',
+        policyVersion: '1',
+        minPrice: '1',
+        fee: { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
+        decidedAt: 1,
+        checkedAt: Math.floor(Date.now() / 1000),
+      });
     if (String(url) === 'https://files.example/file' && !init?.headers)
       return Response.json(offer, {
         status: 402,
         headers: { 'PAYMENT-REQUIRED': Buffer.from(JSON.stringify(offer)).toString('base64') },
       });
     if (String(url).endsWith('/header')) return new Response(header);
+    if (String(url).endsWith('/tokens')) return Response.json([]);
     if (String(url).endsWith('/quote'))
       return Response.json({
         quoteRequest: JSON.parse(String(init?.body)),
@@ -182,17 +234,7 @@ async function harness(
     paymentTerms: (review) => reviews.push(review),
     wallet: async () => buyerWallet ?? wallet,
     file: async () => f,
-    purchase: async (_rpc, _contract, id) => ({
-      purchase_id: id,
-      file_id: terms.file_id,
-      terms_hash: f.termsHash,
-      buyer_key: purchase.buyer_key,
-      recovery: wallet.identity,
-      route: 'near-usdc',
-      delivery: 1,
-      accepted_at: 1,
-      grants: 2,
-    }),
+    purchase: lookupPurchase,
     fetch: fetcher,
     sdk(o) {
       options = o;
@@ -252,10 +294,13 @@ async function harness(
             attempts: [],
           };
           saved = record;
+          await args.beforeSave?.(record);
+          await beforeStore?.(record, o);
           await sdk.store.compareAndSet(purchaseKey(id), null, record);
           if (args.origin) {
             const quote = must(await args.oneClick?.quote(record.message, args.origin));
             const next = { ...record, revision: record.revision + 1, quote };
+            await args.beforeSave?.(next);
             await sdk.store.compareAndSet(purchaseKey(id), record, next);
             saved = next;
             await args.onQuote?.(quote);
@@ -267,6 +312,7 @@ async function harness(
           return { route: p.route, record, payment: 'SIGNED_PAYMENT_PAYLOAD' };
         });
       vi.spyOn(sdk, 'accept').mockImplementation(async () => {
+        accepts();
         if (unsafeUnlock) await o.send?.('unlock', { args: {} });
         return true;
       });
@@ -312,6 +358,14 @@ async function harness(
       ...deployment,
       dailyBudget: '10',
       maxPrice: '0.2',
+      relayer: 'https://relay.example',
+      origins: {
+        'base-usdc': {
+          fromChain: 'base',
+          fromAsset: 'nep141:base-usdc',
+          maxSourceAmount: '1000000',
+        },
+      },
       stateDir: dir,
       workDir: dir,
       allowedResources: [env.ANNON_ALLOWED_RESOURCES],
@@ -346,6 +400,8 @@ async function harness(
     get saved() {
       return must(saved);
     },
+    accepts,
+    lookupPurchase,
   };
 }
 async function connect(execute: (o: Input) => Promise<Record<string, unknown>>) {
@@ -373,6 +429,7 @@ it.each(['near', 'base', '1click'] as const)(
           : undefined;
       const h = await harness(true, undefined, false, buyer);
       must(h.listing.terms.base).price = '123456';
+      h.listing.termsHash = termsHash(h.listing.terms);
       const expected = {
         amountUsdc: route === 'base' ? '0.123456' : '0.2',
         amountBaseUnits: route === 'base' ? '123456' : '200000',
@@ -520,11 +577,9 @@ it.each([false, true])(
         ),
       ).toBe(4);
       expect(JSON.parse(must(printed[0]))).toMatchObject({
-        ok: true,
-        result: { state: 'pending' },
+        ok: false,
+        error: { code: 'settlement_pending', retryAfterSeconds: expect.any(Number), exitCode: 4 },
       });
-      if (!secret)
-        expect(JSON.parse(must(printed[0])).result).not.toHaveProperty('retryAfterSeconds');
     } finally {
       await connection.close();
     }
@@ -766,9 +821,9 @@ it.each(['near', 'base', '1click'] as const)(
           expect(
             await fileStore<BudgetRecord>(join(h.dir, 'budgets')).load('agent:USDC'),
           ).toMatchObject({ daily: '200000', hourly: '200000' });
-          await expect(h.adapter({ ...h.defaults, command: 'buy', ...args })).rejects.toMatchObject(
-            { code: 'budget_exceeded' },
-          );
+          await expect(
+            h.adapter({ ...h.defaults, command: 'buy', ...args, force: true }),
+          ).rejects.toMatchObject({ code: 'budget_exceeded' });
         } finally {
           await connection.close();
         }
@@ -1086,13 +1141,19 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
         expect(
           await runCli(['status', terms.file_id, '--json'], execute, (s) => output.push(s)),
         ).toBe(1);
-        expect(JSON.parse(must(output[0]))).toEqual({ ok: false, error: expected });
+        expect(JSON.parse(must(output[0]))).toEqual({
+          ok: false,
+          error: { ...expected, exitCode: 1 },
+        });
         const result = await connection.client.callTool({
           name: 'annon_status',
           arguments: { target: terms.file_id },
         });
         expect(result.isError).toBe(true);
-        expect(result.structuredContent).toEqual({ ok: false, error: expected });
+        expect(result.structuredContent).toEqual({
+          ok: false,
+          error: { ...expected, exitCode: 1 },
+        });
         expect(JSON.stringify(result)).not.toContain('PRIVATE_UPSTREAM');
       } finally {
         await connection.close();
@@ -1480,8 +1541,10 @@ it('charges the agent daily budget before buy and preserves it across adapter re
     origin: 'base-usdc',
   };
   await h.adapter(input);
-  await expect(h.adapter(input)).rejects.toMatchObject({ code: 'budget_exceeded' });
-  expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(1);
+  await expect(h.adapter({ ...input, force: true })).rejects.toMatchObject({
+    code: 'budget_exceeded',
+  });
+  expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(2);
 });
 
 it('refuses an agent payment without a persisted budget before invoking buy', async () => {
@@ -1562,14 +1625,14 @@ it('returns a quote refusal through both CLI and MCP with a decimal minimum and 
     message: 'Amount is too low for bridge, try at least 149983',
     minimumAmountUsdc: '0.149983',
   };
-  expect(JSON.parse(out.mock.calls[0]?.[0] ?? '').error).toEqual(expected);
+  expect(JSON.parse(out.mock.calls[0]?.[0] ?? '').error).toEqual({ ...expected, exitCode: 1 });
   const c = await connect(execute);
   try {
     const result = await c.client.callTool({
       name: 'annon_buy',
-      arguments: { target: h.defaults.url, route: '1click', origin: 'base-usdc' },
+      arguments: { target: h.defaults.url, route: '1click', origin: 'base-usdc', force: true },
     });
-    expect(result.structuredContent).toEqual({ ok: false, error: expected });
+    expect(result.structuredContent).toEqual({ ok: false, error: { ...expected, exitCode: 1 } });
     expect(JSON.stringify([result, out.mock.calls])).not.toContain('SECRET_VALUE');
   } finally {
     await c.close();
@@ -1623,7 +1686,9 @@ it.each([400, 500, 429, 0])(
     };
     await expect(h.adapter(input)).rejects.toThrow();
     h.fetcher.mockImplementation(original);
-    await expect(h.adapter(input)).resolves.toMatchObject({ state: 'deposit_required' });
+    await expect(h.adapter({ ...input, force: true })).resolves.toMatchObject({
+      state: 'deposit_required',
+    });
     expect(h.calls.filter((c) => c.command === 'buy')).toHaveLength(2);
   },
 );
@@ -1641,6 +1706,10 @@ it.each(['near:testnet', 'near:sandbox'])(
         h.listing.terms.network = network;
         h.listing.terms.near.token = h.contractConfig.nearUsdc;
         must(h.listing.terms.base).usdc = h.contractConfig.usdc;
+        h.listing.termsHash = termsHash(h.listing.terms, {
+          nearUsdc: h.contractConfig.nearUsdc,
+          baseUsdc: h.contractConfig.usdc,
+        });
         if (agent) await patchConfig(h.defaults.config, { network });
         const input = {
           ...h.defaults,
@@ -1695,7 +1764,19 @@ it.each(['invalid', '0'])(
     const ledger = fileStore<BudgetRecord>(join(h.dir, 'budgets'));
     h.fetcher.mockImplementation(async (url, init) => {
       if (!String(url).endsWith('/quote')) return original(url, init);
-      const old = must(await ledger.load('agent:USDC'));
+      await mkdir(join(h.dir, 'budgets'), { recursive: true });
+      let old = await ledger.load('agent:USDC');
+      if (!old) {
+        await ledger.compareAndSet('agent:USDC', null, {
+          id: 'agent:USDC',
+          revision: 0,
+          day: 0,
+          hour: 0,
+          daily: '0',
+          hourly: '0',
+        });
+        old = must(await ledger.load('agent:USDC'));
+      }
       expect(
         await ledger.compareAndSet(old.id, old, { ...old, revision: old.revision + 1, daily }),
       ).toBe(true);
@@ -1879,10 +1960,17 @@ it.each([true, false])(
     expect(h.fetcher.mock.calls.filter(([url]) => String(url).endsWith('/quote'))).toHaveLength(1);
   },
 );
-it('keeps explicit unknown chain assets working and includes their quoted source amount in agent JSON', async () => {
+it('keeps capped unknown chain assets working and includes their quoted source amount in JSON', async () => {
   const h = await harness();
-  h.env.ANNON_ORIGINS = JSON.stringify({
-    custom: { fromChain: 'unknown-chain', fromAsset: 'nep141:custom', refundTo: 'test-refund' },
+  await patchConfig(h.defaults.config, {
+    origins: {
+      custom: {
+        fromChain: 'unknown-chain',
+        fromAsset: 'nep141:custom',
+        refundTo: 'test-refund',
+        maxSourceAmount: '1000000',
+      },
+    },
   });
   stubSource(h);
   const output: string[] = [];
@@ -2124,13 +2212,17 @@ it.each(['proof', 'cutoff', 'storage', 'review'])(
       expect(h.notify).not.toHaveBeenCalled();
       expect(JSON.stringify(h.reviews)).not.toContain('deposit-address');
       const ledger = fileStore<BudgetRecord>(join(h.dir, 'budgets'));
-      expect(await ledger.load('agent:USDC')).toMatchObject({ daily: '0', hourly: '0' });
+      expect(await ledger.load('agent:USDC')).toSatisfy(
+        (value: BudgetRecord | null) => !value || (value.daily === '0' && value.hourly === '0'),
+      );
       refuse = false;
-      expect(await h.adapter(input)).toMatchObject({
+      expect(await h.adapter({ ...input, force: true })).toMatchObject({
         instructions: { address: 'deposit-address' },
       });
       expect(await ledger.load('agent:USDC')).toMatchObject({ daily: '200000', hourly: '200000' });
-      await expect(h.adapter(input)).rejects.toMatchObject({ code: 'budget_exceeded' });
+      await expect(h.adapter({ ...input, force: true })).rejects.toMatchObject({
+        code: 'budget_exceeded',
+      });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -2148,7 +2240,10 @@ it('returns quote_expired through CLI and MCP with a fixed actionable message', 
     ok: false,
     error: { code: 'quote_expired', message: 'The 1Click quote expired. Run buy again.' },
   };
-  expect(JSON.parse(must(output[0]))).toEqual(expected);
+  expect(JSON.parse(must(output[0]))).toEqual({
+    ...expected,
+    error: { ...expected.error, exitCode: 1 },
+  });
   const connection = await connect(execute);
   try {
     const result = await connection.client.callTool({
@@ -2156,7 +2251,10 @@ it('returns quote_expired through CLI and MCP with a fixed actionable message', 
       arguments: { target: 'https://files.example/file' },
     });
     expect(result.isError).toBe(true);
-    expect(result.structuredContent).toEqual(expected);
+    expect(result.structuredContent).toEqual({
+      ...expected,
+      error: { ...expected.error, exitCode: 1 },
+    });
   } finally {
     await connection.close();
   }
@@ -2262,12 +2360,19 @@ it('checks the relayer sponsorship floor before a Base payment or budget reserva
   await patchConfig(h.defaults.config, { relayer: 'https://relay.example' });
   const original = must(h.fetcher.getMockImplementation());
   h.fetcher.mockImplementation(async (url, init) =>
-    String(url).endsWith('/v1/capabilities')
+    String(url).endsWith('/v1/base-eligibility')
       ? Response.json({
+          network: terms.network,
           contract: terms.contract,
+          fileId: terms.file_id,
+          termsHash: h.listing.termsHash,
+          eligible: true,
+          tier: 'legacy',
+          policyVersion: '1',
           minPrice: '200001',
-          disabled: false,
-          methods: ['unlock'],
+          fee: { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
+          decidedAt: 1,
+          checkedAt: Math.floor(Date.now() / 1000),
         })
       : original(url, init),
   );
@@ -2330,7 +2435,9 @@ it.each([undefined, ['https://files.example/*']])(
       origin: 'base-usdc',
     };
     await expect(h.adapter(input)).resolves.toMatchObject({ purchaseId: expect.any(String) });
-    await expect(h.adapter(input)).rejects.toMatchObject({ code: 'budget_exceeded' });
+    await expect(h.adapter({ ...input, force: true })).rejects.toMatchObject({
+      code: 'budget_exceeded',
+    });
     await expect(h.adapter({ ...input, target: h.offerFile })).rejects.toMatchObject({
       code: 'resource_not_allowed',
     });
@@ -2367,3 +2474,481 @@ it('checks storage budget before the interactive buy prompt', async () => {
   expect(buyer.authorize).not.toHaveBeenCalled();
   expect(h.calls).toHaveLength(0);
 });
+
+it('refuses a forbidden open URL before acceptance or fetch', async () => {
+  const h = await harness();
+  await expect(
+    h.adapter({
+      ...h.defaults,
+      command: 'open',
+      target: terms.file_id,
+      output: 'out.txt',
+      url: 'https://private.test/file',
+    }),
+  ).rejects.toMatchObject({ code: 'resource_not_allowed' });
+  expect(h.fetcher).not.toHaveBeenCalled();
+  expect(h.calls).toEqual([]);
+});
+it('refuses recovery that differs from the configured signer before credentials or fetch', async () => {
+  const h = await harness();
+  await patchConfig(h.defaults.config, {
+    signer: { mode: 'env', name: 'TEST_KEY', kind: 'evm', identity: h.listing.seller },
+  });
+  await expect(
+    h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.defaults.url,
+      recovery: `evm:0x${'11'.repeat(20)}`,
+    }),
+  ).rejects.toMatchObject({ code: 'wrong_identity' });
+  expect(h.fetcher).not.toHaveBeenCalled();
+});
+it('refuses a second saved purchase across adapter instances unless explicitly forced', async () => {
+  const h = await harness();
+  delete (h.env as Record<string, unknown>).ANNON_MAX_PRICE;
+  await patchConfig(h.defaults.config, {
+    maxPrice: '1',
+    origins: { source: { fromChain: 'base', fromAsset: 'nep141:custom', usdcDecimals: 6 } },
+  });
+  const input = {
+    ...h.defaults,
+    command: 'buy' as const,
+    target: h.defaults.url,
+    route: '1click' as const,
+    origin: 'source',
+  };
+  await h.adapter(input);
+  const count = h.calls.length;
+  await rm(join(h.dir, 'purchase-guards'), { recursive: true });
+  await expect(h.adapter(input)).rejects.toMatchObject({ code: 'purchase_open' });
+  expect(h.calls).toHaveLength(count);
+  await expect(h.adapter({ ...input, force: true })).resolves.toHaveProperty('purchaseId');
+});
+it.each(['price', 'daily', 'unknown-source'] as const)(
+  'checks the actual 1Click source amount against %s policy',
+  async (mode) => {
+    const h = await harness();
+    delete (h.env as Record<string, unknown>).ANNON_MAX_PRICE;
+    await patchConfig(h.defaults.config, {
+      maxPrice: mode === 'daily' ? '1' : '0.2',
+      dailyBudget: mode === 'daily' ? '0.2' : '10',
+      origins: {
+        source: {
+          fromChain: 'base',
+          fromAsset: 'nep141:custom',
+          ...(mode === 'unknown-source' ? {} : { usdcDecimals: 6 }),
+        },
+      },
+    });
+    await expect(
+      h.adapter({
+        ...h.defaults,
+        command: 'buy',
+        target: h.defaults.url,
+        route: '1click',
+        origin: 'source',
+      }),
+    ).rejects.toMatchObject({
+      code:
+        mode === 'price'
+          ? 'price_above_max'
+          : mode === 'daily'
+            ? 'budget_exceeded'
+            : 'origin_not_allowed',
+    });
+    expect(
+      h.fetcher.mock.calls.some(([, init]) => init?.headers && 'PAYMENT-SIGNATURE' in init.headers),
+    ).toBe(false);
+  },
+);
+
+it('enforces a download cooldown before another open reaches the SDK or host after reconnect', async () => {
+  const h = await harness();
+  const bought = await h.adapter({
+    ...h.defaults,
+    command: 'buy',
+    target: h.defaults.url,
+    route: '1click',
+    origin: 'base-usdc',
+  });
+  h.fetcher.mockImplementation(async () =>
+    Response.json(
+      {
+        error: 'download_limited',
+        retryAfterSeconds: 900,
+        purchaseId: bought.purchaseId,
+        fileId: bought.fileId,
+      },
+      { status: 429, headers: { 'Retry-After': '900' } },
+    ),
+  );
+  const args = { target: bought.purchaseId, output: 'opened.txt' };
+  let connection = await connect((input) => h.adapter({ ...h.defaults, ...input }));
+  try {
+    const first = await connection.client.callTool({ name: 'annon_open', arguments: args });
+    expect(first.structuredContent).toMatchObject({
+      ok: false,
+      error: {
+        code: 'download_limited',
+        retryAfterSeconds: 900,
+        purchaseId: bought.purchaseId,
+        fileId: bought.fileId,
+        exitCode: 4,
+      },
+    });
+    const fetches = h.fetcher.mock.calls.length;
+    const opens = h.calls.filter((c) => c.command === 'open').length;
+    await connection.close();
+    connection = await connect((input) => h.adapter({ ...h.defaults, ...input }));
+    const second = await connection.client.callTool({ name: 'annon_open', arguments: args });
+    expect(second.structuredContent).toMatchObject({
+      ok: false,
+      error: { code: 'download_limited', retryAfterSeconds: expect.any(Number), exitCode: 4 },
+    });
+    expect(h.fetcher).toHaveBeenCalledTimes(fetches);
+    expect(h.calls.filter((c) => c.command === 'open')).toHaveLength(opens);
+  } finally {
+    await connection.close();
+  }
+});
+it('enforces a settlement wait before another accept call', async () => {
+  const h = await harness(true, undefined, true);
+  const bought = await h.adapter({
+    ...h.defaults,
+    command: 'buy',
+    target: h.defaults.url,
+    route: '1click',
+    origin: 'base-usdc',
+  });
+  h.fetcher.mockResolvedValue(
+    new Response(null, { status: 425, headers: { 'Retry-After': '30' } }),
+  );
+  const args = {
+    ...h.defaults,
+    command: 'open' as const,
+    target: String(bought.purchaseId),
+    file: h.localFile,
+    output: 'out.txt',
+  };
+  await expect(h.adapter(args)).rejects.toMatchObject({ code: 'payment_not_safe' });
+  const count = h.fetcher.mock.calls.length;
+  await expect(h.adapter(args)).rejects.toMatchObject({
+    code: 'payment_not_safe',
+    retryAfterSeconds: expect.any(Number),
+  });
+  expect(h.fetcher).toHaveBeenCalledTimes(count);
+});
+
+it('enforces an explicit non-USDC source cap before releasing instructions', async () => {
+  const h = await harness();
+  await patchConfig(h.defaults.config, {
+    origins: {
+      source: { fromChain: 'base', fromAsset: 'nep141:custom', maxSourceAmount: '200000' },
+    },
+  });
+  await expect(
+    h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.defaults.url,
+      route: '1click',
+      origin: 'source',
+    }),
+  ).rejects.toMatchObject({ code: 'price_above_max' });
+});
+it('reserves the quoted USDC source amount using its configured decimal precision', async () => {
+  const h = await harness();
+  delete (h.env as Record<string, unknown>).ANNON_MAX_PRICE;
+  await patchConfig(h.defaults.config, {
+    maxPrice: '1',
+    origins: { source: { fromChain: 'base', fromAsset: 'nep141:custom', usdcDecimals: 18 } },
+  });
+  const original = must(h.fetcher.getMockImplementation());
+  h.fetcher.mockImplementation(async (url, init) => {
+    const r = await original(url, init);
+    if (!String(url).endsWith('/quote')) return r;
+    const body = await r.json();
+    body.quote.amountIn = '210000000000000000';
+    return Response.json(body);
+  });
+  await h.adapter({
+    ...h.defaults,
+    command: 'buy',
+    target: h.defaults.url,
+    route: '1click',
+    origin: 'source',
+  });
+  expect(await fileStore<BudgetRecord>(join(h.dir, 'budgets')).load('agent:USDC')).toMatchObject({
+    daily: '210000',
+  });
+});
+
+it('checks a saved open URL against the current allowlist before any fetch', async () => {
+  const h = await harness();
+  const bought = await h.adapter({
+    ...h.defaults,
+    command: 'buy',
+    target: h.defaults.url,
+    route: '1click',
+    origin: 'base-usdc',
+  });
+  await patchConfig(h.defaults.config, { allowedResources: [] });
+  const count = h.fetcher.mock.calls.length;
+  const { url: _, ...defaults } = h.defaults;
+  await expect(
+    h.adapter({
+      ...defaults,
+      command: 'open',
+      target: String(bought.purchaseId),
+      output: 'out.txt',
+    }),
+  ).rejects.toMatchObject({ code: 'resource_not_allowed' });
+  expect(h.fetcher).toHaveBeenCalledTimes(count);
+  expect(h.accepts).not.toHaveBeenCalled();
+});
+
+it('refuses unconfigured USDC precision despite token catalog metadata', async () => {
+  const h = await harness();
+  await patchConfig(h.defaults.config, {
+    origins: {
+      source: { fromChain: 'base', fromAsset: 'nep141:custom' },
+    },
+  });
+  const original = must(h.fetcher.getMockImplementation());
+  h.fetcher.mockImplementation(async (url, init) =>
+    String(url).endsWith('/tokens')
+      ? Response.json([
+          { blockchain: 'base', assetId: 'nep141:custom', symbol: 'USDC', decimals: 6 },
+        ])
+      : original(url, init),
+  );
+  await expect(
+    h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.defaults.url,
+      route: '1click',
+      origin: 'source',
+    }),
+  ).rejects.toMatchObject({ code: 'origin_not_allowed' });
+  expect(h.fetcher).not.toHaveBeenCalled();
+});
+
+it('claims a purchase before asking a human to confirm it', async () => {
+  const prompt = vi.fn(async () => true);
+  const h = await harness(false, prompt);
+  const input = {
+    ...h.defaults,
+    command: 'buy' as const,
+    target: h.defaults.url,
+    route: 'base' as const,
+    maxPrice: '0.2',
+  };
+  await h.adapter(input);
+  const prompts = prompt.mock.calls.length;
+  await expect(h.adapter(input)).rejects.toMatchObject({ code: 'purchase_open' });
+  expect(prompt).toHaveBeenCalledTimes(prompts);
+});
+
+it('expires unsaved guard ids only when the claim window passed and the chain has no purchase', async () => {
+  const h = await harness();
+  h.lookupPurchase.mockResolvedValue(null);
+  const dir = join(h.dir, 'purchase-guards');
+  await mkdir(dir);
+  const key = JSON.stringify([terms.network, terms.contract, terms.file_id]);
+  const store = fileStore<import('../../annon/src/node/purchase-guard.js').PurchaseGuard>(dir);
+  const record = {
+    id: key,
+    revision: 0,
+    owner: null,
+    until: Math.floor(Date.now() / 1000) + 120,
+    purchases: [`0x${'11'.repeat(32)}`],
+  };
+  await store.compareAndSet(key, null, record);
+  const input = {
+    ...h.defaults,
+    command: 'buy' as const,
+    target: h.defaults.url,
+    route: '1click' as const,
+    origin: 'base-usdc',
+  };
+  await expect(h.adapter(input)).rejects.toMatchObject({ code: 'purchase_open' });
+  await store.compareAndSet(key, record, {
+    ...record,
+    revision: 1,
+    until: Math.floor(Date.now() / 1000) - 1,
+  });
+  await expect(h.adapter(input)).resolves.toHaveProperty('purchaseId');
+});
+
+it('renews the claim during a long confirmation and stops heartbeats afterwards', async () => {
+  let entered!: () => void;
+  let finish!: (yes: boolean) => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const prompt = vi.fn(() => {
+    entered();
+    return new Promise<boolean>((resolve) => {
+      finish = resolve;
+    });
+  });
+  const h = await harness(false, prompt);
+  let pending: Promise<unknown> | undefined;
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+  try {
+    pending = h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.defaults.url,
+      route: 'base',
+      maxPrice: '0.2',
+    });
+    await started;
+    const key = JSON.stringify([terms.network, terms.contract, terms.file_id]);
+    const store = fileStore<import('../../annon/src/node/purchase-guard.js').PurchaseGuard>(
+      join(h.dir, 'purchase-guards'),
+    );
+    const original = must(await store.load(key)).until;
+    await vi.advanceTimersByTimeAsync(90000);
+    await vi.waitFor(async () =>
+      expect(must(await store.load(key)).until).toBeGreaterThan(original),
+    );
+    finish(true);
+    await pending;
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    finish(true);
+    await pending?.catch(() => {});
+    vi.useRealTimers();
+  }
+});
+
+it('claims each purchase id before the SDK saves its first checkpoint', async () => {
+  const checked = vi.fn();
+  let guardDir = '';
+  const h = await harness(
+    true,
+    undefined,
+    false,
+    undefined,
+    false,
+    undefined,
+    async (record, options) => {
+      const store =
+        fileStore<import('../../annon/src/node/purchase-guard.js').PurchaseGuard>(guardDir);
+      const key = JSON.stringify([terms.network, terms.contract, terms.file_id]);
+      expect(must(await store.load(key)).purchases).toContain(record.id);
+      expect(
+        await encryptedPurchaseStore(options.rawStore, options.backupSecret).load(
+          purchaseKey(record.id),
+        ),
+      ).toBeNull();
+      checked();
+    },
+  );
+  guardDir = join(h.dir, 'purchase-guards');
+  await h.adapter({
+    ...h.defaults,
+    command: 'buy',
+    target: h.defaults.url,
+    route: '1click',
+    origin: 'base-usdc',
+  });
+  expect(checked).toHaveBeenCalledTimes(1);
+});
+
+it('removes provisional CLI plaintext when the SDK rejects the decrypted size', async () => {
+  const h = await harness();
+  const bought = await h.adapter({
+    ...h.defaults,
+    command: 'buy',
+    target: h.defaults.url,
+    route: '1click',
+    origin: 'base-usdc',
+  });
+  const execute = createAdapter(h.env, {
+    agent: true,
+    fetch: h.fetcher,
+    sdk(options) {
+      const sdk = new Annon(options);
+      vi.spyOn(sdk, 'accept').mockResolvedValue(true);
+      vi.spyOn(sdk, 'openTo').mockImplementation(async ({ sink }) => {
+        await new Blob(['provisional']).stream().pipeTo(sink);
+        throw Object.assign(new Error('too_large'), { code: 'too_large' });
+      });
+      return sdk;
+    },
+  });
+  await expect(
+    execute({
+      ...h.defaults,
+      command: 'open',
+      target: String(bought.purchaseId),
+      file: h.localFile,
+      output: 'oversized.txt',
+    }),
+  ).rejects.toMatchObject({ code: 'too_large' });
+  const { readdir } = await import('node:fs/promises');
+  expect((await readdir(h.dir)).filter((name) => name.startsWith('oversized.txt'))).toEqual([]);
+});
+
+it('requires a configured origin for an explicit 1Click route despite launcher source env', async () => {
+  const h = await harness();
+  Object.assign(h.env, { ANNON_FROM_CHAIN: 'base' });
+  stubSource(h);
+  await expect(
+    h.adapter({
+      ...h.defaults,
+      command: 'buy',
+      target: h.defaults.url,
+      route: '1click',
+    }),
+  ).rejects.toMatchObject({ code: 'origin_not_allowed' });
+  expect(h.calls).toEqual([]);
+  expect(h.fetcher.mock.calls.some(([url]) => String(url).endsWith('/tokens'))).toBe(false);
+});
+
+it.each([false, true])(
+  'returns a signed buy after a rejected renew (release fails: %s)',
+  async (releaseFails) => {
+    const claim = guardModule.claimPurchase;
+    let active!: Awaited<ReturnType<typeof claim>>;
+    let failNext = false;
+    vi.spyOn(guardModule, 'claimPurchase').mockImplementation(async (store, key, options) => {
+      active = await claim(
+        {
+          ...store,
+          compareAndSet: async (...args) => {
+            if (failNext) {
+              failNext = false;
+              return false;
+            }
+            return store.compareAndSet(...args);
+          },
+        },
+        key,
+        options,
+      );
+      if (releaseFails)
+        active.release = async () => {
+          throw new Error('release unavailable');
+        };
+      return active;
+    });
+    const h = await harness(true, undefined, false, undefined, false, async () => {
+      failNext = true;
+      await expect(active.renew()).rejects.toMatchObject({ code: 'store_conflict' });
+    });
+    await expect(
+      h.adapter({
+        ...h.defaults,
+        command: 'buy',
+        target: h.defaults.url,
+        route: 'base',
+      }),
+    ).resolves.toMatchObject({ purchaseId: expect.any(String), state: 'submitted' });
+    expect(h.calls.filter((call) => call.command === 'buy')).toHaveLength(1);
+  },
+);

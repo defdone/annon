@@ -25,7 +25,16 @@ export interface Config {
   trustContract?: boolean;
   mpcKey?: string;
   moderators?: string[];
-  origins?: Record<string, { fromChain: string; fromAsset: string; refundTo?: string }>;
+  origins?: Record<
+    string,
+    {
+      fromChain: string;
+      fromAsset: string;
+      refundTo?: string;
+      maxSourceAmount?: string;
+      usdcDecimals?: number;
+    }
+  >;
   allowedResources?: string[];
   storageBudget?: string;
   maxProtocolFee?: { fixed: string; bps: number };
@@ -55,19 +64,21 @@ export async function loadConfig(
         'Agent mode requires maxPrice in the pinned config.',
         2,
       );
+    const policyEnv = agent && env.ANNON_AGENT !== 'true' ? {} : env;
     const c: Config = {
-      contractId: o.contractId ?? env.ANNON_CONTRACT_ID ?? file.contractId ?? '',
+      contractId: o.contractId ?? policyEnv.ANNON_CONTRACT_ID ?? file.contractId ?? '',
       nearRpc:
         o.nearRpc ??
-        env.ANNON_NEAR_RPC ??
+        policyEnv.ANNON_NEAR_RPC ??
         file.nearRpc ??
         (login
-          ? (o.network ?? env.ANNON_NETWORK ?? file.network ?? 'near:mainnet') === 'near:testnet'
+          ? (o.network ?? policyEnv.ANNON_NETWORK ?? file.network ?? 'near:mainnet') ===
+            'near:testnet'
             ? 'https://rpc.testnet.fastnear.com'
             : 'https://rpc.mainnet.fastnear.com'
           : ''),
-      baseRpc: o.baseRpc ?? env.ANNON_BASE_RPC ?? file.baseRpc ?? '',
-      network: o.network ?? env.ANNON_NETWORK ?? file.network ?? 'near:mainnet',
+      baseRpc: o.baseRpc ?? policyEnv.ANNON_BASE_RPC ?? file.baseRpc ?? '',
+      network: o.network ?? policyEnv.ANNON_NETWORK ?? file.network ?? 'near:mainnet',
       stateDir:
         o.stateDir ??
         (agent ? undefined : env.ANNON_STATE_DIR) ??
@@ -116,7 +127,7 @@ export async function loadConfig(
         'Agent configs must be pinned by the launcher environment.',
         2,
       );
-    const origins = env.ANNON_ORIGINS ? JSON.parse(env.ANNON_ORIGINS) : file.origins;
+    const origins = policyEnv.ANNON_ORIGINS ? JSON.parse(policyEnv.ANNON_ORIGINS) : file.origins;
     if (origins) {
       if (typeof origins !== 'object' || Array.isArray(origins)) throw new Error('invalid origins');
       for (const value of Object.values(origins) as NonNullable<Config['origins']>[string][]) {
@@ -126,9 +137,23 @@ export async function loadConfig(
           !value.fromChain ||
           typeof value.fromAsset !== 'string' ||
           !value.fromAsset.startsWith('nep141:') ||
+          (value.maxSourceAmount !== undefined &&
+            (typeof value.maxSourceAmount !== 'string' ||
+              !/^[1-9][0-9]{0,38}$/.test(value.maxSourceAmount) ||
+              BigInt(value.maxSourceAmount) >= 2n ** 128n)) ||
+          (value.usdcDecimals !== undefined &&
+            (!Number.isSafeInteger(value.usdcDecimals) ||
+              value.usdcDecimals < 0 ||
+              value.usdcDecimals > 255)) ||
           (value.refundTo !== undefined && (typeof value.refundTo !== 'string' || !value.refundTo))
         )
           throw new Error('invalid origin');
+        if (agent && value.usdcDecimals === undefined && value.maxSourceAmount === undefined)
+          throw new AdapterError(
+            'origin_not_allowed',
+            'Configure usdcDecimals or maxSourceAmount for every origin.',
+            2,
+          );
       }
       c.origins = origins;
     }
@@ -171,17 +196,17 @@ export async function loadConfig(
         : (envMax ?? file.maxPrice);
     if (maxPrice !== undefined) c.maxPrice = maxPrice;
     c.trustContract =
-      env.ANNON_TRUST_CONTRACT === undefined
+      policyEnv.ANNON_TRUST_CONTRACT === undefined
         ? file.trustContract === true
-        : env.ANNON_TRUST_CONTRACT === 'true';
-    const moderators = env.ANNON_MODERATORS?.split(',') ?? file.moderators;
+        : policyEnv.ANNON_TRUST_CONTRACT === 'true';
+    const moderators = policyEnv.ANNON_MODERATORS?.split(',') ?? file.moderators;
     if (moderators) {
       for (const moderator of moderators) account(moderator);
       c.moderators = moderators;
     }
-    const mpcKey = env.ANNON_MPC_KEY ?? file.mpcKey;
+    const mpcKey = policyEnv.ANNON_MPC_KEY ?? file.mpcKey;
     if (mpcKey) c.mpcKey = mpcKey;
-    const relayer = o.relayer ?? env.ANNON_RELAYER ?? file.relayer;
+    const relayer = o.relayer ?? policyEnv.ANNON_RELAYER ?? file.relayer;
     if (relayer) c.relayer = relayer;
     if (!login || c.contractId) account(c.contractId);
     network(c.network);

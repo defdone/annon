@@ -132,11 +132,30 @@ it.each([
         return new Response(file.subarray(0, parseHeader(file).headerLen));
       if (String(url) === 'https://relay.test/v1/capabilities')
         return Response.json({
+          network: terms.network,
+          nearUsdc: terms.near.token,
+          baseUsdc: must(terms.base).usdc,
+          disabled: false,
+          acceptingNewBasePayments: mode !== 'disabled',
           contract: terms.contract,
           minPrice: '100000',
           methods: ['unlock'],
           fee,
           baseSponsorship: mode !== 'disabled',
+        });
+      if (String(url).endsWith('/v1/base-eligibility'))
+        return Response.json({
+          network: terms.network,
+          contract: terms.contract,
+          fileId: terms.file_id,
+          termsHash: termsHash(terms),
+          eligible: true,
+          tier: 'legacy',
+          policyVersion: '1',
+          minPrice: '100000',
+          fee,
+          decidedAt: 1,
+          checkedAt: Math.floor(Date.now() / 1000),
         });
       throw new Error('Unexpected network access');
     });
@@ -173,12 +192,17 @@ it.each([
       },
     );
     const result = adapter({ command: 'buy', target: 'https://files.test/file', maxPrice: '1' });
-    if (mode === 'valid' || mode === 'self-funded') {
+    if (mode === 'valid') {
       await expect(result).rejects.toThrow('PAYMENT_REACHED');
       expect(buy).toHaveBeenCalledTimes(1);
     } else {
       await expect(result).rejects.toMatchObject({
-        code: mode === 'transport' ? 'relayer_unavailable' : 'not_sponsored',
+        code:
+          mode === 'self-funded'
+            ? 'transport_required'
+            : ['transport', 'disabled'].includes(mode)
+              ? 'relayer_unavailable'
+              : 'not_sponsored',
       });
       expect(buy).not.toHaveBeenCalled();
       expect(prompt).not.toHaveBeenCalled();

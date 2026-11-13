@@ -40,3 +40,46 @@ it.each([
   expect(error.message).toBe(message);
   expect(publicError(error)).toEqual({ code: 'budget_exceeded', message, exitCode: 1 });
 });
+
+it.each([-0.1, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+  'omits invalid download retry hints %s',
+  async (hint) => {
+    const { DownloadError } = await import('../download/download.js');
+    const error = Object.assign(new DownloadError('download_limited'), {
+      retryAfterSeconds: hint,
+      fileId: 'private',
+      purchaseId: 'private',
+    });
+    const result = publicError(error);
+    expect(result).not.toHaveProperty('retryAfterSeconds');
+    expect(result).not.toHaveProperty('fileId');
+    expect(result).not.toHaveProperty('purchaseId');
+    expect(result.exitCode).toBe(4);
+  },
+);
+it('preserves rounded download retry evidence and pending exit code', async () => {
+  const { DownloadError } = await import('../download/download.js');
+  const id = `0x${'11'.repeat(32)}`;
+  expect(
+    publicError(
+      Object.assign(new DownloadError('download_limited'), {
+        retryAfterSeconds: 1.1,
+        fileId: id,
+        purchaseId: id,
+      }),
+    ),
+  ).toMatchObject({
+    code: 'download_limited',
+    retryAfterSeconds: 2,
+    fileId: id,
+    purchaseId: id,
+    exitCode: 4,
+  });
+});
+
+it('reports a split RPC network mismatch as a configuration error', () => {
+  expect(publicError(new PayError('network_mismatch'))).toMatchObject({
+    code: 'network_mismatch',
+    exitCode: 2,
+  });
+});

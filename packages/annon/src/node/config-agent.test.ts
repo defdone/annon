@@ -160,3 +160,120 @@ it('requires config workDir and permits its environment override only for an exp
     read.mockReset();
   }
 });
+
+it.each([false, true])(
+  'pins deployment and trust env unless launcher opts in (forced=%s)',
+  async (forced) => {
+    const { loadConfig } = await import('./config.js');
+    read.mockResolvedValue(
+      JSON.stringify({
+        agent: true,
+        contractId: 'annon.near',
+        nearRpc: 'https://near.test',
+        baseRpc: 'https://base.test',
+        network: 'near:mainnet',
+        relayer: 'https://relay.test',
+        trustContract: false,
+        moderators: [],
+        mpcKey: 'pinned',
+        origins: {},
+        workDir: '/work',
+        maxPrice: '1',
+      }),
+    );
+    const env = {
+      ANNON_CONTRACT_ID: 'other.near',
+      ANNON_NEAR_RPC: 'https://other.test',
+      ANNON_BASE_RPC: 'https://other.test',
+      ANNON_NETWORK: 'near:testnet',
+      ANNON_RELAYER: 'https://other.test',
+      ANNON_TRUST_CONTRACT: 'true',
+      ANNON_MODERATORS: 'other.near',
+      ANNON_MPC_KEY: 'other',
+      ANNON_ORIGINS: '{}',
+    };
+    try {
+      expect(await loadConfig({ command: 'buy' }, env, false, forced)).toMatchObject({
+        contractId: 'annon.near',
+        nearRpc: 'https://near.test',
+        baseRpc: 'https://base.test',
+        network: 'near:mainnet',
+        relayer: 'https://relay.test',
+        trustContract: false,
+        moderators: [],
+        mpcKey: 'pinned',
+      });
+      expect(
+        await loadConfig({ command: 'buy' }, { ...env, ANNON_AGENT: 'true' }, false, forced),
+      ).toMatchObject({ contractId: 'other.near', trustContract: true, network: 'near:testnet' });
+    } finally {
+      read.mockReset();
+    }
+  },
+);
+
+it.each([
+  { maxSourceAmount: '-1' },
+  { maxSourceAmount: '0' },
+  { maxSourceAmount: 2 },
+  { maxSourceAmount: '340282366920938463463374607431768211456' },
+  { usdcDecimals: -1 },
+  { usdcDecimals: 0.5 },
+  { usdcDecimals: 256 },
+])('rejects malformed source spending policy %j', async (patch) => {
+  const { loadConfig } = await import('./config.js');
+  read.mockResolvedValue(
+    JSON.stringify({
+      agent: true,
+      contractId: 'annon.near',
+      nearRpc: 'https://near.test',
+      maxPrice: '1',
+      workDir: '/work',
+      origins: { source: { fromChain: 'base', fromAsset: 'nep141:custom', ...patch } },
+    }),
+  );
+  try {
+    await expect(loadConfig({ command: 'buy' }, {})).rejects.toMatchObject({
+      code: 'invalid_config',
+    });
+  } finally {
+    read.mockReset();
+  }
+});
+
+it('requires a configured source cap or USDC precision for every agent origin', async () => {
+  const { loadConfig } = await import('./config.js');
+  read.mockResolvedValue(
+    JSON.stringify({
+      agent: true,
+      contractId: 'annon.near',
+      nearRpc: 'https://near.test',
+      maxPrice: '1',
+      workDir: '/work',
+      origins: { source: { fromChain: 'base', fromAsset: 'nep141:custom' } },
+    }),
+  );
+  try {
+    await expect(loadConfig({ command: 'buy' }, {})).rejects.toMatchObject({
+      code: 'origin_not_allowed',
+    });
+  } finally {
+    read.mockReset();
+  }
+});
+
+it('refuses ANNON_CONFIG that would disable home-config agent policy', async () => {
+  const { homedir } = await import('node:os');
+  const { loadConfig } = await import('./config.js');
+  const home = join(homedir(), '.config', 'annon', 'config.json');
+  read.mockImplementation(async (path: unknown) =>
+    JSON.stringify(path === home ? { agent: true } : {}),
+  );
+  try {
+    await expect(
+      loadConfig({ command: 'buy' }, { ANNON_CONFIG: '/alternate/config.json' }),
+    ).rejects.toMatchObject({ code: 'config_conflict' });
+  } finally {
+    read.mockReset();
+  }
+});

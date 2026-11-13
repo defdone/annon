@@ -43,6 +43,19 @@ export const configPath = (o: Partial<Input>, env: Environment) => {
 /** The launcher environment and its config are the agent policy anchor, never per-call flags. */
 export async function agentPolicy(o: Input, env: Environment, forced = false): Promise<boolean> {
   const pinned = configPath({}, env);
+  const home = join(homedir(), '.config', 'annon', 'config.json');
+  if (resolve(pinned) !== resolve(home)) {
+    try {
+      if (JSON.parse(await readFile(home, 'utf8')).agent === true)
+        throw new AdapterError(
+          'config_conflict',
+          'The home config enables agent mode. Unset ANNON_CONFIG or point it there.',
+          2,
+        );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
   let saved: { agent?: boolean } = {};
   try {
     saved = JSON.parse(await readFile(pinned, 'utf8'));

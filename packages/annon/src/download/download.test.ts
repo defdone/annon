@@ -486,3 +486,106 @@ describe('download (buyer)', () => {
     expect(r.error).toBe('not_authorized');
   });
 });
+
+it.each(['0', '2', new Date(1800000004000).toUTCString()])(
+  'retries overload 429 using Retry-After %s',
+  async (hint) => {
+    const wait = vi.fn(async () => {});
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ error: 'rate_limited' }, { status: 429, headers: { 'Retry-After': hint } }),
+      )
+      .mockResolvedValueOnce(new Response(PAY2));
+    await expect(
+      new Response(
+        download({
+          url: URL_,
+          contractId: CONTRACT,
+          fileId: FILE,
+          header: HEADER,
+          proof: { secret: new Uint8Array(32).fill(7), purchase_id: FILE, grant: 0 },
+          fetch: fetcher,
+          wait,
+          now: () => 1800000000,
+        }),
+      ).arrayBuffer(),
+    ).resolves.toHaveProperty('byteLength', PAY2.length);
+    expect(wait).toHaveBeenCalledWith(hint === '0' ? 1000 : hint === '2' ? 2000 : 4000);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  },
+);
+it.each([5, 900, 7200, 86400])(
+  'surfaces completed-download cooldown %s without sleeping',
+  async (seconds) => {
+    const wait = vi.fn(async () => {});
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      Response.json(
+        { error: 'download_limited', purchaseId: FILE, fileId: FILE, retryAfterSeconds: seconds },
+        { status: 429, headers: { 'Retry-After': String(seconds) } },
+      ),
+    );
+    await expect(
+      new Response(
+        download({
+          url: URL_,
+          contractId: CONTRACT,
+          fileId: FILE,
+          header: HEADER,
+          proof: { secret: new Uint8Array(32).fill(7), purchase_id: FILE, grant: 0 },
+          fetch: fetcher,
+          wait,
+        }),
+      ).arrayBuffer(),
+    ).rejects.toMatchObject({
+      code: 'download_limited',
+      retryAfterSeconds: seconds,
+      purchaseId: FILE,
+      fileId: FILE,
+    });
+    expect(wait).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  },
+);
+it('returns the full remaining overload hint when the total wait allowance is exhausted', async () => {
+  const wait = vi.fn(async () => {});
+  const fetcher = vi.fn<typeof fetch>(async () =>
+    Response.json(
+      { error: 'download_in_progress' },
+      { status: 429, headers: { 'Retry-After': '40' } },
+    ),
+  );
+  await expect(
+    new Response(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        proof: { secret: new Uint8Array(32).fill(7), purchase_id: FILE, grant: 0 },
+        fetch: fetcher,
+        wait,
+      }),
+    ).arrayBuffer(),
+  ).rejects.toMatchObject({ code: 'download_in_progress', retryAfterSeconds: 40 });
+  expect(wait).toHaveBeenCalledTimes(1);
+  expect(wait).toHaveBeenCalledWith(40000);
+});
+
+it('enforces the common encrypted cap even when a caller omits maxBytes', async () => {
+  const fetcher = vi.fn<typeof fetch>(
+    async () => new Response(new Uint8Array([1]), { headers: { 'Content-Length': '50086017' } }),
+  );
+  await expect(
+    new Response(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        proof: { secret: new Uint8Array(32).fill(7), purchase_id: FILE, grant: 0 },
+        fetch: fetcher,
+      }),
+    ).arrayBuffer(),
+  ).rejects.toMatchObject({ code: 'too_large' });
+});

@@ -355,7 +355,7 @@ it.each([
           () => adapter(input),
           (text) => printed.push(text),
         );
-        expect(exit).toBe(command === 'status' ? 4 : 1);
+        expect(exit).toBe(4);
         expect(JSON.parse(must(printed[0]))).toMatchObject({
           ok: false,
           error: {

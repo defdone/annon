@@ -698,17 +698,26 @@ export class BrowserPurchaseController {
         await session.change({ state: 'abandoned' });
         return;
       }
-      if (interrupted || (signed && saved.submission === 'not_submitted'))
+      if ((interrupted || signed) && saved.submission === 'not_submitted')
         saved = await session.change({
           ...(signed ? { submission: 'uncertain' as const } : {}),
         });
-      const restored = await this.storage.restorePurchase(purchase);
+      let restored = await this.storage.restorePurchase(purchase);
       if (JSON.stringify(restored) !== JSON.stringify(saved.purchase))
         saved = await session.change({ purchase: restored });
+      const pendingBase = () =>
+        saved.route === 'base-usdc' &&
+        restored.paymentState !== 'expired' &&
+        (signed || saved.submission !== 'not_submitted' || saved.state === 'accepting');
+      if (pendingBase() && saved.state !== 'accepting')
+        saved = await session.change({ state: 'accepting' });
       if (await this.options.sdk.accept(restored)) {
         await session.change({ state: 'accepted' });
         return;
       }
+      restored = await this.storage.restorePurchase(restored);
+      if (JSON.stringify(restored) !== JSON.stringify(saved.purchase))
+        saved = await session.change({ purchase: restored });
       const status = saved.checkpoint?.lastStatus?.status;
       const progress =
         status === 'SUCCESS' || saved.state === 'accepting'
@@ -720,11 +729,12 @@ export class BrowserPurchaseController {
         await session.change({ state: progress });
         return;
       }
-      if (saved.state === 'expired') return;
+      if (saved.state === 'expired' && saved.route !== 'base-usdc') return;
       if (saved.route !== 'oneclick') {
         await session.change({
-          state:
-            this.now() >= Number(restored.purchase.expires_at)
+          state: pendingBase()
+            ? 'accepting'
+            : this.now() >= Number(restored.purchase.expires_at)
               ? 'expired'
               : saved.submission === 'submitted'
                 ? 'accepting'
@@ -842,7 +852,7 @@ export class BrowserPurchaseController {
         saved = await session.change({ purchase: restored });
       const options = input instanceof Uint8Array ? {} : input;
       if (input instanceof Uint8Array && input.length > BROWSER_DOWNLOAD_LIMIT)
-        throw new DownloadError('too_large', 'File exceeds 50 MiB. Use the CLI for larger files.');
+        throw new DownloadError('too_large', 'File exceeds the 50 MB size limit.');
       const header = bytes(saved.header, (saved.header.length - 2) / 2);
       if (saved.recovery?.grant === null) throw new Error('recovery grant is not final');
       const file =

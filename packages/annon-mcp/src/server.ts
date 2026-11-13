@@ -49,6 +49,7 @@ export const schemas = {
     route: z.enum(['near', 'base', '1click']).optional(),
     origin: z.string().optional().describe('Name of a human-configured allowed origin'),
     recovery: z.string().optional(),
+    force: z.boolean().optional().describe('Explicitly buy another copy despite a saved purchase'),
   }),
   open: z.strictObject({
     target: target.describe('Purchase ID, encrypted backup, or PAY2 file with purchase argument'),
@@ -70,7 +71,7 @@ const descriptions = {
   budget: 'Read the file purchase storage balance and admission requirement.',
   sell: 'Encrypt and register a local file with the SDK. Writes a PAY2 file; seller arranges hosting. May send registration and Base split transactions.',
   buy: 'Prepare and submit a purchase using the SDK. Returns deposit instructions for 1Click; fund them externally, then check annon_status. A submitted payment is not final acceptance.',
-  open: 'Open a saved final purchase or recovery grant with the SDK. Downloads with a grant proof when necessary and writes plaintext to the named output file.',
+  open: 'Open a saved final purchase or recovery grant with the SDK. Waits are enforced locally across calls and restarts. Reuse the saved purchase after retryAfterSeconds. Downloads with a grant proof when necessary and writes plaintext to the named output file.',
   verify:
     'Check a PAY2 file against the trusted contract and seller authorization. A URL checks the public header; a local file checks the encrypted body too.',
   recover:
@@ -111,6 +112,9 @@ const outputSchema = z.object({
     .object({
       code: z.string(),
       message: z.string(),
+      exitCode: z.number(),
+      purchaseId: z.string().optional(),
+      txHash: z.string().optional(),
       fileId: z.string().optional(),
       minimumAmountUsdc: z.string().optional(),
       retryAfterSeconds: z.number().optional(),
@@ -146,7 +150,7 @@ export function createServer(
             content: [{ type: 'text' as const, text: JSON.stringify(structuredContent) }],
           };
         } catch (error) {
-          const { exitCode: _, ...safe } = publicError(error);
+          const safe = publicError(error);
           const structuredContent = { ok: false, error: safe };
           return {
             isError: true,
