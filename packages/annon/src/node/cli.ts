@@ -1,4 +1,5 @@
 import { parseArgs } from 'node:util';
+import type { BuyRoute } from '../routes.js';
 import { publicError, usage } from './errors.js';
 
 export type Command =
@@ -50,7 +51,7 @@ export interface Input {
   base?: boolean;
   force?: boolean;
   moderator?: string;
-  route?: 'near' | 'base' | '1click';
+  route?: BuyRoute;
   fromChain?: string;
   fromAsset?: string;
   refundTo?: string;
@@ -174,7 +175,7 @@ export function parseCli(argv: string[]): Input {
     throw usage();
   }
 }
-export const HELP = `annon <command> [options]
+const HELP = `annon <command> [options]
 login [--wallet evm|near] [--no-open]
 init --agent --daily-budget <USDC> [--recovery <kind:id>] [--key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> (--credential-env <name> | --credential-keychain <name>)]
 sell <file> --resume <file-id> [--output <PAY2>]

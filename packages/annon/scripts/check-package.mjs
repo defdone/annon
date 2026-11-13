@@ -90,9 +90,17 @@ try {
         await assert.rejects(import(path), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' });
       }
       const root = await import('@defdone/annon');
-      for (const name of ['openTo', 'applyProtocolFee', 'applySponsoredFee', 'requiredFeeBps', 'encodeTerms']) assert(!(name in root));
+      for (const name of ['openTo', 'applyProtocolFee', 'applySponsoredFee', 'requiredFeeBps', 'encodeTerms','importSellerKey','resetRelayState','verifyPreview']) assert(!(name in root));
+      const browser = await import('@defdone/annon/browser');
+      for (const name of ['AnnonError','PayError','Pay2Error','DownloadError','CkdError','NearError','BaseRpcRateLimited','NearRpcRateLimited','TransactionUncertain','FileFundingRefused','OneClickQuoteExpired','OneClickRefused','SellError','SourceChangedError','BrowserWalletError','PurchaseLeaseBusy']) {
+        assert.equal(typeof root[name], 'function'); assert.equal(root[name], browser[name]);
+      }
+      for (const [path,names] of [['envelope/pay2',['MAX_PREVIEW','hexBytes','sellerAddress','checkRegistration','previewLengthForLines','verifyPreview']],['pay/seller',['offerFor','ANNON_SCHEMA']],['pay/split',['SPLITS_WAREHOUSE']],['node/cli',['HELP']]]) {
+        const entry = await import('@defdone/annon/'+path); for (const name of names) assert(!(name in entry));
+      }
       const relay = await import('@defdone/annon/relay');
       assert.deepEqual(Object.keys(relay).sort(), [
+        'clientKey', 'NEAR_USDC',
         'RelayError', 'RelayLedger', 'ZERO_FEE', 'baseEligibility', 'checkProtocolFee',
         'deferPaidUnlock', 'keep', 'keeperBalance', 'reconcileRelayStorage', 'relay',
         'relayLimits', 'relayStatus', 'requestHash', 'retryPaidUnlocks',

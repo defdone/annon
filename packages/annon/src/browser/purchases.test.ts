@@ -1,11 +1,11 @@
 import { IDBFactory } from 'fake-indexeddb';
 import { describe, expect, it, vi } from 'vitest';
-import { purchase as fixture } from '../../test/fixtures.js';
+import { purchase as fixture, must } from '../../test/fixtures.js';
 import { keyFromSecret } from '../keys/near-ckd.js';
 import type { OneClick, PollCheckpoint, SwapStatus } from '../oneclick/oneclick.js';
 import { encryptedPurchaseStore, newBackupSecret } from '../pay/backup.js';
 import { type PurchaseRecord, purchaseKey } from '../pay/purchase.js';
-import { hex } from '../settle-near/codec.js';
+import { hex, usdc } from '../settle-near/codec.js';
 import { baseNonceV2, buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import { NEAR_USDC } from '../settle-near/terms.js';
 import type { IdentityWallet } from '../wallet/wallet.js';
@@ -29,6 +29,14 @@ function record(): PurchaseRecord {
   const id = purchaseId(purchase);
   return {
     schemaVersion: 2,
+    recoveryProved: false,
+    payment: {
+      route: '1click',
+      amountUsdc: usdc(BigInt(purchase.price)),
+      amountBaseUnits: purchase.price,
+      asset: { symbol: 'USDC', id: purchase.asset },
+      network: purchase.network,
+    },
     id,
     revision: 0,
     purchase,
@@ -37,6 +45,8 @@ function record(): PurchaseRecord {
     recovery: purchase.recovery,
     checkedHeaderHash: `0x${'55'.repeat(32)}`,
     quote: {
+      request: {} as import('../oneclick/oneclick.js').QuoteRequest,
+      response: {},
       deposit: {
         address: 'synthetic-deposit',
         memo: 'synthetic-memo',
@@ -79,9 +89,9 @@ function setup(clock: () => number = () => now) {
       await o.onSaved?.(proved);
       await o.beforePayment?.(proved);
       return {
-        route: r.purchase.route,
+        route: r.payment.route,
         record: proved,
-        instructions: (r.quote as { deposit: never }).deposit,
+        instructions: must(r.quote).deposit,
       };
     }),
     accept: vi.fn(async () => false),
@@ -102,7 +112,7 @@ function setup(clock: () => number = () => now) {
         fileId: fixture.file_id,
         header: new Uint8Array([1, 2, 3]),
         resourceUrl: 'https://files.example/synthetic',
-        route: 'oneclick',
+        route: '1click',
         maxPrice: 200000n,
       },
     );
@@ -119,7 +129,7 @@ describe('durable browser purchases', () => {
         id: 'synthetic-checkout',
         fileId: fixture.file_id,
         state: 'terms_review',
-        route: 'oneclick',
+        route: '1click',
       },
     ]);
     const saved = await b.load('synthetic-checkout');
@@ -158,12 +168,10 @@ describe('durable browser purchases', () => {
       address: 'synthetic-deposit',
       memo: 'synthetic-memo',
     });
-    expect(events).toMatchObject([
-      { state: 'preparing' },
-      { state: 'preparing' },
-      { state: 'preparing' },
-      { state: 'awaiting_deposit' },
-    ]);
+    const states = events
+      .map((event) => (event as { state: string }).state)
+      .filter((state, i, all) => state !== all[i - 1]);
+    expect(states).toEqual(['preparing', 'awaiting_deposit']);
     expect(JSON.stringify(events)).not.toContain('synthetic-deposit');
     expect(JSON.stringify(events)).not.toContain(h.r.buyerSecret);
   });
@@ -176,7 +184,7 @@ describe('durable browser purchases', () => {
         if (point === 'before-record') throw new Error('offline');
         await o.onSaved?.(h.r);
         if (point === 'after-record') throw new Error('offline');
-        await o.onSaved?.({ ...h.r, recoveryProved: true });
+        await o.onSaved?.({ ...h.r, revision: 1, recoveryProved: true });
         throw new Error('offline');
       });
       await expect(c.start({ recovery: wallet, refund: fixture.refund })).rejects.toThrow(
@@ -329,9 +337,9 @@ describe('durable browser purchases', () => {
     const before = await s.load('synthetic-checkout');
     if (!before) throw new Error('missing fixture');
     await s.save(before, { ...before, revision: before.revision + 1 });
-    await expect(s.save(before, { ...before, revision: before.revision + 1 })).rejects.toThrow(
-      /conflict/,
-    );
+    await expect(
+      s.save(before, { ...before, revision: before.revision + 1 }),
+    ).rejects.toMatchObject({ code: 'store_conflict' });
     const save = vi
       .spyOn(c.storage, 'save')
       .mockRejectedValue(new DOMException('quota', 'QuotaExceededError'));
@@ -343,7 +351,7 @@ describe('durable browser purchases', () => {
       vi.spyOn(c.storage, 'save').mockRejectedValue(
         new DOMException('quota', 'QuotaExceededError'),
       );
-      await o.onSaved?.({ ...h.r, recoveryProved: true });
+      await o.onSaved?.({ ...h.r, revision: 1, recoveryProved: true });
       throw new Error('unreachable');
     });
     await expect(c.start({ recovery: wallet, refund: fixture.refund })).rejects.toThrow('quota');
@@ -455,7 +463,7 @@ it('rechecks the release margin after a slow durable instruction checkpoint', as
       fileId: fixture.file_id,
       header: new Uint8Array([1]),
       resourceUrl: 'https://files.example/synthetic',
-      route: 'oneclick',
+      route: '1click',
       maxPrice: 200000n,
     },
   );
@@ -500,7 +508,9 @@ it.each([
     ...before,
     revision: before.revision + 1,
     state,
-    ...(state === 'terms_review' ? {} : { purchase: { ...h.r, recoveryProved: true } }),
+    ...(state === 'terms_review'
+      ? {}
+      : { purchase: { ...h.r, revision: 1, recoveryProved: true } }),
     ...(status
       ? {
           checkpoint: {
@@ -645,7 +655,7 @@ it('returns an unstaged failure to terms review and allows an explicit retry', a
   await c.start({ recovery: wallet, refund: fixture.refund });
   expect((await c.snapshot()).state).toBe('awaiting_deposit');
 });
-it.each(['near-usdc', 'base-usdc'] as const)(
+it.each(['near', 'base'] as const)(
   'does not accept or submit an unsubmitted %s purchase on resume',
   async (route) => {
     const h = setup();
@@ -654,7 +664,10 @@ it.each(['near-usdc', 'base-usdc'] as const)(
     const before = await storage.load('synthetic-checkout');
     if (!before) throw new Error('missing fixture');
     // A durable pre-submit workflow marker must prevent accept(), which can drive Base unlock.
-    const purchase = route === 'near-usdc' ? h.r : recordForBase();
+    const purchase =
+      route === 'near'
+        ? { ...h.r, quote: null, payment: { ...h.r.payment, route: 'near' as const } }
+        : recordForBase();
     await storage.save(before, {
       ...before,
       revision: 1,
@@ -676,6 +689,14 @@ function recordForBase(): PurchaseRecord {
   const id = purchaseId(purchase);
   return {
     ...r,
+    quote: null,
+    payment: {
+      route: 'base',
+      amountUsdc: usdc(BigInt(purchase.price)),
+      amountBaseUnits: purchase.price,
+      asset: { symbol: 'USDC', id: purchase.asset },
+      network: purchase.network,
+    },
     id,
     purchase,
     message: buildPurchaseMessage(purchase),
@@ -692,7 +713,7 @@ it('blocks the controller payment checkpoint when recovery has not been proved',
     await o.onSaved?.(h.r);
     await o.beforePayment?.(h.r);
     effect();
-    return { route: h.r.purchase.route, record: h.r };
+    return { route: h.r.payment.route, record: h.r };
   });
   await expect(c.start({ recovery: wallet, refund: fixture.refund })).rejects.toThrow(/proof/);
   expect(effect).not.toHaveBeenCalled();
@@ -795,12 +816,12 @@ it('rejects concurrent portable imports that alias the same purchase under diffe
   await c.start({ recovery: wallet, refund: fixture.refund });
   const secret = newBackupSecret();
   const receipt = await c.exportReceipt(secret);
-  const { importBrowserIndex, exportBrowserIndex } = await import('../pay/backup.js');
-  const alias = await importBrowserIndex(receipt, secret);
-  const entry = alias.entries[0];
+  const { importBrowserReceipt, exportBrowserReceipt } = await import('../pay/backup.js');
+  const alias = await importBrowserReceipt(receipt, secret);
+  const entry = alias.entry;
   if (!entry) throw new Error('missing receipt');
   entry.id = 'alias';
-  const other = await exportBrowserIndex(alias, secret);
+  const other = await exportBrowserReceipt(alias, secret);
   const fresh = await setup().storage();
   const results = await Promise.allSettled([
     fresh.importReceipt(receipt, secret),
@@ -829,7 +850,7 @@ it('N10 resumes a record-free checkout with an expired lease to terms_review', a
   expect((await reload.storage.load(before.id))?.lease).toBeUndefined();
   expect(h.sdk.buy).not.toHaveBeenCalled();
 });
-it.each(['near-usdc', 'base-usdc'] as const)(
+it.each(['near', 'base'] as const)(
   'abandons an unsigned %s preparation after its lease expires',
   async (route) => {
     let clock = now;
@@ -841,7 +862,10 @@ it.each(['near-usdc', 'base-usdc'] as const)(
       ...before,
       revision: 1,
       route,
-      purchase: route === 'base-usdc' ? recordForBase() : h.r,
+      purchase:
+        route === 'base'
+          ? recordForBase()
+          : { ...h.r, quote: null, payment: { ...h.r.payment, route: route as 'near' | '1click' } },
       state: 'preparing',
       submission: 'not_submitted',
       lease: { owner: 'old-owner', expiresAt: now + 120 },
@@ -862,7 +886,7 @@ it.each(['near-usdc', 'base-usdc'] as const)(
         fileId: before.fileId,
         header: new Uint8Array([1]),
         resourceUrl: before.resourceUrl,
-        route: 'oneclick',
+        route: '1click',
         maxPrice: 200000n,
       },
     );
@@ -877,7 +901,10 @@ it.each(['signed', 'before-payment', 'uncertain'] as const)(
     const c = await h.create();
     const before = await c.storage.load('synthetic-checkout');
     if (!before) throw new Error('missing fixture');
-    const purchase = evidence === 'signed' ? recordForBase() : h.r;
+    const purchase =
+      evidence === 'signed'
+        ? recordForBase()
+        : { ...h.r, quote: null, payment: { ...h.r.payment, route: 'near' as const } };
     if (evidence === 'signed')
       purchase.attempts = [
         {
@@ -892,7 +919,7 @@ it.each(['signed', 'before-payment', 'uncertain'] as const)(
     await c.storage.save(before, {
       ...before,
       revision: 1,
-      route: evidence === 'signed' ? 'base-usdc' : 'near-usdc',
+      route: evidence === 'signed' ? 'base' : 'near',
       purchase,
       state: 'preparing',
       submission: evidence === 'uncertain' ? 'uncertain' : 'not_submitted',
@@ -912,7 +939,7 @@ it('requires a Base submit callback before claiming the checkout or buying', asy
   const c = await h.create();
   const before = await c.storage.load('synthetic-checkout');
   if (!before) throw new Error('missing fixture');
-  await c.storage.save(before, { ...before, revision: 1, route: 'base-usdc' });
+  await c.storage.save(before, { ...before, revision: 1, route: 'base' });
   await expect(c.start({ recovery: wallet, refund: fixture.refund })).rejects.toThrow(/submitBase/);
   expect((await c.snapshot()).state).toBe('terms_review');
   expect(h.sdk.buy).not.toHaveBeenCalled();
@@ -969,9 +996,9 @@ it('a stale lease owner cannot write or pay after a different tab reclaimed the 
   h.sdk.buy = vi.fn(async (o) => {
     await held;
     await o.beforeSave?.(h.r);
-    await o.beforePayment?.({ ...h.r, recoveryProved: true });
+    await o.beforePayment?.({ ...h.r, revision: 1, recoveryProved: true });
     effect();
-    return { route: h.r.purchase.route, record: h.r };
+    return { route: h.r.payment.route, record: h.r };
   });
   const pending = c.start({ recovery: wallet, refund: fixture.refund });
   while ((await c.snapshot()).state === 'terms_review') await Promise.resolve();
@@ -1056,9 +1083,9 @@ it('rejects payment effects when its working lease expires before any other tab 
   h.sdk.buy = vi.fn(async (o) => {
     await held;
     await o.beforeSave?.(h.r);
-    await o.beforePayment?.({ ...h.r, recoveryProved: true });
+    await o.beforePayment?.({ ...h.r, revision: 1, recoveryProved: true });
     effect();
-    return { route: h.r.purchase.route, record: h.r };
+    return { route: h.r.payment.route, record: h.r };
   });
   const pending = c.start({ recovery: wallet, refund: fixture.refund });
   while ((await c.snapshot()).state === 'terms_review') await Promise.resolve();
@@ -1073,15 +1100,20 @@ it('saves the payment boundary marker before direct NEAR effects', async () => {
   const c = await h.create();
   const before = await c.storage.load('synthetic-checkout');
   if (!before) throw new Error('missing fixture');
-  await c.storage.save(before, { ...before, revision: 1, route: 'near-usdc' });
+  await c.storage.save(before, { ...before, revision: 1, route: 'near' });
   h.sdk.buy = vi.fn(async (o) => {
-    const purchase = { ...h.r, recoveryProved: true };
+    const purchase = {
+      ...h.r,
+      quote: null,
+      payment: { ...h.r.payment, route: 'near' as const },
+      recoveryProved: true,
+    };
     await o.beforeSave?.(purchase);
     await o.beforePayment?.(purchase);
     const saved = await c.storage.load('synthetic-checkout');
     expect(saved?.paymentStarted).toBe(true);
     expect(saved?.submission).toBe('uncertain');
-    return { route: h.r.purchase.route, record: purchase };
+    return { route: h.r.payment.route, record: purchase };
   });
   await c.start({ recovery: wallet, refund: fixture.refund });
 });
@@ -1144,7 +1176,7 @@ it('requires recoveryProved at the controller payment boundary even for the save
     await o.beforeSave?.(h.r);
     await o.beforePayment?.(h.r);
     effect();
-    return { route: h.r.purchase.route, record: h.r };
+    return { route: h.r.payment.route, record: h.r };
   });
   await expect(c.start({ recovery: wallet, refund: fixture.refund })).rejects.toThrow(/proof/);
   expect(effect).not.toHaveBeenCalled();
@@ -1191,13 +1223,13 @@ it.each([true, false])(
     const c = await h.create();
     const before = await c.storage.load('synthetic-checkout');
     if (!before) throw new Error('missing fixture');
-    await c.storage.save(before, { ...before, revision: 1, route: 'base-usdc' });
+    await c.storage.save(before, { ...before, revision: 1, route: 'base' });
     h.sdk.buy = vi.fn(async (o) => {
       const purchase = { ...recordForBase(), recoveryProved: true };
       await o.beforeSave?.(purchase);
       await o.beforePayment?.(purchase);
       return {
-        route: 'base-usdc' as const,
+        route: 'base' as const,
         record: purchase,
         ...(uncertain ? { uncertain: { purchaseId: purchase.id, txHash: 'synthetic-hash' } } : {}),
       };
@@ -1398,7 +1430,7 @@ it.each(['payment_uncertain', 'expired'] as const)(
     await c.storage.save(before, {
       ...before,
       revision: 1,
-      route: 'base-usdc',
+      route: 'base',
       purchase,
       state,
       submission: 'submitted',
@@ -1430,7 +1462,7 @@ it.each(['uncertain', 'submitted-interrupted', 'pending-error'] as const)(
     await c.storage.save(before, {
       ...before,
       revision: 1,
-      route: 'base-usdc',
+      route: 'base',
       purchase,
       state: 'payment_uncertain',
       submission: mode === 'uncertain' ? 'uncertain' : 'submitted',
@@ -1473,7 +1505,7 @@ it.each(['expired', 'canceled'] as const)(
     await c.storage.save(before, {
       ...before,
       revision: 1,
-      route: 'base-usdc',
+      route: 'base',
       purchase,
       state: 'payment_uncertain',
       submission: 'uncertain',
@@ -1515,4 +1547,72 @@ it('an open whose lease expires cannot publish a final state and remains retryab
   await c.open(new Uint8Array([1]));
   expect((await c.snapshot()).state).toBe('file_ready');
   expect(h.sdk.buy).not.toHaveBeenCalled();
+});
+
+it('exports the portable entry without an empty index or backup map', async () => {
+  const h = setup();
+  const c = await h.create();
+  const key = newBackupSecret();
+  const { importBrowserReceipt } = await import('../pay/backup.js');
+  const receipt = await importBrowserReceipt(await c.exportReceipt(key), key);
+  expect(Object.keys(receipt).sort()).toEqual(['entry', 'kind']);
+  expect(receipt.kind).toBe('browser-receipt');
+  expect(receipt.entry).toMatchObject({ route: '1click', submission: 'not_submitted' });
+});
+
+it.each(['submission', 'route', 'payment route'] as const)(
+  'rejects an obsolete or mismatched browser checkpoint: %s',
+  async (field) => {
+    const h = setup();
+    const c = await h.create();
+    const before = await c.storage.load('synthetic-checkout');
+    if (!before) throw new Error('missing fixture');
+    const next = { ...before, revision: before.revision + 1 };
+    if (field === 'submission') delete (next as Partial<typeof next>).submission;
+    if (field === 'route') next.route = 'oneclick' as never;
+    if (field === 'payment route')
+      next.purchase = { ...h.r, payment: { ...h.r.payment, route: 'near' } };
+    await expect(c.storage.save(before, next)).rejects.toMatchObject({ code: 'invalid_record' });
+  },
+);
+
+it('rejects extra receipt envelope fields', async () => {
+  const h = setup();
+  const c = await h.create();
+  const entry = must(await c.storage.load('synthetic-checkout'));
+  const { exportBrowserReceipt } = await import('../pay/backup.js');
+  await expect(
+    exportBrowserReceipt(
+      { kind: 'browser-receipt', entry, backups: {} } as never,
+      newBackupSecret(),
+    ),
+  ).rejects.toMatchObject({ code: 'invalid_record' });
+});
+
+it('rejects an obsolete or mismatched browser index route', async () => {
+  const h = setup();
+  const c = await h.create();
+  const { encryptedBrowserIndexStore } = await import('../pay/backup.js');
+  const index = encryptedBrowserIndexStore(c.storage.rawStore, c.storage.backupSecret);
+  const before = must(await index.load('annon/browser/index'));
+  const next = {
+    ...before,
+    revision: before.revision + 1,
+    entries: before.entries.map((entry) => ({ ...entry, route: 'oneclick' as never })),
+  };
+  await expect(index.compareAndSet('annon/browser/index', before, next)).rejects.toMatchObject({
+    code: 'invalid_record',
+  });
+});
+
+it('rechecks review state after a checkout finishes between the two start reads', async () => {
+  const h = setup();
+  const c = await h.create();
+  const stale = must(await c.storage.load('synthetic-checkout'));
+  await c.start({ recovery: wallet, refund: fixture.refund });
+  vi.spyOn(c.storage, 'load').mockResolvedValueOnce(stale);
+  await expect(c.start({ recovery: wallet, refund: fixture.refund })).rejects.toThrow(
+    'already started',
+  );
+  expect(h.sdk.buy).toHaveBeenCalledTimes(1);
 });

@@ -1,6 +1,6 @@
 /** Persist transitions, whitelist numeric evidence, and contain monitoring failures. */
 import { statfs } from 'node:fs/promises';
-import type { Store, Versioned } from '../../packages/annon/src/pay/store.ts';
+import type { Store, Versioned } from '@defdone/annon/pay/store';
 export interface MonitorRecord extends Versioned {
   running: boolean;
   alerts: Record<string, number>;

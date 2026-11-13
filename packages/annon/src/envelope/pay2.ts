@@ -1,3 +1,4 @@
+import { AnnonError } from '../errors.js';
 import { account } from '../settle-near/codec.js';
 /**
  * PAY2, the Annon file format: `specs/pay2.md`. WebCrypto only, so the same code runs in browsers
@@ -39,10 +40,10 @@ export type Pay2ErrorCode =
   | 'meta_invalid'
   | 'preview_invalid';
 
-export class Pay2Error extends Error {
+export class Pay2Error extends AnnonError {
   readonly code: Pay2ErrorCode;
   constructor(code: Pay2ErrorCode, message: string = code) {
-    super(message);
+    super(code, message);
     this.code = code;
     this.name = 'Pay2Error';
   }
@@ -81,7 +82,7 @@ export const FIXED = 54;
 export const TAG = 16;
 export const MAX_HEADER = 65536;
 export const MAX_CHUNKS = 1024;
-export const MAX_PREVIEW = 65536;
+const MAX_PREVIEW = 65536;
 export const MAX_META = 4096;
 export const MAC = 32;
 export const SIG = 65;
@@ -193,22 +194,7 @@ function toBase64(b: Uint8Array): string {
   return btoa(s);
 }
 
-/** Decodes only if the string fits `maxBytes`, so a hostile package can't make us allocate. */
-function fromBase64(s: unknown, maxBytes: number): Bytes {
-  if (typeof s !== 'string' || s.length > Math.ceil(maxBytes / 3) * 4)
-    return fail('preview_invalid');
-  let out: Bytes;
-  try {
-    out = Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-  } catch {
-    return fail('preview_invalid');
-  }
-  // atob forgives whitespace and missing padding; the spec allows exactly one encoding.
-  if (toBase64(out) !== s) fail('preview_invalid');
-  return out;
-}
-
-export function hexBytes(hex: string | Uint8Array, bytes = 32): Uint8Array {
+function hexBytes(hex: string | Uint8Array, bytes = 32): Uint8Array {
   const h = typeof hex === 'string' ? hex.replace(/^0x/, '') : '';
   if (
     typeof hex !== 'string'
@@ -224,7 +210,7 @@ export function hexBytes(hex: string | Uint8Array, bytes = 32): Uint8Array {
 
 export { signedBy } from './evm.js';
 
-export function sellerAddress(seller: string): string {
+function sellerAddress(seller: string): string {
   if (!/^0x[0-9a-f]{40}$/i.test(seller)) throw new TypeError('seller must be a 0x EVM address');
   return seller.toLowerCase();
 }
@@ -383,7 +369,7 @@ export interface Inspected {
   fileId: Bytes;
   /** Whether a `near-ckd/v1` stanza names the trusted contract; `open` needs one. */
   usable: boolean;
-  /** The header, signature included: the bytes `info.header` serves (profile section 7). */
+  /** The header, signature included: the bytes `info.header` serves (x402-annon.md section 7). */
   header: Bytes;
   /** `SHA256(header)`, which the download challenge names. */
   headerHash: Bytes;
@@ -403,7 +389,7 @@ export async function inspect(
 
 /**
  * Spec 6, steps 1 to 3, on the header alone: what a client checks before paying when only the
- * header is public (profile section 7). `header` must be exactly the header, with no body bytes.
+ * header is public (x402-annon.md section 7). `header` must be exactly the header, with no body bytes.
  * It proves which bytes the buyer pays for, not that a host holds them. Throws `Pay2Error`.
  */
 export async function inspectHeader(
@@ -481,7 +467,7 @@ async function checkPublic(b: Bytes, listing: Listing, contractId: string): Prom
 }
 
 /** Spec 6, step 2. */
-export async function checkRegistration(
+async function checkRegistration(
   h: Header,
   listing: Pick<Listing, 'fileId' | 'cipherHash'>,
 ): Promise<Header> {
@@ -790,76 +776,3 @@ function previewPrefix(header: Uint8Array): Bytes {
 
 /** Spec 3: at most 64 KiB and a tenth of the file. */
 export const previewLimit = (size: number) => Math.min(MAX_PREVIEW, Math.floor(size / 10));
-
-/**
- * A preview length that ends on a line break: the first `lines` lines (for CSV, the header and
- * `lines - 1` rows), cut back to the last whole line under `previewLimit`. 0 if no line fits.
- */
-export function previewLengthForLines(data: Uint8Array, lines: number): number {
-  const limit = previewLimit(data.length);
-  let len = 0;
-  for (let i = 0, seen = 0; i < limit && seen < lines; i++) {
-    if (data[i] === 0x0a) {
-      seen++;
-      len = i + 1;
-    }
-  }
-  return len;
-}
-
-// ---------- preview ----------
-
-/** Spec 7. Throws `Pay2Error`; returns only what the seller chose to show. */
-export async function verifyPreview(
-  pkg: PreviewPackage,
-  listing: Pick<Listing, 'fileId' | 'cipherHash'> &
-    Partial<Pick<Listing, 'seller' | 'pay2Version'>>,
-): Promise<{ meta?: FileMeta; preview?: Bytes }> {
-  if (
-    pkg?.v !== 1 ||
-    !Array.isArray(pkg.chunks) ||
-    pkg.chunks.length < 1 ||
-    pkg.chunks.length > 2 ||
-    !pkg.chunks.every((c) => typeof c?.key === 'string' && typeof c?.data === 'string')
-  ) {
-    fail('preview_invalid');
-  }
-  const prefix = fromBase64(pkg.header, FIXED + 32 * (2 + MAX_CHUNKS));
-  const h = parseHeader(prefix, true);
-  if (prefix.length !== h.prefixLen) fail('preview_invalid');
-  await checkRegistration(h, listing);
-  if (listing.pay2Version !== undefined && listing.pay2Version !== h.version)
-    fail('preview_invalid');
-  {
-    if (listing.seller === undefined) fail('preview_invalid');
-    const seller = parseIdentity(
-      typeof listing.seller === 'string' ? { kind: 'evm', id: listing.seller } : listing.seller,
-    );
-    if (identityKind(seller) !== h.authKind) fail('preview_invalid');
-  }
-
-  // Every chunk is checked before any metadata is read, so the error doesn't depend on order.
-  const pieces = new Map<number, Bytes>();
-  for (const c of pkg.chunks) {
-    const i = c?.index;
-    const len = i === 0 ? h.metaLen + TAG : i === 1 && h.previewLen > 0 ? h.previewLen + TAG : -1;
-    if (len < 0 || pieces.has(i)) fail('preview_invalid');
-    const key = fromBase64(c.key, 32);
-    const data = fromBase64(c.data, len);
-    if (
-      key.length !== 32 ||
-      data.length !== len ||
-      !equal(await commitment(key), h.commits[i] as Bytes) ||
-      !equal(await sha256(data), h.hashes[i] as Bytes)
-    ) {
-      fail('preview_invalid');
-    }
-    pieces.set(i, await gcm('decrypt', key, false, data).catch(() => fail('preview_invalid')));
-  }
-  const meta = pieces.get(0);
-  const preview = pieces.get(1);
-  return {
-    ...(meta && { meta: parseMeta(meta, h) }),
-    ...(preview && { preview }),
-  };
-}

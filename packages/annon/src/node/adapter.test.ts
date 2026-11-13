@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { privateKeyToAccount } from 'viem/accounts';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { purchase as initial, terms as initialTerms, must } from '../../test/fixtures.js';
 import { Annon } from '../api/annon.js';
 import { serveFile } from '../download/host.js';
@@ -16,10 +16,10 @@ import { nextStep } from '../pay/recover.js';
 import type { SellerRecord } from '../pay/settle.js';
 import { memoryStore } from '../pay/store.js';
 import { fileStore } from '../pay/store-node.js';
-import { bytes, hex } from '../settle-near/codec.js';
+import { bytes, hex, usdc } from '../settle-near/codec.js';
 import { baseNonceV2, buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import { termsHash } from '../settle-near/terms.js';
-import { createAdapter, retryAfterMs } from './adapter.js';
+import { createAdapter } from './adapter.js';
 import { runCli } from './cli.js';
 import { publicError } from './errors.js';
 
@@ -35,7 +35,7 @@ it.each([
     command: 'open',
     transport: 'wallet',
     refusals: 0,
-    code: 'payment_not_safe',
+    code: 'settlement_pending',
     json: false,
     agent: false,
   },
@@ -43,7 +43,7 @@ it.each([
     command: 'status',
     transport: 'wallet',
     refusals: 0,
-    code: 'payment_not_safe',
+    code: 'settlement_pending',
     json: false,
     agent: false,
   },
@@ -51,7 +51,7 @@ it.each([
     command: 'open',
     transport: 'relayer',
     refusals: 2,
-    code: 'payment_not_safe',
+    code: 'settlement_pending',
     json: false,
     agent: false,
   },
@@ -59,7 +59,7 @@ it.each([
     command: 'open',
     transport: 'relayer',
     refusals: 2,
-    code: 'payment_not_safe',
+    code: 'settlement_pending',
     json: true,
     agent: false,
   },
@@ -67,7 +67,7 @@ it.each([
     command: 'open',
     transport: 'relayer',
     refusals: 2,
-    code: 'payment_not_safe',
+    code: 'settlement_pending',
     json: false,
     agent: true,
   },
@@ -75,7 +75,7 @@ it.each([
     command: 'status',
     transport: 'relayer',
     refusals: 2,
-    code: 'payment_not_safe',
+    code: 'settlement_pending',
     json: false,
     agent: false,
   },
@@ -83,7 +83,7 @@ it.each([
     command: 'status',
     transport: 'relayer',
     refusals: 2,
-    code: 'payment_not_safe',
+    code: 'settlement_pending',
     json: true,
     agent: false,
   },
@@ -91,7 +91,7 @@ it.each([
     command: 'open',
     transport: 'relayer',
     refusals: 100,
-    code: 'payment_not_safe',
+    code: 'settlement_pending',
     json: false,
     agent: false,
   },
@@ -107,7 +107,7 @@ it.each([
     command: 'open' as const,
     transport: 'relayer' as const,
     refusals: 2,
-    code: 'payment_not_safe' as const,
+    code: 'settlement_pending' as const,
     json: false,
     agent: false,
     retryAfter,
@@ -145,6 +145,14 @@ it.each([
     const hash = hex(await sha256(header));
     const record: PurchaseRecord = {
       schemaVersion: 2,
+      recoveryProved: false,
+      payment: {
+        route: p.route === 'base-usdc' ? 'base' : 'near',
+        amountUsdc: usdc(BigInt(p.price)),
+        amountBaseUnits: p.price,
+        asset: { symbol: 'USDC', id: p.asset },
+        network: p.network,
+      },
       id,
       revision: 0,
       purchase: p,
@@ -345,7 +353,7 @@ it.each([
         output: join(dir, 'out'),
       };
       const immediate =
-        code === 'payment_not_safe' &&
+        code === 'settlement_pending' &&
         refusals > 0 &&
         (command !== 'open' || json || agent || minimumWait > 60000);
       if (immediate || refusals === 100) {
@@ -359,9 +367,9 @@ it.each([
         expect(JSON.parse(must(printed[0]))).toMatchObject({
           ok: false,
           error: {
-            code: 'payment_not_safe',
-            message: publicError({ code: 'payment_not_safe' }).message,
-            retryAfterSeconds: 30,
+            code: 'settlement_pending',
+            message: publicError({ code: 'settlement_pending' }).message,
+            retryAfterSeconds: transport === 'relayer' ? minimumWait / 1000 : 30,
           },
         });
         expect(printed.join('')).not.toContain('PRIVATE_UPSTREAM');
@@ -405,20 +413,6 @@ it.each([
   },
 );
 
-describe('retryAfterMs', () => {
-  it('reads seconds and dates, defaults to 5 s and refuses waits over a minute', () => {
-    const now = Date.parse('2026-11-11T12:00:00Z');
-    expect(retryAfterMs(null, now)).toBe(5000);
-    expect(retryAfterMs('soon', now)).toBe(5000);
-    expect(retryAfterMs('7', now)).toBe(7000);
-    expect(retryAfterMs('60', now)).toBe(60_000);
-    expect(retryAfterMs('61', now)).toBeNull();
-    expect(retryAfterMs('Wed, 11 Nov 2026 12:00:30 GMT', now)).toBe(30_000);
-    expect(retryAfterMs('Wed, 11 Nov 2026 11:59:00 GMT', now)).toBe(0);
-    expect(retryAfterMs('Wed, 11 Nov 2026 13:00:00 GMT', now)).toBeNull();
-  });
-});
-
 it.each([429, 503])(
   'bounds short Retry-After retries and returns a clear code for HTTP %s',
   async (status) => {
@@ -454,7 +448,7 @@ it.each([429, 503])(
     };
     const code =
       status === 425
-        ? 'payment_not_safe'
+        ? 'settlement_pending'
         : status === 429
           ? 'relayer_rate_limited'
           : 'relayer_unavailable';
@@ -477,3 +471,118 @@ it.each([429, 503])(
     }
   },
 );
+
+it.each([
+  [400, 'bad_deadline', 2, true],
+  [429, 'limited', 4, true],
+  [403, 'not_sponsored', 1, true],
+  [425, 'settlement_pending', 4, true],
+  [500, 'internal', 1, true],
+  [400, 'private_unknown', 1, true],
+  [503, 'relayer_unavailable', 4, false],
+] as const)(
+  'maps relayer HTTP %s bodies without exposing upstream text: %s',
+  async (status, code, exitCode, header) => {
+    const dir = await mkdtemp(join(tmpdir(), 'annon-relay-errors-'));
+    const id = `0x${'11'.repeat(32)}`;
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      Response.json(
+        {
+          error: code,
+          message: 'PRIVATE_UPSTREAM',
+          purchaseId: id,
+          txHash: 'hash',
+          retryAfterSeconds: 71.1,
+        },
+        { status, ...(header ? { headers: { 'Retry-After': '72' } } : {}) },
+      ),
+    );
+    const adapter = createAdapter(
+      { ANNON_BACKUP_SECRET: 'ab'.repeat(32) },
+      {
+        fetch: fetcher,
+        wait: vi.fn(),
+        wallet: async () => ({ identity: initialTerms.seller, authorize: vi.fn() }),
+        sdk(options) {
+          const sdk = new Annon(options);
+          vi.spyOn(sdk, 'stop').mockImplementation(async () => {
+            await options.send?.('fund_file_storage', {
+              args: { file_id: initialTerms.file_id, amount: '1' },
+            });
+          });
+          return sdk;
+        },
+      },
+    );
+    try {
+      const error = await adapter({
+        command: 'stop',
+        target: initialTerms.file_id,
+        contractId: initialTerms.contract,
+        nearRpc: 'https://near.example',
+        relayer: 'https://relay.example',
+        stateDir: dir,
+        config: join(dir, 'none'),
+        trustContract: true,
+      }).catch((e) => e);
+      const safe = publicError(error);
+      expect(safe).toMatchObject({
+        code: code === 'private_unknown' ? 'operation_failed' : code,
+        exitCode,
+      });
+      if (code !== 'private_unknown')
+        expect(safe).toMatchObject({ purchaseId: id, txHash: 'hash', retryAfterSeconds: 72 });
+      expect(JSON.stringify(safe)).not.toContain('PRIVATE_UPSTREAM');
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+it('omits the public route when final chain state has no local payment summary', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'annon-no-summary-'));
+  const wallet = vi.fn();
+  const adapter = createAdapter(
+    {},
+    {
+      wallet,
+      purchase: async () =>
+        ({
+          purchase_id: initialTerms.file_id,
+          file_id: initialTerms.file_id,
+          grants: 1,
+          route: 'near-usdc',
+        }) as never,
+    },
+  );
+  try {
+    const result = await adapter({
+      command: 'status',
+      target: initialTerms.file_id,
+      contractId: initialTerms.contract,
+      nearRpc: 'https://near.example',
+      stateDir: dir,
+      config: join(dir, 'none'),
+      trustContract: true,
+    });
+    expect(result).toMatchObject({ state: 'accepted' });
+    expect(result).not.toHaveProperty('route');
+    expect(result).not.toHaveProperty('payment');
+    expect(wallet).not.toHaveBeenCalled();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('requires a funding amount as invalid input before loading a wallet', async () => {
+  const wallet = vi.fn();
+  const run = createAdapter({}, { wallet });
+  const error = await run({ command: 'fund', target: initialTerms.file_id }).catch((e) => e);
+  expect(publicError(error)).toEqual({
+    code: 'invalid_arguments',
+    message: 'Provide the NEAR amount to allocate.',
+    exitCode: 2,
+  });
+  expect(wallet).not.toHaveBeenCalled();
+});

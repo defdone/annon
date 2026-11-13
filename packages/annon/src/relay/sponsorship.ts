@@ -1,3 +1,4 @@
+import { isTransient } from '../errors.js';
 /** Durable sponsorship admission. A later policy change cannot revoke a checked listing. */
 import { type FileInfo, getFile } from '../near/rpc.js';
 import { readSplitState } from '../pay/split.js';
@@ -65,7 +66,7 @@ export async function admitTerms(
         distributionIncentive: 0,
       });
     } catch (e) {
-      if ((e as { code?: string })?.code === 'transport') return temporary();
+      if (isTransient(e)) return temporary();
       throw new RelayError('not_sponsored');
     }
   }

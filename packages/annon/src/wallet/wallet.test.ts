@@ -49,7 +49,7 @@ describe('small wallet adapters with Node doubles', () => {
     signMessage.mockImplementationOnce(async () => [
       { signedMessage: new TextEncoder().encode(`${text}\n`), signature: new Uint8Array(64) },
     ]);
-    await expect(wallet.authorize(text)).rejects.toThrow(/signed bytes/);
+    await expect(wallet.authorize(text)).rejects.toMatchObject({ code: 'invalid_signature' });
   });
   it('NEAR selects the account, calls directly without auth, and attaches one yocto to USDC', async () => {
     const signAndSendTransaction = vi.fn(async (tx) => tx);

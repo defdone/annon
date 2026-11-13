@@ -9,11 +9,9 @@ import {
   type Listing,
   open,
   type PreviewPackage,
-  previewLengthForLines,
   seal,
   sealWithKey,
   signedBy,
-  verifyPreview,
 } from './pay2.js';
 
 interface Input {
@@ -130,59 +128,13 @@ describe('PAY2 vectors', () => {
     });
   }
 
-  it('verifies the preview package and rebuilds it', async () => {
+  it('rebuilds the preview package', async () => {
     const src = vectors.valid.find((v) => v.id === vectors.preview.of);
     if (!src) throw new Error('missing vector');
-    const out = await verifyPreview(
-      vectors.preview.package,
-      listingOf(src.input.fileId, src.cipherHash),
-    );
-    const e = vectors.preview.expect;
-    expect(out.meta).toEqual({ name: e.name, mime: e.mime, size: e.size });
-    expect(Buffer.from(out.preview ?? []).equals(Buffer.from(pattern(e.preview.pattern)))).toBe(
-      true,
-    );
-
     const i = src.input;
     const sealed = await sealWithKey(hex(i.K), dataOf(i.data), { ...i, fileId: hex(i.fileId) });
     await sealed.finish(finishOpts);
     expect(await sealed.preview({ meta: true, data: true })).toEqual(vectors.preview.package);
-  });
-
-  for (const v of vectors.preview.invalid) {
-    it(`refuses preview ${v.id} with ${v.expect}`, async () => {
-      expect(await code(verifyPreview(v.package, listingOf(v.fileId, v.registered)))).toBe(
-        v.expect,
-      );
-    });
-  }
-
-  it('gives the same preview error whatever the chunk order', async () => {
-    const lie = vectors.preview.invalid.find((v) => v.id === 'preview-size-lie');
-    if (!lie) throw new Error('missing vector');
-    const broken = structuredClone(lie.package);
-    const [meta, data] = broken.chunks;
-    if (!meta || !data) throw new Error('missing chunk');
-    data.data = Buffer.from(b64(data.data).map((x, j) => (j === 0 ? x ^ 1 : x))).toString('base64');
-    const listing = listingOf(lie.fileId, lie.registered);
-    for (const chunks of [
-      [meta, data],
-      [data, meta],
-    ]) {
-      expect(await code(verifyPreview({ ...broken, chunks }, listing))).toBe('preview_invalid');
-    }
-  });
-
-  it('does not decode an oversized preview string', async () => {
-    const pkg = structuredClone(vectors.preview.package);
-    const data = pkg.chunks[1];
-    if (!data) throw new Error('missing chunk');
-    data.index = 999;
-    data.data = 'A'.repeat(8 << 20);
-    const src = vectors.valid[3] as (typeof vectors.valid)[number];
-    expect(await code(verifyPreview(pkg, listingOf(src.input.fileId, src.cipherHash)))).toBe(
-      'preview_invalid',
-    );
   });
 });
 
@@ -258,13 +210,6 @@ describe('PAY2 attacks beyond the vectors', () => {
     await expect(tooLong(10 * 70000, 65537)).rejects.toThrow(RangeError);
     await expect(tooLong(100, 10)).resolves.toBeTruthy();
   });
-
-  it('cuts a text preview at a whole line under the limit', () => {
-    const csv = new TextEncoder().encode(`id,name\n${'1,a\n'.repeat(1000)}`);
-    expect(previewLengthForLines(csv, 3)).toBe('id,name\n1,a\n1,a\n'.length);
-    expect(previewLengthForLines(csv, 10_000)).toBeLessThanOrEqual(csv.length / 10);
-    expect(csv[previewLengthForLines(csv, 10_000) - 1]).toBe(0x0a);
-  });
 });
 
 // Checks that don't assume which error a change causes: they hold for every possible change.
@@ -291,65 +236,6 @@ describe('PAY2 against single-bit changes (boundary sample, or every bit with AN
       expect(wrong).toEqual([]);
     });
   }
-
-  it('refuses flipped bits (boundary sample, or every bit with ANNON_EXHAUSTIVE=1) of the preview package', async () => {
-    const src = vectors.valid.find(
-      (x) => x.id === vectors.preview.of,
-    ) as (typeof vectors.valid)[number];
-    const listing = listingOf(src.input.fileId, src.cipherHash);
-    const pkg = vectors.preview.package;
-    const wrong: string[] = [];
-    const fields: [
-      string,
-      (p: PreviewPackage) => { get: () => string; set: (s: string) => void },
-    ][] = [
-      [
-        'header',
-        (p) => ({
-          get: () => p.header,
-          set: (s) => {
-            p.header = s;
-          },
-        }),
-      ],
-      ...[0, 1].flatMap((i) =>
-        (['key', 'data'] as const).map(
-          (k) =>
-            [
-              `chunk ${i} ${k}`,
-              (p: PreviewPackage) => {
-                const c = p.chunks[i] as PreviewPackage['chunks'][number];
-                return {
-                  get: () => c[k],
-                  set: (s: string) => {
-                    c[k] = s;
-                  },
-                };
-              },
-            ] as [string, (p: PreviewPackage) => { get: () => string; set: (s: string) => void }],
-        ),
-      ),
-    ];
-    for (const [name, at] of fields) {
-      for (const { bit, f } of flips(
-        b64(at(pkg).get()),
-        name === 'header'
-          ? pay2Boundaries(b64(pkg.header), true)
-          : name.endsWith('data')
-            ? [0, b64(at(pkg).get()).length - 16, b64(at(pkg).get()).length]
-            : [0, 32],
-      )) {
-        const p = structuredClone(pkg);
-        at(p).set(Buffer.from(f).toString('base64'));
-        const got = await verifyPreview(p, listing).then(
-          () => 'accepted',
-          (e: Error) => (e.name === 'Pay2Error' ? 'refused' : `crashed: ${e.message}`),
-        );
-        if (got !== 'refused') wrong.push(`${name} bit ${bit}: ${got}`);
-      }
-    }
-    expect(wrong).toEqual([]);
-  });
 });
 
 describe('EIP-191 against a signature made by another library', () => {

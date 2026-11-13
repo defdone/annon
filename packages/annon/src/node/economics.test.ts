@@ -137,7 +137,6 @@ it.each(['json', 'agent', 'interactive'] as const)(
                 terms,
                 file: new Uint8Array(),
                 header: new Uint8Array(),
-                preview: async () => ({ v: 1 as const, header: '', chunks: [] }),
               };
             });
             return sdk;
@@ -202,13 +201,11 @@ it.each(['self', 'sponsored-flag', 'resume-flag'] as const)(
               terms,
               file: new Uint8Array(),
               header: new Uint8Array(),
-              preview: async () => ({ v: 1 as const, header: '', chunks: [] }),
             });
             vi.spyOn(sdk, 'resumeSell').mockResolvedValue({
               terms,
               file: new Uint8Array(),
               header: new Uint8Array(),
-              preview: async () => ({ v: 1 as const, header: '', chunks: [] }),
             });
             return sdk;
           },

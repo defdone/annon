@@ -1,3 +1,10 @@
+export {
+  AnnonError,
+  type AnnonErrorCode,
+  isTransient,
+  type PublicError,
+  toPublicError,
+} from '../errors.js';
 /** Browser purchase logic. The embedding application supplies its own screen and wallets. */
 
 export {

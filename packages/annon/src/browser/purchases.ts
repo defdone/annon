@@ -2,6 +2,7 @@
 import { Annon, type AnnonOptions, type BuyOptions, type BuyRoute } from '../api/annon.js';
 import { DownloadError } from '../download/download.js';
 import { sha256 } from '../envelope/pay2.js';
+import { AnnonError } from '../errors.js';
 import {
   type Deposit,
   OneClick,
@@ -15,21 +16,16 @@ import {
   encryptedPurchaseStore,
   encryptedRecoveryArchiveIndexStore,
   encryptedRecoveryStore,
-  exportBrowserIndex,
+  exportBrowserReceipt,
   exportPurchase,
   exportRecovery,
-  importBrowserIndex,
+  importBrowserReceipt,
   importPurchase,
   importRecovery,
   newBackupSecret,
   type RecoveryRecord,
   sealBrowserRecord,
 } from '../pay/backup.js';
-import type {
-  BrowserPurchaseIndex,
-  BrowserPurchaseRecord,
-  BrowserPurchaseState,
-} from '../pay/browser-record.js';
 import { type PurchaseRecord, purchaseKey } from '../pay/purchase.js';
 import {
   checkNext,
@@ -46,11 +42,17 @@ import {
   browserDownload,
   downloadProgress,
 } from './download.js';
+import type {
+  BrowserPurchaseIndex,
+  BrowserPurchaseRecord,
+  BrowserPurchaseState,
+} from './record.js';
 
-export type { BrowserPurchaseRecord, BrowserPurchaseState } from '../pay/browser-record.js';
+export type { BrowserPurchaseRecord, BrowserPurchaseState } from './record.js';
 export type PurchaseSdk = Pick<Annon, 'buy' | 'accept' | 'open' | 'recover' | 'proveRecovery'>;
 const INDEX = 'annon/browser/index';
-const conflict = () => new Error('browser purchase store conflict; reload the saved purchase');
+const conflict = () =>
+  new AnnonError('store_conflict', 'browser purchase store conflict; reload the saved purchase');
 export interface BrowserPurchaseStorage {
   rawStore: Store<EncryptedRecord>;
   backupSecret: Uint8Array;
@@ -283,23 +285,10 @@ export async function browserPurchaseStorage(
         if (recovery) portable.recovery = recovery;
         else if (pending) portable.recovery = await importRecovery(pending.backup, backupSecret);
       }
-      return exportBrowserIndex(
-        {
-          kind: 'browser-index',
-          id: 'browser-index',
-          revision: 0,
-          entries: [portable],
-          backups: {},
-        },
-        secret,
-      );
+      return exportBrowserReceipt({ kind: 'browser-receipt', entry: portable }, secret);
     },
     async importReceipt(file, secret) {
-      const receipt = await importBrowserIndex(file, secret);
-      if (receipt.entries.length !== 1 || Object.keys(receipt.backups).length)
-        throw new TypeError('invalid portable receipt');
-      const entry = receipt.entries[0];
-      if (!entry) throw new TypeError('empty portable receipt');
+      const { entry } = await importBrowserReceipt(file, secret);
       if (await load(entry.id)) throw conflict();
       if (entry.purchase) {
         const index = await read();
@@ -396,10 +385,13 @@ export function browserAnnon(
     writeBackup: storage.writeBackup,
   });
 }
-export class PurchaseLeaseBusy extends Error {
+const LEASE_SECONDS = 120;
+const HEARTBEAT_MS = 30000;
+
+export class PurchaseLeaseBusy extends AnnonError {
   readonly code = 'lease_busy';
   constructor(readonly waitUntil: number) {
-    super('Another tab holds this purchase; wait for its lease to expire.');
+    super('lease_busy', 'Another tab holds this purchase; wait for its lease to expire.');
     this.name = 'PurchaseLeaseBusy';
   }
 }
@@ -424,6 +416,7 @@ export class BrowserPurchaseController {
       route: terms.route,
       maxPrice: String(terms.maxPrice),
       state: 'terms_review',
+      submission: 'not_submitted',
     };
     await options.storage.save(null, record);
     return new BrowserPurchaseController({ ...options, id: terms.id });
@@ -483,13 +476,18 @@ export class BrowserPurchaseController {
     return new PurchaseLeaseBusy(record.lease.expiresAt);
   }
   /** Every asynchronous operation owns a renewable lease, with revision CAS on every write. */
-  private async withLease<T>(run: (session: LeaseSession) => Promise<T>): Promise<T> {
+  private async withLease<T>(
+    run: (session: LeaseSession) => Promise<T>,
+    options: { initial?: Partial<BrowserPurchaseRecord>; finalCheckpoint?: boolean } = {},
+  ): Promise<T> {
     const before = await this.read();
     const busy = this.busy(before);
     if (busy) throw busy;
-    const lease = () => ({ owner: this.owner, expiresAt: this.now() + 120 });
+    if (options.initial?.state === 'preparing' && before.state !== 'terms_review')
+      throw new Error('purchase already started; resume the saved purchase');
+    const lease = () => ({ owner: this.owner, expiresAt: this.now() + LEASE_SECONDS });
     const session: LeaseSession = {
-      record: await this.change(before, { lease: lease() }),
+      record: await this.change(before, { ...options.initial, lease: lease() }),
       change: (patch) =>
         enqueue(async () => {
           if (heartbeatError) throw heartbeatError;
@@ -513,10 +511,10 @@ export class BrowserPurchaseController {
       void session.change({}).catch((error) => {
         heartbeatError = error;
       });
-    }, 30000);
+    }, HEARTBEAT_MS);
     try {
       const result = await run(session);
-      await session.change({});
+      if (options.finalCheckpoint !== false) await session.change({});
       return result;
     } finally {
       clearInterval(heartbeat);
@@ -551,103 +549,84 @@ export class BrowserPurchaseController {
       | 'onQuote'
     >,
   ): Promise<void> {
-    let saved = await this.read();
-    const busy = this.busy(saved);
-    if (busy) throw busy;
-    if (saved.state !== 'terms_review')
+    const before = await this.read();
+    if (before.state !== 'terms_review')
       throw new Error('purchase already started; resume the saved purchase');
-    if (saved.route === 'base-usdc' && typeof options.submitBase !== 'function')
+    if (before.route === 'base' && typeof options.submitBase !== 'function')
       throw new TypeError('Base requires submitBase');
-    const lease = () => ({ owner: this.owner, expiresAt: this.now() + 120 });
-    saved = await this.change(saved, {
-      state: 'preparing',
-      submission: 'not_submitted',
-      lease: lease(),
-    });
-    let queue: Promise<unknown> = Promise.resolve();
-    let heartbeatError: unknown;
-    const persist = (patch: Partial<BrowserPurchaseRecord>, release = false): Promise<void> => {
-      const run = queue.then(async () => {
-        if (heartbeatError) throw heartbeatError;
-        if (saved.lease?.owner !== this.owner || saved.lease.expiresAt <= this.now())
-          throw new Error('purchase lease expired; resume the saved checkout');
-        saved = await this.change(saved, { ...patch, lease: release ? undefined : lease() });
-      });
-      queue = run.catch(() => {});
-      return run;
-    };
-    const heartbeat = setInterval(() => {
-      void persist({}).catch((error) => {
-        heartbeatError = error;
-      });
-    }, 30000);
-    try {
-      const result = await this.options.sdk.buy({
-        ...options,
-        fileId: saved.fileId,
-        header: bytes(saved.header, (saved.header.length - 2) / 2),
-        url: saved.resourceUrl,
-        route: saved.route,
-        maxPrice: BigInt(saved.maxPrice),
-        beforeSave: async (purchase) => {
-          await persist({
-            purchase,
-            ...(saved.route === 'base-usdc' &&
-            purchase.attempts.some((attempt) => !!attempt.payload)
-              ? { submission: 'uncertain' as const }
-              : {}),
+    await this.withLease(
+      async (session) => {
+        const persist = async (patch: Partial<BrowserPurchaseRecord>) => {
+          await session.change(patch);
+        };
+        try {
+          const result = await this.options.sdk.buy({
+            ...options,
+            fileId: session.record.fileId,
+            header: bytes(session.record.header, (session.record.header.length - 2) / 2),
+            url: session.record.resourceUrl,
+            route: session.record.route,
+            maxPrice: BigInt(session.record.maxPrice),
+            beforeSave: async (purchase) => {
+              await persist({
+                purchase,
+                ...(session.record.route === 'base' &&
+                purchase.attempts.some((attempt) => !!attempt.payload)
+                  ? { submission: 'uncertain' as const }
+                  : {}),
+              });
+            },
+            onSaved: async (purchase) => {
+              if (session.record.purchase?.revision !== purchase.revision)
+                await persist({
+                  purchase,
+                  ...(session.record.route === 'base' &&
+                  purchase.attempts.some((attempt) => !!attempt.payload)
+                    ? { submission: 'uncertain' as const }
+                    : {}),
+                });
+            },
+            beforePayment: async (purchase) => {
+              if (!purchase.recoveryProved || session.record.purchase?.id !== purchase.id)
+                throw new Error('durable recovery proof required');
+              if (
+                session.record.lease?.owner !== this.owner ||
+                session.record.lease.expiresAt <= this.now()
+              )
+                throw new Error('purchase lease expired');
+              if (session.record.route !== '1click')
+                await persist({
+                  state: 'payment_uncertain',
+                  purchase,
+                  submission: 'uncertain',
+                  paymentStarted: true,
+                });
+            },
           });
-        },
-        onSaved: async (purchase) => {
-          if (JSON.stringify(saved.purchase) !== JSON.stringify(purchase))
-            await persist({
-              purchase,
-              ...(saved.route === 'base-usdc' &&
-              purchase.attempts.some((attempt) => !!attempt.payload)
-                ? { submission: 'uncertain' as const }
-                : {}),
-            });
-        },
-        beforePayment: async (purchase) => {
-          if (!purchase.recoveryProved || saved.purchase?.id !== purchase.id)
-            throw new Error('durable recovery proof required');
-          if (saved.lease?.owner !== this.owner || saved.lease.expiresAt <= this.now())
-            throw new Error('purchase lease expired');
-          if (saved.route !== 'oneclick')
-            await persist({
-              state: 'payment_uncertain',
-              purchase,
-              submission: 'uncertain',
-              paymentStarted: true,
-            });
-        },
-      });
-      await persist(
-        {
-          purchase: result.record,
-          state: saved.route === 'oneclick' ? 'awaiting_deposit' : 'payment_uncertain',
-          submission:
-            saved.route === 'oneclick'
-              ? 'not_submitted'
-              : result.uncertain
-                ? 'uncertain'
-                : saved.submission === 'not_submitted'
-                  ? 'not_submitted'
-                  : 'submitted',
-        },
-        true,
-      );
-    } catch (error) {
-      // Only an unstaged failure can return to review. A staged purchase must resume its original commitment.
-      await this.change(saved, {
-        state: saved.purchase ? 'payment_uncertain' : 'terms_review',
-        lease: undefined,
-      }).catch(() => {});
-      throw error;
-    } finally {
-      clearInterval(heartbeat);
-      await queue;
-    }
+          await persist({
+            purchase: result.record,
+            state: session.record.route === '1click' ? 'awaiting_deposit' : 'payment_uncertain',
+            submission:
+              session.record.route === '1click'
+                ? 'not_submitted'
+                : result.uncertain
+                  ? 'uncertain'
+                  : session.record.submission === 'not_submitted'
+                    ? 'not_submitted'
+                    : 'submitted',
+          });
+        } catch (error) {
+          // Only an unstaged failure can return to review. A staged purchase must resume its original commitment.
+          await session
+            .change({
+              state: session.record.purchase ? 'payment_uncertain' : 'terms_review',
+            })
+            .catch(() => {});
+          throw error;
+        }
+      },
+      { initial: { state: 'preparing', submission: 'not_submitted' }, finalCheckpoint: false },
+    );
   }
   private deposit(record: BrowserPurchaseRecord): Deposit | undefined {
     return (record.purchase?.quote as OneClickQuote | null)?.deposit;
@@ -689,7 +668,7 @@ export class BrowserPurchaseController {
       const purchase = saved.purchase;
       const signed = purchase.attempts.some((attempt) => !!attempt.payload);
       if (
-        saved.route !== 'oneclick' &&
+        saved.route !== '1click' &&
         saved.submission === 'not_submitted' &&
         !signed &&
         !saved.paymentStarted &&
@@ -706,7 +685,7 @@ export class BrowserPurchaseController {
       if (JSON.stringify(restored) !== JSON.stringify(saved.purchase))
         saved = await session.change({ purchase: restored });
       const pendingBase = () =>
-        saved.route === 'base-usdc' &&
+        saved.route === 'base' &&
         restored.paymentState !== 'expired' &&
         (signed || saved.submission !== 'not_submitted' || saved.state === 'accepting');
       if (pendingBase() && saved.state !== 'accepting')
@@ -725,12 +704,12 @@ export class BrowserPurchaseController {
           : status === 'PROCESSING' || status === 'KNOWN_DEPOSIT_TX' || saved.state === 'processing'
             ? 'processing'
             : null;
-      if (saved.route === 'oneclick' && progress) {
+      if (saved.route === '1click' && progress) {
         await session.change({ state: progress });
         return;
       }
-      if (saved.state === 'expired' && saved.route !== 'base-usdc') return;
-      if (saved.route !== 'oneclick') {
+      if (saved.state === 'expired' && saved.route !== 'base') return;
+      if (saved.route !== '1click') {
         await session.change({
           state: pendingBase()
             ? 'accepting'
@@ -782,7 +761,7 @@ export class BrowserPurchaseController {
       let saved = session.record;
       const deposit = this.deposit(saved);
       if (
-        saved.route !== 'oneclick' ||
+        saved.route !== '1click' ||
         !deposit ||
         [
           'terms_review',

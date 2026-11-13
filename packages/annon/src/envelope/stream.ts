@@ -1,3 +1,4 @@
+import { AnnonError } from '../errors.js';
 import { account } from '../settle-near/codec.js';
 /**
  * Bounded-memory PAY2 version 2 using Web Streams and the one-shot encoder's WebCrypto primitives.
@@ -52,10 +53,9 @@ const subtle = globalThis.crypto.subtle;
 const utf8 = new TextEncoder();
 
 /** A replay no longer matches the source authenticated in the first pass. */
-export class SourceChangedError extends RangeError {
-  readonly code = 'source_changed';
+export class SourceChangedError extends AnnonError<'source_changed'> {
   constructor() {
-    super('source changed between passes');
+    super('source_changed', 'source changed between passes');
     this.name = 'SourceChangedError';
   }
 }

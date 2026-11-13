@@ -1,7 +1,7 @@
 import { expect, it, vi } from 'vitest';
 import { must, purchase } from '../../test/fixtures.js';
 import { getPurchase } from '../near/rpc.js';
-import { hex } from '../settle-near/codec.js';
+import { hex, usdc } from '../settle-near/codec.js';
 import { baseNonceV2, buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import {
   type EncryptedRecord,
@@ -26,6 +26,14 @@ it.each(['expired', 'canceled'] as const)(
     const hash = `0x${'55'.repeat(32)}`;
     const record: PurchaseRecord = {
       schemaVersion: 2,
+      recoveryProved: false,
+      payment: {
+        route: purchase.route === 'base-usdc' ? 'base' : 'near',
+        amountUsdc: usdc(BigInt(purchase.price)),
+        amountBaseUnits: purchase.price,
+        asset: { symbol: 'USDC', id: purchase.asset },
+        network: purchase.network,
+      },
       id,
       revision: 0,
       purchase,

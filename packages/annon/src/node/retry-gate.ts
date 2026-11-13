@@ -1,5 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { type AnnonErrorCode, isAnnonErrorCode } from '../errors.js';
 import { fileStore } from '../pay/store-node.js';
 import { AdapterError } from './errors.js';
 
@@ -7,7 +8,7 @@ interface GateRecord {
   id: string;
   revision: number;
   nextAllowedAt: number;
-  code: string;
+  code: AnnonErrorCode;
 }
 interface Context {
   stateDir: string;
@@ -32,7 +33,11 @@ export function retryGate(c: Context, now = () => Date.now() / 1000) {
     async check() {
       const saved = await store.load(id);
       if (!saved) return;
-      if (!Number.isFinite(saved.nextAllowedAt) || saved.nextAllowedAt < 0)
+      if (
+        !isAnnonErrorCode(saved.code) ||
+        !Number.isFinite(saved.nextAllowedAt) ||
+        saved.nextAllowedAt < 0
+      )
         throw new AdapterError('invalid_record', 'Invalid saved retry gate.', 2);
       const remaining = Math.ceil(saved.nextAllowedAt - now());
       if (remaining > 0)
@@ -45,7 +50,7 @@ export function retryGate(c: Context, now = () => Date.now() / 1000) {
           },
         );
     },
-    async defer(code: string, seconds: number) {
+    async defer(code: AnnonErrorCode, seconds: number) {
       if (!Number.isFinite(seconds) || seconds < 0 || !Number.isSafeInteger(Math.ceil(seconds)))
         return;
       const nextAllowedAt = now() + Math.ceil(seconds);

@@ -360,7 +360,7 @@ beforeEach(() => {
         throw new Error(`unexpected ${b.method}`);
       if (chain.calls === 'revert') {
         return {
-          json: async () => ({ id: b.id, error: { code: 3, message: 'execution reverted' } }),
+          json: async () => ({ id: b.id, error: { code: 3, message: 'RPC_CALL_FAILED' } }),
         };
       }
       const fn = (['splitHash', 'owner', 'paused'] as const).find(

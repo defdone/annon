@@ -18,7 +18,7 @@ export const BASE_NETWORK = 'eip155:8453';
  */
 export const ANNON_EXACT = 'annon-exact';
 export const ANNON_NEAR_USDC = 'annon-near-usdc';
-/** The x402 idempotency extension (profile section 10). */
+/** The x402 idempotency extension (x402-annon.md section 10). */
 export const PAYMENT_IDENTIFIER = 'payment-identifier';
 
 /** As the x402 extension declares it, optional: the official `declarePaymentIdentifierExtension`. */
@@ -37,22 +37,19 @@ export const paymentIdentifierDeclaration = () => ({
 
 /** x402 builder codes (ERC-8021 attribution); the Annon SDK's own service code. */
 export const BUILDER_CODE = 'builder-code';
-export const ANNON_SERVICE_CODE = 'bc_lq0mq0v9';
+const ANNON_SERVICE_CODE = 'bc_lq0mq0v9';
 export const BUILDER_CODE_PATTERN = /^[a-z0-9_]{1,32}$/;
 /** At most this many service codes echoed by a client: its 5 and the server's 5. */
 export const MAX_ECHOED_SERVICE_CODES = 10;
 /** Service codes as a list: the extension allows one code as a plain string. */
 export const codes = (s: unknown): unknown[] => (s === undefined ? [] : Array.isArray(s) ? s : [s]);
 
-/** x402 discovery (profile section 11); never sent to a facilitator. */
+/** x402 discovery (x402-annon.md section 11); never sent to a facilitator. */
 export const BAZAAR = 'bazaar';
 
 /** A payment id the extension allows: 16 to 128 letters, digits, `-` and `_`. */
 export const isPaymentId = (id: unknown): id is string =>
   typeof id === 'string' && /^[a-zA-Z0-9_-]{16,128}$/.test(id);
-
-/** Contracts the SDK trusts without being told: the one Annon deployment on NEAR mainnet. */
-export const TRUSTED_CONTRACTS: readonly string[] = [];
 
 export interface Offer {
   scheme: string;
@@ -112,11 +109,11 @@ export function readPaymentRequired(header: string): PaymentRequired {
 
 /**
  * The Annon contract and file a payment request sells, from its `annon` extension. Only a
- * contract in `trusted` (by default `TRUSTED_CONTRACTS`) is ever returned.
+ * contract in the required `trusted` list is ever returned.
  */
 export function discover(
   pr: PaymentRequired,
-  trusted: readonly string[] = TRUSTED_CONTRACTS,
+  trusted: readonly string[],
 ): { contractId: string; fileId: string } {
   const info = pr.extensions?.annon?.info;
   if (!info) return fail('file_mismatch', 'the payment request names no Annon file');

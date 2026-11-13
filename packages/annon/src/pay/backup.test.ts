@@ -17,12 +17,20 @@ const secret = new Uint8Array(32);
 secret[31] = 1;
 const record: PurchaseRecord = {
   schemaVersion: 2,
+  recoveryProved: false,
+  payment: {
+    route: 'base',
+    amountUsdc: '0.2',
+    amountBaseUnits: purchase.price,
+    asset: { symbol: 'USDC', id: purchase.asset },
+    network: purchase.network,
+  },
   id: purchaseId(purchase),
   revision: 0,
   purchase,
   message: buildPurchaseMessage(purchase),
   buyerSecret: hex(secret),
-  quote: { amountIn: '202064' },
+  quote: null,
   recovery: purchase.recovery,
   checkedHeaderHash: `0x${'55'.repeat(32)}`,
   terms: {
@@ -81,7 +89,7 @@ describe('user-held encrypted purchase backup', () => {
     expect(await store.load(record.id)).toEqual(record);
     const writes = await Promise.all([
       store.compareAndSet(record.id, record, { ...record, revision: 1 }),
-      store.compareAndSet(record.id, record, { ...record, revision: 1, quote: { other: true } }),
+      store.compareAndSet(record.id, record, { ...record, revision: 1, recoveryProved: true }),
     ]);
     expect(writes.filter(Boolean)).toHaveLength(1);
     await expect(encryptedPurchaseStore(raw, newBackupSecret()).load(record.id)).rejects.toThrow();
@@ -91,5 +99,47 @@ describe('user-held encrypted purchase backup', () => {
 it('rejects a non-boolean recovery proof checkpoint in a portable purchase', async () => {
   await expect(
     exportPurchase({ ...record, recoveryProved: 'true' } as never, newBackupSecret()),
-  ).rejects.toThrow(/proof/);
+  ).rejects.toMatchObject({ code: 'invalid_record' });
+});
+
+it.each(['payment', 'quote', 'recoveryProved'] as const)(
+  'rejects a never-released purchase missing %s',
+  async (field) => {
+    const old = { ...record };
+    delete (old as Partial<PurchaseRecord>)[field];
+    await expect(exportPurchase(old, newBackupSecret())).rejects.toMatchObject({
+      code: 'invalid_record',
+    });
+  },
+);
+it('rejects a summary that disagrees with the protocol purchase', async () => {
+  await expect(
+    exportPurchase({ ...record, payment: { ...record.payment, route: 'near' } }, newBackupSecret()),
+  ).rejects.toMatchObject({ code: 'invalid_record' });
+});
+
+it.each(['amount', 'decimal', 'network', 'asset', 'symbol', 'route', 'quote'] as const)(
+  'rejects inconsistent payment facts: %s',
+  async (field) => {
+    const edited = structuredClone(record);
+    if (field === 'amount') edited.payment.amountBaseUnits = '1';
+    if (field === 'decimal') edited.payment.amountUsdc = '0.1';
+    if (field === 'network') edited.payment.network = 'near:mainnet';
+    if (field === 'asset') edited.payment.asset.id = 'other-token';
+    if (field === 'symbol') edited.payment.asset.symbol = 'OTHER' as never;
+    if (field === 'route') edited.payment.route = 'base-usdc' as never;
+    if (field === 'quote') edited.quote = {} as never;
+    await expect(exportPurchase(edited, newBackupSecret())).rejects.toMatchObject({
+      code: 'invalid_record',
+    });
+  },
+);
+
+it('requires the quote checkpoint to survive JSON serialization', async () => {
+  const edited = { ...record };
+  delete (edited as Partial<PurchaseRecord>).quote;
+  Object.setPrototypeOf(edited, { quote: null });
+  await expect(exportPurchase(edited, newBackupSecret())).rejects.toMatchObject({
+    code: 'invalid_record',
+  });
 });

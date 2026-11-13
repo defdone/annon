@@ -7,6 +7,7 @@
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
 import { sha3_256 } from '@noble/hashes/sha3.js';
 import { base58 } from '@scure/base';
+import { AnnonError } from '../errors.js';
 
 const G1 = bls.G1.Point;
 const G2 = bls.G2.Point;
@@ -19,10 +20,10 @@ export type CkdErrorCode =
   /** An answer that isn't a valid key for this file and this one-time key. */
   | 'ckd_invalid';
 
-export class CkdError extends Error {
+export class CkdError extends AnnonError {
   readonly code: CkdErrorCode;
   constructor(code: CkdErrorCode, message: string = code) {
-    super(message);
+    super(code, message);
     this.code = code;
     this.name = 'CkdError';
   }

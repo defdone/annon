@@ -97,3 +97,78 @@ it('deduplicates persistent failures for an hour without a write for every respo
   await m.failure('rpc', 3600000);
   expect(deliver).toHaveBeenCalledTimes(2);
 });
+
+it.each(['reopen_seller', 'fund_file_storage'] as const)(
+  'deduplicates held %s reconciliation alerts across passes and restart',
+  async (method) => {
+    const { vi } = await import('vitest');
+    const rpc = await import('../../packages/annon/src/near/rpc.ts');
+    const { RelayLedger } = await import('../../packages/annon/src/relay/ledger.ts');
+    const { reconcileRelayStorage } = await import('../../packages/annon/src/relay/relay.ts');
+    const { relayLimits } = await import('../../packages/annon/src/relay/sponsorship.ts');
+    const ledger = new RelayLedger(memoryStore(), 'held');
+    const monitorStore = memoryStore<MonitorRecord>();
+    const deliver = vi.fn();
+    let monitor = new ServiceMonitor(monitorStore, deliver);
+    const pending: Promise<void>[] = [];
+    const fileId = `0x${'22'.repeat(32)}`;
+    await ledger.prepare({
+      id: 'op',
+      requestHash: 'h',
+      method,
+      fileId,
+      termsHash: `0x${'33'.repeat(32)}`,
+      seller: 'seller',
+      listed: false,
+      ip: '192.0.2.1',
+      storage: '100',
+      allocation: '100',
+      fundingBalanceBefore: '7',
+      limits: relayLimits({
+        nearRpc: 'https://rpc.test',
+        baseRpc: 'https://base.test',
+        contractId: 'market.test',
+        usdc: `0x${'11'.repeat(20)}`,
+        policy: { minPrice: 1n, maxDeadlineSeconds: 600 },
+      }),
+    });
+    await ledger.signed('op', {
+      txHash: 'T',
+      signed: 'original',
+      signer: 'relay.test',
+      args:
+        method === 'reopen_seller'
+          ? { args: { file_id: fileId, key: `0x${'55'.repeat(48)}` } }
+          : { file_id: fileId, amount: '100' },
+    });
+    vi.spyOn(rpc, 'rpcReply').mockImplementation(async (_url, name) =>
+      name === 'tx'
+        ? { error: { cause: { name: 'UNKNOWN_TRANSACTION' } } }
+        : name === 'query'
+          ? { error: { cause: { name: 'AccountStateTooLarge' } } }
+          : { error: { cause: { info: { InvalidTxError: 'Expired' } } } },
+    );
+    vi.spyOn(rpc, 'getFile').mockResolvedValue({ purchaseStorageBalance: 7n } as never);
+    try {
+      for (let pass = 0; pass < 3; pass++) {
+        if (pass === 2) monitor = new ServiceMonitor(monitorStore, deliver);
+        await reconcileRelayStorage({
+          ledger,
+          nearRpc: 'https://rpc.test',
+          contractId: 'market.test',
+          sender: { accountId: 'relay.test', key: 'test-double' },
+          alert: (type) => {
+            pending.push(monitor.failure(type, 1000 + pass));
+          },
+        });
+        await Promise.all(pending);
+      }
+      expect(deliver).toHaveBeenCalledExactlyOnceWith({ type: 'reconcile_held' });
+      expect(await ledger.pendingStorage()).toBe(100n);
+      expect((await ledger.operation('op'))?.stage).toBe('submitted');
+      expect((await ledger.operation('op'))?.storageFinalized).toBeUndefined();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  },
+);

@@ -1,12 +1,8 @@
 /** One-time archival bootstrap, using an operator-reviewed JSON policy and inventory. */
 import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileStore, ownDirectory } from '../../packages/annon/src/pay/store-node.ts';
-import {
-  RelayLedger,
-  type RelayState,
-  requestHash,
-} from '../../packages/annon/src/relay/ledger.ts';
+import { fileStore, ownDirectory } from '@defdone/annon/pay/store-node';
+import { RelayLedger, type RelayState, requestHash } from '@defdone/annon/relay';
 import type { ScanCheckpoint } from './cutover-scan.ts';
 import { sealLegacy } from './cutover-scan.ts';
 
@@ -22,7 +18,7 @@ export async function cutover(policyFile: string, stateDir: string, archivalRpc:
   const releaseScan = await ownDirectory(checkpointDir);
   try {
     const checkpoints = fileStore<
-      import('../../packages/annon/src/pay/store.ts').Versioned & { progress: ScanCheckpoint }
+      import('@defdone/annon/pay/store').Versioned & { progress: ScanCheckpoint }
     >(checkpointDir);
     const { hash, height, fromHeight, fee, inventory, sponsor } = policy.snapshot;
     const checkpointId = `cutover-${requestHash({

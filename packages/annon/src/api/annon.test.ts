@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { terms as initial, must } from '../../test/fixtures.js';
 import { sealWithKey } from '../envelope/pay2.js';
 import { blobSource } from '../envelope/replay.js';
+import { AnnonError } from '../errors.js';
 import { fileAppId, hashPoint, keyFromSecret } from '../keys/near-ckd.js';
 import * as rpcModule from '../near/rpc.js';
 import { getFile } from '../near/rpc.js';
@@ -16,7 +17,6 @@ import {
   importPurchase,
   importRecovery,
   importSell,
-  importSellerKey,
   newBackupSecret,
   type SellerKeyRecord,
 } from '../pay/backup.js';
@@ -32,6 +32,27 @@ import type { Identity } from '../settle-near/identity.js';
 import { parsePurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import { termsHash } from '../settle-near/terms.js';
 import { Annon } from './annon.js';
+
+async function readSellerKeyBackup(file: string, secret: Uint8Array): Promise<SellerKeyRecord> {
+  const backup = JSON.parse(file);
+  const tag = new TextEncoder().encode('annon/purchase-backup/v1');
+  const material = await crypto.subtle.importKey('raw', new Uint8Array(secret), 'HKDF', false, [
+    'deriveKey',
+  ]);
+  const key = await crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: bytes(backup.salt, 32), info: tag },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['decrypt'],
+  );
+  const plain = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: bytes(backup.iv, 12), additionalData: tag },
+    key,
+    bytes(backup.ciphertext, (backup.ciphertext.length - 2) / 2),
+  );
+  return JSON.parse(new TextDecoder().decode(plain));
+}
 
 const account = privateKeyToAccount(`0x${'42'.repeat(32)}`);
 const wallet = {
@@ -98,6 +119,11 @@ function harness(seller: Identity = wallet.identity) {
         terms: typeof terms;
         seller_key: string;
       };
+      expect(
+        Object.keys(x).filter(
+          (key) => !['terms', 'seller_key', 'deadline', 'file_budget'].includes(key),
+        ),
+      ).toEqual([]);
       terms = x.terms;
       return answer(terms.file_id, x.seller_key);
     }
@@ -334,6 +360,7 @@ describe('high-level one-model API', () => {
         publish: h.publish,
       });
       expect(sold.baseSplit).toEqual(provenance);
+      expect(sold).not.toHaveProperty('preview');
       expect(termsHash(sold.terms)).toBe(hash);
       const saved = await importSell(must(h.backups.get(`sell:${fileId}`)), h.backupSecret);
       expect(saved.published).toBe(true);
@@ -341,7 +368,7 @@ describe('high-level one-model API', () => {
       expect(sendTransaction).toHaveBeenCalledTimes(1);
     },
   );
-  it('imports and resumes an old Base sell record without split provenance', async () => {
+  it('rejects a Base sell record missing split provenance', async () => {
     const h = harness();
     const fileId = initial.file_id;
     await expect(
@@ -364,27 +391,13 @@ describe('high-level one-model API', () => {
     ).rejects.toThrow('publication unavailable');
     const job = await importSell(must(h.backups.get(`sell:${fileId}`)), h.backupSecret);
     const { baseSplit: _baseSplit, ...old } = job;
-    const legacy = await importSell(await exportSell(old, h.backupSecret), h.backupSecret);
-    expect(Object.hasOwn(legacy, 'baseSplit')).toBe(false);
-    expect(legacy.terms.base).not.toBeNull();
-    const store = encryptedSellStore(h.raw, h.backupSecret);
-    expect(
-      await store.compareAndSet(`annon/sell/${fileId}`, job, {
-        ...legacy,
-        revision: legacy.revision + 1,
-      }),
-    ).toBe(true);
-    const sold = await new Annon(h.config).resumeSell({
-      fileId,
-      data: body,
-      seller: wallet,
-      publish: h.publish,
+    await expect(exportSell(old as typeof job, h.backupSecret)).rejects.toMatchObject({
+      code: 'invalid_record',
     });
-    expect(sold.terms).toEqual(old.terms);
-    expect(Object.hasOwn(sold, 'baseSplit')).toBe(false);
-    const saved = await importSell(must(h.backups.get(`sell:${fileId}`)), h.backupSecret);
-    expect(saved.published).toBe(true);
-    expect(Object.hasOwn(saved, 'baseSplit')).toBe(false);
+    Object.setPrototypeOf(old, { baseSplit: job.baseSplit });
+    await expect(exportSell(old as typeof job, h.backupSecret)).rejects.toMatchObject({
+      code: 'invalid_record',
+    });
   });
   it('sells with normalized sorted split terms, registers then publishes and opens a purchased grant', async () => {
     const h = harness();
@@ -427,13 +440,13 @@ describe('high-level one-model API', () => {
       } as never,
       origin: { asset: 'nep141:origin', chain: 'evm', refundTo: wallet.identity.id },
     });
-    expect(bought.route).toBe('near-usdc');
+    expect(bought.route).toBe('1click');
     expect(must(bought.instructions).address).toBe('deposit');
     expect(await importPurchase(must(h.backups.get(bought.record.id)), h.backupSecret)).toEqual(
       bought.record,
     );
     await expect(h.sdk.open({ record: bought.record, file: h.file })).rejects.toMatchObject({
-      code: 'settlement_processing',
+      code: 'settlement_pending',
     });
     expect(h.calls.some((c) => c.method === 'claim_key')).toBe(false);
     const p = bought.record.purchase;
@@ -830,7 +843,7 @@ describe('high-level one-model API', () => {
       url: 'https://files.example/f',
       submitBase,
     });
-    expect(result.route).toBe('base-usdc');
+    expect(result.route).toBe('base');
     expect(submitBase).toHaveBeenCalledTimes(1);
     expect(result.record.purchase.network).toBe('eip155:8453');
   });
@@ -875,7 +888,7 @@ describe('high-level one-model API', () => {
         oneClick: { quote } as never,
         origin: { asset: 'nep141:origin', chain: 'evm', refundTo: wallet.identity.id },
       });
-      expect(result.route).toBe('near-usdc');
+      expect(result.route).toBe('1click');
       expect(signTypedData).not.toHaveBeenCalled();
       expect(quote).toHaveBeenCalledTimes(1);
     },
@@ -1124,7 +1137,7 @@ describe('high-level one-model API', () => {
     expect(await encryptedSellStore(h.raw, h.backupSecret).load(`annon/sell/${fileId}`)).toEqual(
       completed,
     );
-    const sellerKey = await importSellerKey(
+    const sellerKey = await readSellerKeyBackup(
       must(h.backups.get(`seller-key:${fileId}`)),
       h.backupSecret,
     );
@@ -1145,7 +1158,7 @@ describe('high-level one-model API', () => {
       expect(method).toBe('reopen_seller');
       const pending = must(await store.load(keyName));
       expect(pending.buyerSecret).toBeTruthy();
-      expect(await importSellerKey(must(h.backups.get(pending.id)), h.backupSecret)).toEqual(
+      expect(await readSellerKeyBackup(must(h.backups.get(pending.id)), h.backupSecret)).toEqual(
         pending,
       );
       const { key } = (args as { args: { key: string } }).args;
@@ -1160,7 +1173,9 @@ describe('high-level one-model API', () => {
     expect(await h.sdk.reopenSeller({ fileId: h.terms.file_id, seller: wallet })).toHaveLength(48);
     const cleaned = must(await store.load(keyName));
     expect(cleaned).toMatchObject({ buyerSecret: null, revision: 1 });
-    expect(await importSellerKey(must(h.backups.get(cleaned.id)), h.backupSecret)).toEqual(cleaned);
+    expect(await readSellerKeyBackup(must(h.backups.get(cleaned.id)), h.backupSecret)).toEqual(
+      cleaned,
+    );
   });
 
   it('finishSell clears a retained seller-key secret independently of reopenSeller', async () => {
@@ -1198,7 +1213,9 @@ describe('high-level one-model API', () => {
     expect(reopen).not.toHaveBeenCalled();
     const cleaned = must(await store.load(keyName));
     expect(cleaned).toMatchObject({ buyerSecret: null, revision: 1 });
-    expect(await importSellerKey(must(h.backups.get(cleaned.id)), h.backupSecret)).toEqual(cleaned);
+    expect(await readSellerKeyBackup(must(h.backups.get(cleaned.id)), h.backupSecret)).toEqual(
+      cleaned,
+    );
   });
 
   it('reads CKD keys from the configured MPC domain, with explicit overrides pinned to it', async () => {
@@ -1280,26 +1297,31 @@ describe('high-level one-model API', () => {
     });
     expect(await sdk.reopenSeller({ fileId: h.terms.file_id, seller: wallet })).toHaveLength(48);
   });
-  it('reports missing prepaid storage with an actionable refusal', async () => {
-    const h = harness();
-    h.send.mockRejectedValueOnce(
-      new Error('attach at least 500 yoctoNEAR for storage, or call storage_deposit first'),
-    );
-    await expect(
-      h.sdk.sell({
-        data: body,
-        name: 'x',
-        mime: '',
-        seller: wallet,
-        near: {
-          price: '200000',
-          recipients: [{ identity: wallet.identity, bps: 10000 }],
-          remainder: wallet.identity,
-        },
-        publish: h.publish,
-      }),
-    ).rejects.toMatchObject({ code: 'storage_required' });
-  });
+  it.each(['typed', 'untyped'])(
+    'uses a typed storage refusal without inspecting upstream messages: %s',
+    async (mode) => {
+      const h = harness();
+      h.send.mockRejectedValueOnce(
+        mode === 'typed'
+          ? new AnnonError('storage_required')
+          : new Error('attach at least 500 yoctoNEAR for storage, or call storage_deposit first'),
+      );
+      await expect(
+        h.sdk.sell({
+          data: body,
+          name: 'x',
+          mime: '',
+          seller: wallet,
+          near: {
+            price: '200000',
+            recipients: [{ identity: wallet.identity, bps: 10000 }],
+            remainder: wallet.identity,
+          },
+          publish: h.publish,
+        }),
+      ).rejects.toMatchObject({ code: mode === 'typed' ? 'storage_required' : 'sell_incomplete' });
+    },
+  );
   it('requires a real price cap at the SDK runtime boundary', async () => {
     const h = harness();
     await expect(h.sdk.buy({ maxPrice: undefined } as never)).rejects.toThrow(/maxPrice/);
@@ -1715,7 +1737,7 @@ it.each(['none', 'header', 'locked header', 'cancel', 'swallow failure'] as cons
   },
 );
 
-it.each(['near-usdc', 'base-usdc', 'oneclick'] as const)(
+it.each(['near', 'base', '1click'] as const)(
   'honors explicit %s selection without fallback',
   async (route) => {
     const h = harness();
@@ -1739,7 +1761,7 @@ it.each(['near-usdc', 'base-usdc', 'oneclick'] as const)(
     }));
     const transferPurchase = vi.fn();
     const payer =
-      route === 'near-usdc'
+      route === 'near'
         ? {
             identity: { kind: 'near', id: 'synthetic-buyer.test' },
             authorize: vi.fn(),
@@ -1758,13 +1780,15 @@ it.each(['near-usdc', 'base-usdc', 'oneclick'] as const)(
       origin: { asset: 'nep141:synthetic', chain: 'evm', refundTo: wallet.identity.id },
       oneClick: { quote } as never,
     });
-    if (route === 'base-usdc') await expect(operation).rejects.toThrow(/Base requires/);
+    if (route === 'base') await expect(operation).rejects.toThrow(/Base requires/);
     else {
-      await expect(operation).resolves.toMatchObject({ route: 'near-usdc' });
+      await expect(operation).resolves.toMatchObject({
+        route: route === 'near' ? 'near' : '1click',
+      });
       const result = await operation;
-      expect(result.route).toBe('near-usdc');
-      expect(quote).toHaveBeenCalledTimes(route === 'oneclick' ? 1 : 0);
-      expect(transferPurchase).toHaveBeenCalledTimes(route === 'near-usdc' ? 1 : 0);
+      expect(result.route).toBe(route === 'near' ? 'near' : '1click');
+      expect(quote).toHaveBeenCalledTimes(route === '1click' ? 1 : 0);
+      expect(transferPurchase).toHaveBeenCalledTimes(route === 'near' ? 1 : 0);
     }
   },
 );
@@ -1785,7 +1809,7 @@ it('rejects explicit direct NEAR without a NEAR wallet instead of using 1Click',
   const quote = vi.fn();
   await expect(
     h.sdk.buy({
-      route: 'near-usdc',
+      route: 'near',
       fileId: h.terms.file_id,
       header: h.header,
       recovery: wallet,
@@ -1823,7 +1847,7 @@ it.each(['record', 'before-payment', 'proof-record'] as const)(
     };
     await expect(
       h.sdk.buy({
-        route: 'near-usdc',
+        route: 'near',
         fileId: h.terms.file_id,
         header: h.header,
         payer,
@@ -1858,7 +1882,7 @@ it('saves recovery proof before releasing 1Click instructions and can reprove a 
   });
   const saved: import('../pay/purchase.js').PurchaseRecord[] = [];
   const result = await h.sdk.buy({
-    route: 'oneclick',
+    route: '1click',
     fileId: h.terms.file_id,
     header: h.header,
     recovery: wallet,
@@ -1898,7 +1922,7 @@ it('saves recovery proof before releasing 1Click instructions and can reprove a 
   await expect(otherContract.proveRecovery(restored, wallet)).rejects.toThrow(/scope/);
 });
 
-it.each(['near-usdc', 'base-usdc', 'oneclick'] as const)(
+it.each(['near', 'base', '1click'] as const)(
   'runs the browser controller through %s, acceptance and file readiness with contract stubs',
   async (route) => {
     vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
@@ -1937,7 +1961,7 @@ it.each(['near-usdc', 'base-usdc', 'oneclick'] as const)(
     const transferPurchase = vi.fn();
     const submitBase = vi.fn(async () => {});
     const payer =
-      route === 'near-usdc'
+      route === 'near'
         ? {
             identity: { kind: 'near', id: 'synthetic-buyer.test' },
             authorize: vi.fn(),
@@ -1996,7 +2020,7 @@ it.each(['near-usdc', 'base-usdc', 'oneclick'] as const)(
       now: () => now,
     });
     expect((await restored.snapshot()).state).toBe(
-      route === 'oneclick' ? 'awaiting_deposit' : 'payment_uncertain',
+      route === '1click' ? 'awaiting_deposit' : 'payment_uncertain',
     );
     await expect(restored.start({ recovery: wallet, refund: wallet.identity })).rejects.toThrow(
       /resume/,
@@ -2014,8 +2038,8 @@ it.each(['near-usdc', 'base-usdc', 'oneclick'] as const)(
     expect((await restored.snapshot()).state).toBe('accepted');
     expect((await restored.open(h.file)).data).toEqual(body);
     expect((await restored.snapshot()).state).toBe('file_ready');
-    expect(transferPurchase).toHaveBeenCalledTimes(route === 'near-usdc' ? 1 : 0);
-    expect(submitBase).toHaveBeenCalledTimes(route === 'base-usdc' ? 1 : 0);
+    expect(transferPurchase).toHaveBeenCalledTimes(route === 'near' ? 1 : 0);
+    expect(submitBase).toHaveBeenCalledTimes(route === 'base' ? 1 : 0);
   },
 );
 
@@ -2054,7 +2078,7 @@ it.each(['insufficient balance', 'smart wallet'] as const)(
     const signTypedData = vi.fn();
     await expect(
       h.sdk.buy({
-        route: 'base-usdc',
+        route: 'base',
         fileId: h.terms.file_id,
         header: h.header,
         recovery: wallet,
@@ -2105,7 +2129,7 @@ it.each([
   const quote = vi.fn();
   await expect(
     h.sdk.buy({
-      route: 'oneclick',
+      route: '1click',
       fileId: h.terms.file_id,
       header: h.header,
       recovery: { ...wallet, authorize },
@@ -2139,7 +2163,7 @@ it('keeps a bad refund retryable in the real browser controller without a saved 
       fileId: h.terms.file_id,
       header: h.header,
       resourceUrl: 'https://files.example/f',
-      route: 'oneclick',
+      route: '1click',
       maxPrice: 200000n,
     },
   );
@@ -2167,7 +2191,7 @@ it('M7 honors explicit oneclick with a NEAR payer without a direct transfer', as
     deposit: { address: 'synthetic', depositBefore: new Date((now + 3000) * 1000).toISOString() },
   }));
   const result = await h.sdk.buy({
-    route: 'oneclick',
+    route: '1click',
     fileId: h.terms.file_id,
     header: h.header,
     recovery: wallet,
@@ -2206,7 +2230,7 @@ it('M10 awaits the Base checkpoint before submitBase and blocks submission when 
   const submitBase = vi.fn();
   await expect(
     h.sdk.buy({
-      route: 'base-usdc',
+      route: 'base',
       fileId: h.terms.file_id,
       header: h.header,
       recovery: wallet,
@@ -2228,7 +2252,7 @@ it('M10 awaits the Base checkpoint before submitBase and blocks submission when 
 it('M11 refuses reproof from a different recovery identity before authorization', async () => {
   const h = await round2Listing();
   const result = await h.sdk.buy({
-    route: 'oneclick',
+    route: '1click',
     fileId: h.terms.file_id,
     header: h.header,
     recovery: wallet,
@@ -2278,7 +2302,7 @@ it('keeps automatic Base selection working when an unused fallback origin is inv
       paymentRequired: required,
       origin: { asset: 'nep141:synthetic', chain: 'solana', refundTo: 'bad' },
     }),
-  ).resolves.toMatchObject({ route: 'base-usdc' });
+  ).resolves.toMatchObject({ route: 'base' });
 });
 
 it('retains r0 through rotation to r1 and opens a late final grant for r0', async () => {
@@ -2353,7 +2377,7 @@ it('marks signed Base payloads uncertain before dryRun and accepts a payment tha
       fileId: h.terms.file_id,
       header: h.header,
       resourceUrl: 'https://files.example/f',
-      route: 'base-usdc',
+      route: 'base',
       maxPrice: 200000n,
     },
   );
@@ -2609,7 +2633,7 @@ it('browser controller downloads a granted file and verifies final terms and CKD
       fileId: h.terms.file_id,
       header: h.header,
       resourceUrl: 'https://files.example/synthetic',
-      route: 'near-usdc',
+      route: 'near',
       maxPrice: 200000n,
     },
   );
@@ -2679,7 +2703,7 @@ it('refuses a Base purchase without sponsorship transport before any signature o
       recovery: { ...wallet, authorize },
       refund: wallet.identity,
       payer,
-      route: 'base-usdc',
+      route: 'base',
       maxPrice: 200000n,
       beforePayment,
     }),
@@ -2735,7 +2759,7 @@ it('rechecks sponsorship that ages during recovery proof before the Base payment
       recovery,
       refund: wallet.identity,
       payer,
-      route: 'base-usdc',
+      route: 'base',
       maxPrice: 200000n,
       paymentRequired: required,
       url: 'https://files.example/f',
@@ -2778,7 +2802,7 @@ it('allows explicit self-funded Base unlock only with a NEAR transaction wallet 
     recovery,
     refund: wallet.identity,
     payer,
-    route: 'base-usdc' as const,
+    route: 'base' as const,
     baseUnlock: 'self' as const,
     maxPrice: 200000n,
     paymentRequired: required,
@@ -2874,9 +2898,51 @@ it('refuses closed Base admission before recovery signatures too', async () => {
       recovery: { ...wallet, authorize: sign },
       refund: wallet.identity,
       payer,
-      route: 'base-usdc',
+      route: 'base',
       maxPrice: 200000n,
     }),
   ).rejects.toMatchObject({ code: 'relayer_unavailable' });
   expect(sign).not.toHaveBeenCalled();
 });
+
+it.each(['near-usdc', 'base-usdc', 'oneclick'])(
+  'rejects the obsolete public route %s before buyer signing',
+  async (route) => {
+    const h = harness();
+    await h.sdk.sell({
+      data: body,
+      name: 'f',
+      mime: '',
+      seller: wallet,
+      near: {
+        price: '200000',
+        recipients: [{ identity: wallet.identity, bps: 10000 }],
+        remainder: wallet.identity,
+      },
+      publish: h.publish,
+    });
+    const authorize = vi.spyOn(wallet, 'authorize');
+    await expect(
+      h.sdk.buy({
+        fileId: h.terms.file_id,
+        header: h.header,
+        recovery: wallet,
+        refund: wallet.identity,
+        maxPrice: 200000n,
+        route: route as never,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_arguments' });
+    expect(authorize).not.toHaveBeenCalled();
+  },
+);
+
+it.each(['accept', 'open'] as const)(
+  'rejects obsolete caller-supplied records in %s',
+  async (method) => {
+    const h = harness();
+    const record = { schemaVersion: 2, id: `0x${'22'.repeat(32)}` } as never;
+    const result =
+      method === 'accept' ? h.sdk.accept(record) : h.sdk.open({ record, file: new Uint8Array() });
+    await expect(result).rejects.toMatchObject({ code: 'invalid_record' });
+  },
+);

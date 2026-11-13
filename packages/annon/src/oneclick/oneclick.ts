@@ -1,6 +1,8 @@
 /** Native NEAR USDC delivery through 1Click. SUCCESS is delivery, not purchase acceptance. */
 import { base58 } from '@scure/base';
 import { isAddress } from 'viem/utils';
+import { AnnonError, isTransient } from '../errors.js';
+import { parseRetryAfterMs, sleep } from '../net/retry.js';
 import { account, uint, usdc } from '../settle-near/codec.js';
 import { parsePurchaseMessage } from '../settle-near/purchase.js';
 import { NEAR_USDC } from '../settle-near/terms.js';
@@ -75,7 +77,7 @@ export function validateRefundAddress(chain: Origin['chain'], value: string): vo
   } else if (chain === 'near') account(value);
   else if (chain !== 'other') throw new TypeError('unsupported refund chain family');
 }
-/** Legacy other-family origins retain syntax-only validation. Catalog routes are stricter. */
+/** Catalog origins bind an exact blockchain; other families use explicit refund syntax. */
 export function validateOrigin(origin: Origin): void {
   if (
     !origin ||
@@ -117,9 +119,10 @@ export interface PollOptions {
   /** Awaited so a durable checkpoint can be saved before polling again. */
   onProgress?: (checkpoint: PollCheckpoint) => void | Promise<void>;
 }
-class TransportError extends Error {
+class TransportError extends AnnonError {
   constructor(readonly retryAfterMs = 0) {
-    super('1Click transport unavailable');
+    super('transport', '1Click transport unavailable');
+    this.name = 'TransportError';
   }
 }
 export interface QuoteRequest {
@@ -175,33 +178,21 @@ export interface OneClickOptions {
   now?: () => number;
   wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
-function pause(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    signal?.throwIfAborted();
-    const stop = () => {
-      clearTimeout(timer);
-      reject(signal?.reason);
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', stop);
-      resolve();
-    }, ms);
-    signal?.addEventListener('abort', stop, { once: true });
-  });
-}
-export class OneClickQuoteExpired extends Error {
+export class OneClickQuoteExpired extends AnnonError {
   readonly code = 'quote_expired';
   constructor() {
-    super('The 1Click quote expired. Run buy again.');
+    super('quote_expired', 'The 1Click quote expired. Run buy again.');
+    this.name = 'OneClickQuoteExpired';
   }
 }
 
 /** Only recognized public service messages may cross the CLI/MCP boundary. */
-export class OneClickRefused extends Error {
-  readonly code = 'oneclick_refused';
+export class OneClickRefused extends AnnonError {
+  readonly code = 'quote_refused';
   readonly minimumAmountUsdc?: string;
   constructor(message: string) {
-    super(message);
+    super('quote_refused', message);
+    this.name = 'OneClickRefused';
     const minimum = /^Amount is too low for bridge, try at least ([0-9]{1,39})[.]?$/i.exec(message);
     if (minimum?.[1]) this.minimumAmountUsdc = usdc(minimum[1]);
   }
@@ -267,20 +258,16 @@ export class OneClick {
       throw new TransportError();
     }
     if (response.status === 429 || response.status >= 500) {
-      const retry = response.headers.get('retry-after');
-      const seconds = retry !== null && /^\d+$/.test(retry) ? Number(retry) : NaN;
-      const delay = Number.isFinite(seconds)
-        ? seconds * 1000
-        : retry
-          ? Date.parse(retry) - this.now() * 1000
-          : 0;
+      const delay = parseRetryAfterMs(response.headers.get('retry-after'), this.now() * 1000) ?? 0;
       throw new TransportError(Math.max(0, Math.min(300000, delay || 0)));
     }
     if (!response.ok) {
       if (path === '/quote' && response.status >= 400 && response.status < 500) {
         const body: unknown = await response.json().catch(() => null);
         const message = (body as { message?: unknown } | null)?.message;
-        if (refusalMessage(message)) throw new OneClickRefused(message);
+        throw new OneClickRefused(
+          refusalMessage(message) ? message : 'The 1Click quote was refused.',
+        );
       }
       throw new Error(`1Click HTTP ${response.status}`);
     }
@@ -345,7 +332,7 @@ export class OneClick {
     if (!Number.isSafeInteger(depositCutoff) || depositCutoff <= now)
       throw new Error('purchase expired or insufficient delivery window');
     validateOrigin(origin);
-    const refundType = origin.refundType ?? (origin.chain === 'near' ? 'INTENTS' : 'ORIGIN_CHAIN');
+    const refundType = origin.refundType ?? 'ORIGIN_CHAIN';
     if (refundType === 'INTENTS') account(origin.refundTo);
     const tolerance = options.slippageTolerance ?? 100;
     if (!Number.isInteger(tolerance) || tolerance < 0 || tolerance > 10000)
@@ -447,7 +434,7 @@ export class OneClick {
       return checkpoint.lastStatus;
     }
     if (checkpoint.nextPollAt && checkpoint.nextPollAt > this.now() * 1000)
-      await (this.options.wait ?? pause)(
+      await (this.options.wait ?? sleep)(
         Math.min(300000, checkpoint.nextPollAt - this.now() * 1000),
         options.signal,
       );
@@ -458,10 +445,10 @@ export class OneClick {
       try {
         result = await this.status(address, options);
       } catch (error) {
-        if (!(error instanceof TransportError)) throw error;
+        if (!isTransient(error)) throw error;
         delay = Math.max(
           Math.min(30000, ms * 2 ** Math.min(checkpoint.errors, 8)),
-          error.retryAfterMs,
+          error instanceof TransportError ? error.retryAfterMs : 0,
         );
       }
       checkpoint = {
@@ -473,8 +460,8 @@ export class OneClick {
       };
       await options.onProgress?.(structuredClone(checkpoint));
       if (result && ['SUCCESS', 'REFUNDED', 'FAILED'].includes(result.status)) return result;
-      if (i + 1 < max) await (this.options.wait ?? pause)(delay, options.signal);
+      if (i + 1 < max) await (this.options.wait ?? sleep)(delay, options.signal);
     }
-    throw new Error('1Click status still pending');
+    throw new AnnonError('settlement_pending', '1Click status still pending');
   }
 }

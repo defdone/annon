@@ -4,6 +4,7 @@ import type { Account } from 'near-api-js';
 import { signMessage as signNearMessage } from 'near-api-js/nep413';
 import { createWalletClient, custom, type EIP1193Provider } from 'viem';
 import { base } from 'viem/chains';
+import { AnnonError } from '../errors.js';
 import {
   type NearMessage,
   type NearSignedMessage,
@@ -50,7 +51,7 @@ export function evmWallet(
       !Array.isArray(accounts) ||
       !accounts.some((a) => typeof a === 'string' && a.toLowerCase() === identity.id)
     )
-      throw new Error('wallet does not control the selected identity');
+      throw new AnnonError('wrong_identity', 'wallet does not control the selected identity');
   };
   return {
     identity,
@@ -63,7 +64,7 @@ export function evmWallet(
       });
       const auth: Authorization = { kind: 'evm', sig };
       if (!verifyAuthorization(identity, text, auth))
-        throw new Error('wallet signature does not match identity');
+        throw new AnnonError('invalid_signature', 'wallet signature does not match identity');
       return auth;
     },
     async signTypedData(data) {
@@ -98,7 +99,7 @@ export function solanaWallet(wallet: SolanaStandard, account: SolanaAccount): Id
         message: new TextEncoder().encode(text),
       });
       if (results.length !== 1 || !results[0])
-        throw new Error('wallet returned no single signature');
+        throw new AnnonError('invalid_signature', 'wallet returned no single signature');
       return solanaWalletAuth(identity, text, results[0]);
     },
   };
@@ -138,7 +139,7 @@ function nearWallet(
       const p = parsePurchaseMessage(message, assets);
       if (p.route !== 'near-usdc') throw new TypeError('not a NEAR USDC purchase');
       if (BigInt(p.expires_at) <= BigInt(Math.floor(Date.now() / 1000)))
-        throw new Error('purchase expired');
+        throw new AnnonError('payment_expired', 'purchase expired');
       await selected();
       return call({
         receiverId: p.asset,
@@ -171,7 +172,7 @@ export function nearSelectorWallet(
     accountId,
     async () => {
       if (!(await wallet.getAccounts()).some((a) => a.accountId === accountId))
-        throw new Error('wallet does not control the NEAR account');
+        throw new AnnonError('wrong_identity', 'wallet does not control the NEAR account');
     },
     (call) =>
       wallet.signAndSendTransaction({
@@ -191,7 +192,8 @@ export function nearSelectorWallet(
       }),
     proveControl ??
       ((text, context) => {
-        if (!wallet.signMessage) throw new Error('NEAR recovery requires NEP-413 signMessage');
+        if (!wallet.signMessage)
+          throw new AnnonError('missing_method', 'NEAR recovery requires NEP-413 signMessage');
         return proveNearControl(
           accountId,
           text,
@@ -229,7 +231,8 @@ export function nearKeyPairWallet(
       }),
     proveControl ??
       (async (text, context) => {
-        if (!account.getSigner) throw new Error('NEAR recovery requires a NEP-413 signer');
+        if (!account.getSigner)
+          throw new AnnonError('missing_method', 'NEAR recovery requires a NEP-413 signer');
         await proveNearControl(account.accountId, text, context, async (payload) => {
           const result = await signNearMessage({ signerAccount: account as Account, payload });
           return {
@@ -259,10 +262,11 @@ export async function storageDeposit(
 }
 
 /** A final funding refusal, safe to correct and retry. */
-export class FileFundingRefused extends Error {
+export class FileFundingRefused extends AnnonError {
   readonly code = 'funding_refused';
   constructor() {
-    super('File funding was refused.');
+    super('funding_refused', 'File funding was refused.');
+    this.name = 'FileFundingRefused';
   }
 }
 

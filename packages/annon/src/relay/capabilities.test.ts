@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { terms as initial, must } from '../../test/fixtures.js';
+import { AnnonError } from '../errors.js';
 import type { FileInfo } from '../near/rpc.js';
 import { PayError } from '../pay/base.js';
 import * as splits from '../pay/split.js';
@@ -116,9 +117,9 @@ it.each([
 ] as const)('fails closed on missing capability %s', async (field) => {
   const h = fixture();
   delete (h.cap as Record<string, unknown>)[field];
-  await expect(checkBaseSponsorship(h.options)).rejects.toMatchObject({
-    code: 'relayer_unavailable',
-  });
+  const result = checkBaseSponsorship(h.options);
+  await expect(result).rejects.toBeInstanceOf(AnnonError);
+  await expect(result).rejects.toMatchObject({ code: 'relayer_unavailable' });
   expect(h.read).not.toHaveBeenCalled();
 });
 it.each([
@@ -361,4 +362,13 @@ it('preserves split RPC network mismatch as a configuration failure', async () =
   const h = fixture();
   h.read.mockRejectedValue(new PayError('network_mismatch'));
   await expect(checkBaseSponsorship(h.options)).rejects.toMatchObject({ code: 'network_mismatch' });
+});
+
+it('treats a Base RPC rate limit as temporary eligibility failure', async () => {
+  const h = fixture();
+  const { BaseRpcRateLimited } = await import('../pay/base.js');
+  h.read.mockRejectedValue(new BaseRpcRateLimited());
+  await expect(checkBaseSponsorship(h.options)).rejects.toMatchObject({
+    code: 'relayer_unavailable',
+  });
 });

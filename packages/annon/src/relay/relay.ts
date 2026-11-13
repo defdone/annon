@@ -2,6 +2,7 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 import { base58, base64 } from '@scure/base';
 import { Account, actions, encodeTransaction, JsonRpcProvider } from 'near-api-js';
+import { AnnonError, isTransient } from '../errors.js';
 import {
   type FileInfo,
   getFile,
@@ -24,7 +25,8 @@ import {
   type SellerArgs,
   stopSalesText,
 } from '../near/texts.js';
-import { block, blockHeader, type EvmLog, getReceipt, PayError, paymentLogs } from '../pay/base.js';
+import { sleep } from '../net/retry.js';
+import { block, blockHeader, type EvmLog, getReceipt, paymentLogs } from '../pay/base.js';
 import { createSplit, readSplitState } from '../pay/split.js';
 import { bytes, exactKeys, uint } from '../settle-near/codec.js';
 import { type Authorization, identityJson, verifyAuthorization } from '../settle-near/identity.js';
@@ -77,13 +79,13 @@ export type RelayErrorCode =
   | 'payment_used'
   | 'bad_header'
   | 'transport';
-export class RelayError extends Error {
+export class RelayError extends AnnonError {
   // A plain field, not a parameter property: the relayer runs this file with Node's type
   // stripping, which has no parameter properties.
   readonly code: RelayErrorCode;
   retryAt?: number;
   constructor(code: RelayErrorCode, message: string = code) {
-    super(message);
+    super(code, message);
     this.code = code;
     this.name = 'RelayError';
   }
@@ -119,8 +121,8 @@ export interface RelayPolicy {
   sellerAllowed?: (seller: string) => boolean | Promise<boolean>;
   registrationsPerSeller?: number;
   reopensPerWalletFile?: number;
-  /** Daily limit per (purchase, grant); the setting name is retained for compatibility. */
-  claimsPerPurchase?: number;
+  /** Daily limit per (purchase, grant). */
+  claimsPerGrant?: number;
   holdMs?: number;
   maxWaiting?: number;
   maxChecking?: number;
@@ -286,10 +288,7 @@ export const contractArgs = (r: RelayRequest): object =>
         : r.args;
 const asRelayError = (e: unknown): never => {
   if (e instanceof RelayError) throw e;
-  return fail(
-    (e as { code?: string })?.code === 'transport' ? 'transport' : 'bad_request',
-    (e as Error).message,
-  );
+  return fail(isTransient(e) ? 'transport' : 'bad_request', (e as Error).message);
 };
 export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void> {
   try {
@@ -474,7 +473,7 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
             distributionIncentive: 0,
           });
         } catch (error) {
-          if (error instanceof PayError && error.code === 'transport')
+          if (isTransient(error))
             fail('unavailable', 'Base split verification unavailable; retry later');
           // Bound attacker-controlled refusals; transient RPC failures are never cached.
           if (refusedBaseTerms.size >= 1024) {
@@ -545,18 +544,13 @@ const accounts = new Map<string, Account>();
 const verifiedBaseTerms = new Set<string>();
 const refusedBaseTerms = new Map<string, number>();
 const queues = new Map<string, Promise<unknown>>();
-let statusReads = new WeakMap<RelayLedger, Map<string, Promise<RelayResult | 'pending' | null>>>();
+const statusReads = new WeakMap<
+  RelayLedger,
+  Map<string, Promise<RelayResult | 'pending' | null>>
+>();
 const reconciliationCursor = new WeakMap<RelayLedger, number>();
 let waiting = 0;
 let checking = 0;
-
-/** Clears process-local nonce and split caches for tests. Durable state remains intact. */
-export function resetRelayState() {
-  accounts.clear();
-  verifiedBaseTerms.clear();
-  refusedBaseTerms.clear();
-  statusReads = new WeakMap();
-}
 
 /**
  * The provider near-api-js signs with: it reads the key's nonce and a recent block. Every reply
@@ -671,7 +665,7 @@ const quota = (r: RelayRequest, p: RelayPolicy): [string, number] | null =>
   r.method === 'register'
     ? [`register:${identityJson(r.args.terms.seller)}`, p.registrationsPerSeller ?? 20]
     : r.method === 'claim_key'
-      ? [`claim:${r.args.purchase_id}:${r.args.grant ?? 0}`, p.claimsPerPurchase ?? 3]
+      ? [`claim:${r.args.purchase_id}:${r.args.grant ?? 0}`, p.claimsPerGrant ?? 3]
       : r.method === 'reopen'
         ? [`reopen:${r.args.purchase_id}`, p.reopensPerWalletFile ?? 10]
         : null;
@@ -722,7 +716,8 @@ export async function relay(
     if (
       r.method === 'unlock' &&
       e instanceof RelayError &&
-      ['settlement_pending', 'relayer_unavailable', 'transport', 'unavailable'].includes(e.code)
+      (isTransient(e) ||
+        ['settlement_pending', 'relayer_unavailable', 'unavailable'].includes(e.code))
     ) {
       await deferPaidUnlock(r, o, e.retryAt ?? Date.now() + 30000);
       if (e.code !== 'settlement_pending') return temporary(true, e.retryAt ?? Date.now() + 30000);
@@ -842,7 +837,63 @@ export async function reconcileRelayStorage(o: {
                   (await getGrant(o.nearRpc, o.contractId, args.purchase_id, grant))?.buyer_key ===
                   args.fresh_key;
               // A bounded pass cannot disprove an older grant outside this window.
-              if (!landed && (purchase?.grants ?? 0) > 32) continue;
+              if (!landed && (purchase?.grants ?? 0) > 33) {
+                o.alert?.('reconcile_held');
+                continue;
+              }
+            }
+            if (op.method === 'claim_key') {
+              const args = tx.args as { purchase_id: string; grant?: number };
+              // Claim has no persistent effect. An existing grant conservatively retains its quota.
+              landed = !!(await getGrant(
+                o.nearRpc,
+                o.contractId,
+                args.purchase_id,
+                args.grant ?? 0,
+              ));
+            } else if (op.method === 'reopen_seller') {
+              const args = (tx.args as { args: SellerArgs }).args;
+              // The unchanged contract stores r || SHA256(domain || file_id || key) as a unit value.
+              const marker = sha256(
+                new Uint8Array([
+                  ...new TextEncoder().encode('annon/reopen-seller/v2\0'),
+                  ...bytes(args.file_id, 32),
+                  ...bytes(args.key ?? '', 48),
+                ]),
+              );
+              const prefix = btoa(String.fromCharCode(114, ...marker));
+              const state = await rpcReply(o.nearRpc, 'query', {
+                request_type: 'view_state',
+                account_id: o.contractId,
+                prefix_base64: prefix,
+                finality: 'final',
+              });
+              const values = (state.result as { values?: { key: string; value: string }[] })
+                ?.values;
+              if (
+                state.error ||
+                !Array.isArray(values) ||
+                values.length > 1 ||
+                values.some((v) => v.key !== prefix || v.value !== '')
+              ) {
+                o.alert?.('reconcile_held');
+                continue;
+              }
+              landed = values.length === 1;
+            } else if (op.method === 'fund_file_storage') {
+              const file = await getFile(o.nearRpc, o.contractId, op.fileId);
+              // Balance can be consumed by subsequent purchases. Absence cannot release this hold.
+              if (op.fundingBalanceBefore === undefined || !file) {
+                o.alert?.('reconcile_held');
+                continue;
+              }
+              landed =
+                file.purchaseStorageBalance >=
+                BigInt(op.fundingBalanceBefore) + BigInt(op.allocation);
+              if (!landed) {
+                o.alert?.('reconcile_held');
+                continue;
+              }
             }
             if (landed) {
               await o.ledger.finalizeStorage(op.id, tx.txHash, 'done');
@@ -857,8 +908,12 @@ export async function reconcileRelayStorage(o: {
               );
             await o.ledger.reject(op.id);
             if (op.method === 'unlock') o.alert?.('paid_unlock_delayed');
-          } catch {
-            o.alert?.('paid_work_full');
+          } catch (error) {
+            o.alert?.(
+              error instanceof AnnonError && error.code === 'settlement_pending'
+                ? 'paid_work_full'
+                : 'reconcile_held',
+            );
           }
           continue;
         }
@@ -1034,7 +1089,7 @@ async function durableRelay(
     if (
       r.method === 'unlock' &&
       e instanceof RelayError &&
-      ['unavailable', 'transport', 'relayer_unavailable'].includes(e.code)
+      (isTransient(e) || ['unavailable', 'relayer_unavailable'].includes(e.code))
     )
       return temporary(true);
     throw e;
@@ -1155,6 +1210,7 @@ async function durableRelay(
             : {}),
           ...(r.method === 'fund_file_storage'
             ? {
+                fundingBalanceBefore: String(file?.purchaseStorageBalance ?? 0n),
                 nonce: `${identityJson(terms.seller)}|${r.args.nonce}`,
                 nonceDeadline: r.args.deadline,
                 topup: {
@@ -1396,8 +1452,7 @@ async function send(
         if (next === 'later') later = true;
       }
       // Note: sends wait in line meanwhile, at most 3 s per transaction.
-      if (attempt < RESENDS && (later || look))
-        await new Promise((r) => setTimeout(r, RETRY_WAIT * (attempt + 1)));
+      if (attempt < RESENDS && (later || look)) await sleep(RETRY_WAIT * (attempt + 1));
     }
     return unclear(reason);
   } catch {

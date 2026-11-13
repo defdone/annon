@@ -18,7 +18,8 @@ import { cloneCode, createSplit, SPLIT_FACTORIES, splitHash } from '../pay/split
 import { buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import { termsHash } from '../settle-near/terms.js';
 import { applySponsoredFee } from './fees.js';
-import { canonicalRequest, checkRelay, contractArgs, resetRelayState } from './relay.js';
+
+let { canonicalRequest, checkRelay, contractArgs } = await import('./relay.js');
 
 vi.mock('../near/rpc.js', async (original) => ({
   ...(await original<typeof import('../near/rpc.js')>()),
@@ -92,9 +93,10 @@ const request = (header: string | null = null) =>
     args: { purchase: buildPurchaseMessage(purchase), logs, header },
   });
 const zeroWord = `0x${'00'.repeat(32)}`;
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetAllMocks();
-  resetRelayState();
+  vi.resetModules();
+  ({ canonicalRequest, checkRelay, contractArgs } = await import('./relay.js'));
   vi.mocked(head).mockResolvedValue({ number: 43, timestamp: 1302 });
   vi.mocked(getCode).mockResolvedValue(cloneCode(SPLIT_FACTORIES[0].implementation));
   vi.mocked(viewWord).mockImplementation(async (_url, _to, data) => {
@@ -182,7 +184,8 @@ it.each(SPLIT_FACTORIES)(
         toFunctionSelector(sig),
         43,
       );
-    resetRelayState();
+    vi.resetModules();
+    ({ canonicalRequest, checkRelay, contractArgs } = await import('./relay.js'));
     await checkRelay(request(), options);
     expect(getCode).toHaveBeenCalledTimes(2);
     expect(getReceipt).toHaveBeenCalledTimes(2);

@@ -10,15 +10,12 @@ import { createSplit } from '../pay/split.js';
 import { memoryStore } from '../pay/store.js';
 import { hex } from '../settle-near/codec.js';
 import { termsHash } from '../settle-near/terms.js';
-import { RelayLedger, type RelayState } from './ledger.js';
-import {
-  canonicalRequest,
-  checkRelay,
-  contractArgs,
-  relay,
-  relayStatus,
-  resetRelayState,
-} from './relay.js';
+import type { RelayState } from './ledger.js';
+
+let { RelayLedger } = await import('./ledger.js');
+
+let { canonicalRequest, checkRelay, contractArgs, relay, relayStatus } = await import('./relay.js');
+
 import { reservationText } from './reservation.js';
 
 const wallet = privateKeyToAccount(`0x${'44'.repeat(32)}`);
@@ -38,7 +35,7 @@ const terms = {
   base: { ...must(initial.base), pay_to: split.address },
   seller: { kind: 'evm', id: wallet.address.toLowerCase() } as const,
 };
-let registry: RelayLedger;
+let registry: import('./ledger.js').RelayLedger;
 const opts = {
   get ledger() {
     return registry;
@@ -122,7 +119,9 @@ beforeEach(async () => {
     },
     [],
   );
-  resetRelayState();
+  vi.resetModules();
+  ({ RelayLedger } = await import('./ledger.js'));
+  ({ canonicalRequest, checkRelay, contractArgs, relay, relayStatus } = await import('./relay.js'));
   created.mockReset();
   created.mockResolvedValue({ transaction: { encode: () => new Uint8Array([1, 2, 3]) } });
 });
@@ -413,7 +412,7 @@ it('allows separate grant quotas and never charges claim_key prepaid storage', a
             : null,
   );
   const r = { method: 'claim_key', args: { purchase_id: terms.file_id, grant: 0 } };
-  const o = { ...opts, sender, policy: { ...opts.policy, claimsPerPurchase: 1 } };
+  const o = { ...opts, sender, policy: { ...opts.policy, claimsPerGrant: 1 } };
   expect((await relay(r, o)).txHash).toBeTruthy();
   expect(await relay(r, o)).toEqual(await relayStatus(r, o));
   expect(created).toHaveBeenCalledTimes(1);
@@ -509,7 +508,7 @@ it('retains a claim hash for the entire quota window without charging repeats', 
         : { purchase_id: terms.file_id, grant: args.grant, buyer_key: purchase.buyer_key },
   );
   const req = { method: 'claim_key', args: { purchase_id: terms.file_id, grant: 0 } };
-  const o = { ...opts, sender, policy: { ...opts.policy, claimsPerPurchase: 1 } };
+  const o = { ...opts, sender, policy: { ...opts.policy, claimsPerGrant: 1 } };
   try {
     const first = await relay(req, o);
     clock.mockReturnValue(100000 + 16 * 60000);
@@ -686,7 +685,7 @@ it.each([
     let lookups = 0;
     let hash = '';
     const args = { purchase_id: terms.file_id, grant: 0 };
-    const o = { ...opts, sender, policy: { ...opts.policy, claimsPerPurchase: 2 } };
+    const o = { ...opts, sender, policy: { ...opts.policy, claimsPerGrant: 2 } };
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url, init) => {
@@ -811,7 +810,7 @@ it('keeps one grant quota exhausted without spending another grant quota', async
       });
     }),
   );
-  const o = { ...opts, sender, policy: { ...opts.policy, claimsPerPurchase: 1 } };
+  const o = { ...opts, sender, policy: { ...opts.policy, claimsPerGrant: 1 } };
   const request = (grant: number) => ({
     method: 'claim_key',
     args: { purchase_id: terms.file_id, grant },
@@ -861,7 +860,7 @@ it('an old lookup cannot retire a replacement admitted after final proof', async
     }),
   );
   const req = { method: 'claim_key', args: { purchase_id: terms.file_id, grant: 0 } };
-  const o = { ...opts, sender, policy: { ...opts.policy, claimsPerPurchase: 1 } };
+  const o = { ...opts, sender, policy: { ...opts.policy, claimsPerGrant: 1 } };
   let old: ReturnType<typeof relayStatus> | undefined;
   try {
     const first = await relay(req, o);
@@ -1157,3 +1156,45 @@ it.each(['push', 'pull'] as const)(
     await expect(checkRelay(r, opts)).rejects.toMatchObject({ code: 'not_sponsored' });
   },
 );
+
+it('never caches a Base RPC rate limit as a split refusal', async () => {
+  const { BaseRpcRateLimited } = await import('../pay/base.js');
+  const { readSplitState } = await import('../pay/split.js');
+  rpc((method) =>
+    method === 'get_file'
+      ? {
+          terms,
+          terms_hash: termsHash(terms),
+          header_hash: null,
+          sales_stopped_at: null,
+          taken_down: null,
+        }
+      : null,
+  );
+  vi.mocked(readSplitState).mockRejectedValue(new BaseRpcRateLimited());
+  const { ledger: _ledger, ...options } = opts;
+  const request = {
+    method: 'unlock' as const,
+    args: {
+      purchase: (await import('../settle-near/purchase.js')).buildPurchaseMessage({
+        ...purchase,
+        terms_hash: termsHash(terms),
+      }),
+      logs: [],
+      header: null,
+    },
+  };
+  await expect(checkRelay(request, options)).rejects.toMatchObject({ code: 'unavailable' });
+  await expect(checkRelay(request, options)).rejects.toMatchObject({ code: 'unavailable' });
+  expect(readSplitState).toHaveBeenCalledTimes(2);
+});
+
+it('keeps sponsorship admission temporary when the split RPC is rate limited', async () => {
+  const { BaseRpcRateLimited } = await import('../pay/base.js');
+  const { readSplitState } = await import('../pay/split.js');
+  const { admitTerms } = await import('./sponsorship.js');
+  vi.mocked(readSplitState).mockRejectedValue(new BaseRpcRateLimited());
+  await expect(admitTerms(terms, opts, 'listed')).rejects.toMatchObject({
+    code: 'relayer_unavailable',
+  });
+});

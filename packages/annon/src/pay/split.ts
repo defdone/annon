@@ -1,5 +1,5 @@
 /**
- * Revenue splits through the address (`specs/x402-annon.md`, section 8): when a file's `pay_to` is
+ * Revenue splits through the registered Base payment address: when a file's `pay_to` is
  * an 0xSplits v2 split, the integrator shows the seller where the money goes before they sign. The
  * split keeps only `keccak256(abi.encode(split))` on chain, so the caller supplies the split and how
  * it was created (both from its `SplitCreated` event, or its own config).
@@ -129,7 +129,7 @@ const SPLIT_TUPLE = '(address[],uint256[],uint256,uint16)';
 const tuple = (s: Split) => encodeSplit(s).subarray(32);
 
 /** The SplitsWarehouse on Base, where a pull split credits its recipients. */
-export const SPLITS_WAREHOUSE = '0x8fb66f38cf86a3d5e8768f8f1754a24a6c661fb8';
+const SPLITS_WAREHOUSE = '0x8fb66f38cf86a3d5e8768f8f1754a24a6c661fb8';
 
 /**
  * Most recipients a split may have here. A push `distribute` makes one USDC transfer (about 30k to
@@ -334,7 +334,7 @@ async function inspectSplit(
   const read = (sig: string) =>
     viewWord(baseRpc, address, selector(sig), at).catch((e: unknown) => {
       // A reverted view is an invalid split; malformed or unavailable RPC replies stay retryable.
-      if (e instanceof PayError && /revert/i.test(e.message)) {
+      if (e instanceof PayError && e.code === 'refused') {
         fail('bad_requirements', `${address} does not answer ${sig}: not an 0xSplits v2 split`);
       }
       throw e;

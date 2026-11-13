@@ -29,7 +29,7 @@ it('returns pending evidence when the kill switch pauses a paid unlock', async (
 
 it('retains a valid paid unlock while disabled and leaves invalid requests out of durable work', async () => {
   const { memoryStore } = await import('../../packages/annon/src/pay/store.ts');
-  const { RelayLedger } = await import('../../packages/annon/src/relay/ledger.ts');
+  const { RelayLedger } = await import('@defdone/annon/relay');
   const { purchase } = await import('../../packages/annon/test/fixtures.ts');
   const { buildPurchaseMessage } = await import('../../packages/annon/src/settle-near/purchase.ts');
   const ledger = new RelayLedger(memoryStore(), 'scope');
@@ -246,7 +246,7 @@ it('bounds eligibility checks before starting additional chain reads', async () 
 });
 
 it('advertises no new Base payments when sponsorship is paused even with a sealed cutover', async () => {
-  const { RelayLedger } = await import('../../packages/annon/src/relay/ledger.ts');
+  const { RelayLedger } = await import('@defdone/annon/relay');
   const { memoryStore } = await import('../../packages/annon/src/pay/store.ts');
   const ledger = new RelayLedger(memoryStore(), 'scope');
   await ledger.seal(
@@ -336,7 +336,7 @@ it('serves health and capabilities from an unsealed volume while refusing sponso
 
 it('refuses an unsealed pre-sign check before invoking chain admission', async () => {
   const { vi } = await import('vitest');
-  const { RelayLedger } = await import('../../packages/annon/src/relay/ledger.ts');
+  const { RelayLedger } = await import('@defdone/annon/relay');
   const { memoryStore } = await import('../../packages/annon/src/pay/store.ts');
   const sponsorship = await import('../../packages/annon/src/relay/sponsorship.ts');
   const check = vi
@@ -385,7 +385,7 @@ it.each(['disabled', 'policy', 'unsealed'] as const)(
     const { Annon } = await import('../../packages/annon/src/api/annon.ts');
     const { termsHash } = await import('../../packages/annon/src/settle-near/terms.ts');
     const { memoryStore } = await import('../../packages/annon/src/pay/store.ts');
-    const { RelayLedger } = await import('../../packages/annon/src/relay/ledger.ts');
+    const { RelayLedger } = await import('@defdone/annon/relay');
     const ledger = new RelayLedger(memoryStore(), 'gate');
     if (mode !== 'unsealed')
       await ledger.seal(
@@ -456,7 +456,7 @@ it.each(['disabled', 'policy', 'unsealed'] as const)(
         sdk.buy({
           fileId: terms.file_id,
           header: new Uint8Array(),
-          route: 'base-usdc',
+          route: 'base',
           maxPrice: 1000000n,
           payer: wallet,
           recovery: wallet,

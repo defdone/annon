@@ -17,8 +17,13 @@ export async function dockerImportProblems(app: string, entries: string[]): Prom
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#'));
-  const copies = (await readFile(join(app, 'Dockerfile'), 'utf8'))
-    .split(/\r?\n/)
+  const lines = (await readFile(join(app, 'Dockerfile'), 'utf8')).split(/\r?\n/);
+  const finalStage = lines.reduce(
+    (last, line, index) => (/^FROM\s/i.test(line) ? index : last),
+    -1,
+  );
+  const copies = lines
+    .slice(finalStage + 1)
     .filter((line) => line.startsWith('COPY '))
     .map((line) => {
       const args = line.split(/\s+/).slice(1, -1);
@@ -61,12 +66,16 @@ export async function dockerImportProblems(app: string, entries: string[]): Prom
       !copies.some(
         ({ sources, exclusions }) =>
           sources.some((source) => matches(file, source)) &&
-          !exclusions.some((pattern) => matches(file, pattern)),
+          !exclusions.some(
+            (pattern) => matches(file, pattern) || matches(file.split('/').at(-1) ?? file, pattern),
+          ),
       )
     )
       problems.push(`${file}: absent from Dockerfile COPY`);
   };
-  for (const name of await dockerAppFiles(app)) check(relative(root, join(app, name)));
+  for (const name of await dockerAppFiles(app)) {
+    if (name !== 'build-runtime.ts') check(relative(root, join(app, name)));
+  }
   for (const name of (await readdir(app)).filter((name) => name.endsWith('.test.ts'))) {
     const file = relative(root, join(app, name));
     if (included(file)) problems.push(`${file}: test included by .dockerignore`);

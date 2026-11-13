@@ -1,16 +1,18 @@
-/** Portable purchase backups and encrypted CAS storage. The 32-byte secret is user-held randomness. */
-import { concat, copy } from '../envelope/pay2.js';
-import { keyFromSecret } from '../keys/near-ckd.js';
-import { bytes, exactKeys, hex, uint, utf8 } from '../settle-near/codec.js';
-import { identityJson } from '../settle-near/identity.js';
-import { baseNonceV2, buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import {
-  type BrowserIndex,
   type BrowserPurchaseIndex,
+  type BrowserPurchaseRecord,
+  type BrowserReceipt,
   type BrowserRecoveryArchiveIndex,
   purchaseStates,
   type StoredBrowserPurchase,
-} from './browser-record.js';
+} from '../browser/record.js';
+/** Portable purchase backups and encrypted CAS storage. The 32-byte secret is user-held randomness. */
+import { concat, copy } from '../envelope/pay2.js';
+import { AnnonError } from '../errors.js';
+import { keyFromSecret } from '../keys/near-ckd.js';
+import { bytes, exactKeys, hex, uint, usdc, utf8 } from '../settle-near/codec.js';
+import { identityJson } from '../settle-near/identity.js';
+import { baseNonceV2, buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import type { PurchaseRecord } from './purchase.js';
 import { checkNext, type Store, type Versioned } from './store.js';
 
@@ -34,8 +36,8 @@ export interface SellRecord extends Versioned {
   kind: 'sell';
   terms: import('../settle-near/terms.js').Terms;
   /** Immutable Base split provenance. Recipients and bps come from terms.near;
-   * totalAllocation is 10000 and distributionIncentive is 0. Optional for older records. */
-  baseSplit?: { address: string; kind: 'push' | 'pull'; salt: string };
+   * totalAllocation is 10000 and distributionIncentive is 0. Fixed before registration. */
+  baseSplit: { address: string; kind: 'push' | 'pull'; salt: string } | null;
   published?: boolean;
   fileKey: string | null;
   sellerSecret: string | null;
@@ -57,11 +59,11 @@ type PrivateRecord =
   | RecoveryRecord
   | SellRecord
   | SellerKeyRecord
-  | BrowserIndex
+  | BrowserReceipt
   | BrowserRecoveryArchiveIndex
   | BrowserPurchaseIndex
   | StoredBrowserPurchase;
-function validate(r: PrivateRecord) {
+function validateRecord(r: PrivateRecord) {
   if ('kind' in r && r.kind === 'browser-recovery-archives') {
     bytes(r.purchaseId, 32);
     if (
@@ -81,13 +83,7 @@ function validate(r: PrivateRecord) {
     return;
   }
   if ('kind' in r && r.kind === 'browser-purchase') {
-    validate({
-      kind: 'browser-index',
-      id: 'browser-index',
-      revision: 0,
-      entries: [r],
-      backups: {},
-    });
+    validateBrowserPurchase(r);
     return;
   }
   if ('kind' in r && r.kind === 'browser-purchase-index') {
@@ -105,7 +101,7 @@ function validate(r: PrivateRecord) {
         !Number.isSafeInteger(entry.revision) ||
         entry.revision < 0 ||
         !purchaseStates.includes(entry.state) ||
-        !['near-usdc', 'base-usdc', 'oneclick'].includes(entry.route) ||
+        !['near', 'base', '1click'].includes(entry.route) ||
         !Number.isSafeInteger(entry.createdAt) ||
         !Number.isSafeInteger(entry.updatedAt) ||
         entry.createdAt < 0 ||
@@ -139,99 +135,9 @@ function validate(r: PrivateRecord) {
       throw new TypeError('browser index too large');
     return;
   }
-  if ('kind' in r && r.kind === 'browser-index') {
-    if (
-      r.id !== 'browser-index' ||
-      !Number.isSafeInteger(r.revision) ||
-      r.revision < 0 ||
-      !Array.isArray(r.entries) ||
-      !r.backups ||
-      typeof r.backups !== 'object' ||
-      Array.isArray(r.backups)
-    )
-      throw new TypeError('invalid browser index');
-    const ids = new Set<string>();
-    for (const entry of r.entries) {
-      if (
-        !/^[a-zA-Z0-9_-]{1,128}$/.test(entry.id) ||
-        ids.has(entry.id) ||
-        !Number.isSafeInteger(entry.revision) ||
-        entry.revision < 0 ||
-        !purchaseStates.includes(entry.state) ||
-        !['near-usdc', 'base-usdc', 'oneclick'].includes(entry.route) ||
-        typeof entry.header !== 'string' ||
-        !/^0x(?:[0-9a-f]{2}){1,65536}$/.test(entry.header) ||
-        (entry.needsProof !== undefined && typeof entry.needsProof !== 'boolean') ||
-        (entry.submission !== undefined &&
-          !['not_submitted', 'uncertain', 'submitted'].includes(entry.submission))
-      )
-        throw new TypeError('invalid browser purchase');
-      ids.add(entry.id);
-      if (entry.paymentStarted !== undefined && typeof entry.paymentStarted !== 'boolean')
-        throw new TypeError('invalid payment boundary');
-      if (
-        entry.lease &&
-        (!/^[a-zA-Z0-9_-]{1,128}$/.test(entry.lease.owner) ||
-          !Number.isSafeInteger(entry.lease.expiresAt) ||
-          entry.lease.expiresAt < 0)
-      )
-        throw new TypeError('invalid purchase lease');
-      if (entry.recoveryArchives !== undefined) {
-        if (
-          !Array.isArray(entry.recoveryArchives) ||
-          new Set(entry.recoveryArchives.map((r) => r.revision)).size !==
-            entry.recoveryArchives.length
-        )
-          throw new TypeError('invalid recovery archives');
-        for (const archive of entry.recoveryArchives) {
-          if (archive.kind !== 'recovery') throw new TypeError('invalid recovery archive');
-          validate(archive);
-          if (
-            !entry.purchase ||
-            archive.purchase_id !== entry.purchase.id ||
-            archive.file_id !== entry.fileId
-          )
-            throw new TypeError('recovery archive mismatch');
-        }
-      }
-      bytes(entry.fileId, 32);
-      if (uint(entry.maxPrice, 128) === 0n) throw new TypeError('invalid browser price');
-      const url = new URL(entry.resourceUrl);
-      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password)
-        throw new TypeError('invalid resource URL');
-      if (entry.purchase) {
-        validatePurchaseRecord(entry.purchase);
-        if (
-          entry.purchase.purchase.file_id !== entry.fileId ||
-          entry.purchase.purchase.route !==
-            (entry.route === 'base-usdc' ? 'base-usdc' : 'near-usdc')
-        )
-          throw new TypeError('browser purchase mismatch');
-      }
-      if (entry.recovery) {
-        validate(entry.recovery);
-        if (
-          !entry.purchase ||
-          entry.recovery.purchase_id !== entry.purchase.id ||
-          entry.recovery.file_id !== entry.fileId
-        )
-          throw new TypeError('browser recovery mismatch');
-      }
-      if (
-        entry.checkpoint &&
-        (!entry.purchase ||
-          !Number.isSafeInteger(entry.checkpoint.attempts) ||
-          entry.checkpoint.attempts < 0 ||
-          !Number.isSafeInteger(entry.checkpoint.errors) ||
-          entry.checkpoint.errors < 0)
-      )
-        throw new TypeError('invalid browser checkpoint');
-    }
-    if (
-      Object.values(r.backups).some((b) => typeof b !== 'string') ||
-      utf8.encode(JSON.stringify(r)).length > MAX_BYTES
-    )
-      throw new TypeError('browser index too large');
+  if ('kind' in r && r.kind === 'browser-receipt') {
+    exactKeys(r, ['kind', 'entry']);
+    validateBrowserPurchase(r.entry);
     return;
   }
   if ('kind' in r && r.kind === 'seller-key') {
@@ -249,6 +155,17 @@ function validate(r: PrivateRecord) {
     return;
   }
   if ('kind' in r && r.kind === 'sell') {
+    if (
+      !Object.hasOwn(r, 'baseSplit') ||
+      !(
+        r.baseSplit === null ||
+        (r.baseSplit &&
+          /^0x[0-9a-f]{40}$/.test(r.baseSplit.address) &&
+          ['push', 'pull'].includes(r.baseSplit.kind) &&
+          /^0x[0-9a-f]{64}$/.test(r.baseSplit.salt))
+      )
+    )
+      throw new TypeError('invalid Base split provenance');
     if (
       r.id !== `sell:${r.terms.file_id}` ||
       !Number.isSafeInteger(r.revision) ||
@@ -294,6 +211,86 @@ function validate(r: PrivateRecord) {
     identityJson(r.recovery);
   } else validatePurchaseRecord(r as PurchaseRecord);
 }
+
+function validateBrowserPurchase(entry: BrowserPurchaseRecord) {
+  if (
+    !/^[a-zA-Z0-9_-]{1,128}$/.test(entry.id) ||
+    !Number.isSafeInteger(entry.revision) ||
+    entry.revision < 0 ||
+    !purchaseStates.includes(entry.state) ||
+    !['near', 'base', '1click'].includes(entry.route) ||
+    typeof entry.header !== 'string' ||
+    !/^0x(?:[0-9a-f]{2}){1,65536}$/.test(entry.header) ||
+    (entry.needsProof !== undefined && typeof entry.needsProof !== 'boolean') ||
+    !['not_submitted', 'uncertain', 'submitted'].includes(entry.submission)
+  )
+    throw new TypeError('invalid browser purchase');
+  if (entry.paymentStarted !== undefined && typeof entry.paymentStarted !== 'boolean')
+    throw new TypeError('invalid payment boundary');
+  if (
+    entry.lease &&
+    (!/^[a-zA-Z0-9_-]{1,128}$/.test(entry.lease.owner) ||
+      !Number.isSafeInteger(entry.lease.expiresAt) ||
+      entry.lease.expiresAt < 0)
+  )
+    throw new TypeError('invalid purchase lease');
+  if (entry.recoveryArchives !== undefined) {
+    if (
+      !Array.isArray(entry.recoveryArchives) ||
+      new Set(entry.recoveryArchives.map((r) => r.revision)).size !== entry.recoveryArchives.length
+    )
+      throw new TypeError('invalid recovery archives');
+    for (const archive of entry.recoveryArchives) {
+      if (archive.kind !== 'recovery') throw new TypeError('invalid recovery archive');
+      validate(archive);
+      if (
+        !entry.purchase ||
+        archive.purchase_id !== entry.purchase.id ||
+        archive.file_id !== entry.fileId
+      )
+        throw new TypeError('recovery archive mismatch');
+    }
+  }
+  bytes(entry.fileId, 32);
+  if (uint(entry.maxPrice, 128) === 0n) throw new TypeError('invalid browser price');
+  const url = new URL(entry.resourceUrl);
+  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password)
+    throw new TypeError('invalid resource URL');
+  if (entry.purchase) {
+    validatePurchaseRecord(entry.purchase);
+    if (
+      entry.purchase.purchase.file_id !== entry.fileId ||
+      entry.purchase.purchase.route !== (entry.route === 'base' ? 'base-usdc' : 'near-usdc') ||
+      entry.purchase.payment.route !== entry.route
+    )
+      throw new TypeError('browser purchase mismatch');
+  }
+  if (entry.recovery) {
+    validate(entry.recovery);
+    if (
+      !entry.purchase ||
+      entry.recovery.purchase_id !== entry.purchase.id ||
+      entry.recovery.file_id !== entry.fileId
+    )
+      throw new TypeError('browser recovery mismatch');
+  }
+  if (
+    entry.checkpoint &&
+    (!entry.purchase ||
+      !Number.isSafeInteger(entry.checkpoint.attempts) ||
+      entry.checkpoint.attempts < 0 ||
+      !Number.isSafeInteger(entry.checkpoint.errors) ||
+      entry.checkpoint.errors < 0)
+  )
+    throw new TypeError('invalid browser checkpoint');
+}
+function validate(r: PrivateRecord): void {
+  try {
+    validateRecord(r);
+  } catch (cause) {
+    throw new AnnonError('invalid_record', 'Invalid encrypted record.', { cause });
+  }
+}
 interface Backup {
   format: 'annon-purchase-backup';
   v: 1;
@@ -321,10 +318,34 @@ async function derive(secret: Uint8Array, salt: Uint8Array) {
   );
 }
 export function validatePurchaseRecord(r: PurchaseRecord): void {
-  if (r.recoveryProved !== undefined && typeof r.recoveryProved !== 'boolean')
+  try {
+    checkPurchaseRecord(r);
+  } catch (cause) {
+    throw new AnnonError('invalid_record', 'Invalid purchase record.', { cause });
+  }
+}
+function checkPurchaseRecord(r: PurchaseRecord): void {
+  if (typeof r.recoveryProved !== 'boolean')
     throw new TypeError('invalid recovery proof checkpoint');
   if (
     r?.schemaVersion !== 2 ||
+    !Object.hasOwn(r, 'quote') ||
+    !(
+      r.quote === null ||
+      (r.quote &&
+        typeof r.quote === 'object' &&
+        r.quote.request &&
+        r.quote.response &&
+        r.quote.deposit)
+    ) ||
+    !r.payment ||
+    !['near', 'base', '1click'].includes(r.payment.route) ||
+    (r.payment.route === 'base') !== (r.purchase.route === 'base-usdc') ||
+    r.payment.amountBaseUnits !== r.purchase.price ||
+    r.payment.amountUsdc !== usdc(BigInt(r.purchase.price)) ||
+    r.payment.network !== r.purchase.network ||
+    r.payment.asset?.symbol !== 'USDC' ||
+    r.payment.asset.id !== r.purchase.asset ||
     !Number.isSafeInteger(r.revision) ||
     r.revision < 0 ||
     r.id !==
@@ -427,7 +448,7 @@ export const importRecovery = async (file: string, secret: Uint8Array): Promise<
   return r;
 };
 /** Wrap memory, IndexedDB, fileStore or an existing durable store; keep only ciphertext at rest. */
-function encryptedStore<T extends PrivateRecord>(
+function encryptedStore<T extends PrivateRecord & Versioned>(
   raw: Store<EncryptedRecord>,
   secret: Uint8Array,
 ): Store<T> {
@@ -439,7 +460,7 @@ function encryptedStore<T extends PrivateRecord>(
       const encrypted = await raw.load(name);
       if (!encrypted) return null;
       const r = await decrypt(encrypted.backup, key, context(name, encrypted));
-      if (r.id !== encrypted.id || r.revision !== encrypted.revision)
+      if (!('id' in r) || r.id !== encrypted.id || r.revision !== encrypted.revision)
         throw new Error('encrypted record metadata mismatch');
       return r as T;
     },
@@ -479,26 +500,21 @@ export const encryptedSellStore = (
 
 export const exportSellerKey = (record: SellerKeyRecord, secret: Uint8Array) =>
   encrypt(record, secret);
-export const importSellerKey = async (
-  file: string,
-  secret: Uint8Array,
-): Promise<SellerKeyRecord> => {
-  const r = await decrypt(file, secret);
-  if (!('kind' in r) || r.kind !== 'seller-key') throw new TypeError('not a seller-key record');
-  return r;
-};
 export const encryptedSellerKeyStore = (
   raw: Store<EncryptedRecord>,
   secret: Uint8Array,
 ): Store<SellerKeyRecord> => encryptedStore<SellerKeyRecord>(raw, secret);
 
 /** Browser workflow records use the same authenticated encryption and CAS binding as purchases. */
-export const exportBrowserIndex = (record: BrowserIndex, secret: Uint8Array) =>
+export const exportBrowserReceipt = (record: BrowserReceipt, secret: Uint8Array) =>
   encrypt(record, secret);
-export async function importBrowserIndex(file: string, secret: Uint8Array): Promise<BrowserIndex> {
+export async function importBrowserReceipt(
+  file: string,
+  secret: Uint8Array,
+): Promise<BrowserReceipt> {
   const record = await decrypt(file, secret);
-  if (!('kind' in record) || record.kind !== 'browser-index')
-    throw new TypeError('not a browser receipt');
+  if (!('kind' in record) || record.kind !== 'browser-receipt')
+    throw new AnnonError('invalid_record');
   return record;
 }
 

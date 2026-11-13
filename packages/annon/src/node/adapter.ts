@@ -5,7 +5,16 @@ import { Annon, type AnnonOptions } from '../api/annon.js';
 import { download, secureUrl } from '../download/download.js';
 import { sameResource } from '../download/proof.js';
 import { inspect, inspectHeader, MAX_HEADER, parseHeader } from '../envelope/pay2.js';
-import { fileStorageBalance, getConfig, getFile, getPurchase, txOutcome } from '../near/rpc.js';
+import { type AnnonErrorCode, isAnnonErrorCode, isTransient, type PublicError } from '../errors.js';
+import {
+  fileStorageBalance,
+  getConfig,
+  getFile,
+  getPurchase,
+  isStorageRequired,
+  txOutcome,
+} from '../near/rpc.js';
+import { parseRetryAfterMs, sleep } from '../net/retry.js';
 import { OneClick, type Origin, originFamily } from '../oneclick/oneclick.js';
 import {
   type EncryptedRecord,
@@ -84,7 +93,7 @@ export interface Dependencies {
   notify?: (message: string) => void;
   wait?: (ms: number) => Promise<void>;
 }
-const fail = (code: string, message: string, exit = 1): never => {
+const fail = (code: AnnonErrorCode, message: string, exit: PublicError['exitCode'] = 1): never => {
   throw new AdapterError(code, message, exit);
 };
 export function amount(text: string): string {
@@ -284,23 +293,9 @@ async function originFor(
   };
 }
 
-/**
- * Wait after a relayer admission refusal: seconds or an HTTP date, 5 s when absent or unreadable. Null when the
- * relayer asks for more than a minute (an hourly IP budget): that wait is the caller's decision.
- */
-export function retryAfterMs(header: string | null, now = Date.now()): number | null {
-  const delay = !header
-    ? NaN
-    : /^\d+$/.test(header)
-      ? Number(header) * 1000
-      : Date.parse(header) - now;
-  if (!Number.isFinite(delay)) return 5000;
-  return delay > 60_000 ? null : Math.max(0, delay);
-}
-
 function createCoreAdapter(env: Environment = process.env, d: Dependencies = {}) {
   const fetcher = d.fetch ?? globalThis.fetch;
-  const wait = d.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const wait = d.wait ?? sleep;
   return async (o: Input): Promise<Record<string, unknown>> => {
     const c = await loadConfig(o, env, false, d.agent);
     await trustContract(
@@ -326,7 +321,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     };
     const paymentDetails = async (
       load: () => Promise<PurchaseRecord | null | undefined>,
-    ): Promise<{ payment?: PaymentSummary }> => {
+    ): Promise<{ route?: PaymentSummary['route']; payment?: PaymentSummary }> => {
       try {
         const record = await load();
         if (
@@ -335,7 +330,8 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           record.terms.contractId !== c.contractId
         )
           return {};
-        return { payment: savedPayment(record) };
+        const payment = savedPayment(record);
+        return { route: payment.route, payment };
       } catch {
         // Optional reporting must not block an accepted purchase or a successful open.
         return {};
@@ -371,7 +367,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         ? inspectHeader(data, listing, c.contractId)
         : inspect(data, listing, c.contractId));
       if (!result.usable)
-        return fail('unusable_file', 'The file has no key stanza for the trusted contract.');
+        return fail('no_usable_stanza', 'The file has no key stanza for the trusted contract.');
       return {
         fileId,
         verified: true,
@@ -388,7 +384,6 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           purchaseId: o.target,
           state: 'accepted',
           fileId: p.file_id,
-          route: p.route,
           grants: p.grants,
           next: 'open',
           ...(await paymentDetails(async () =>
@@ -406,7 +401,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       if (d.agent) return fail('human_only', 'File funding requires a human CLI session.', 2);
       if (!o.target || !isId(o.target)) throw usage();
       const text = o.fundAmount;
-      if (!text) return fail('storage_required', 'Provide the NEAR amount to allocate.', 2);
+      if (!text) return fail('invalid_arguments', 'Provide the NEAR amount to allocate.', 2);
       const owner = await (d.wallet ?? loadWallet)({ ...o, network: c.network }, env, c.nearRpc);
       selected = owner;
       if (owner.identity.kind === 'near') {
@@ -462,39 +457,39 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
             body: JSON.stringify(method === 'claim_key' ? { method, args } : { method, ...args }),
             signal: AbortSignal.timeout(60000),
           });
-          if ([429, 503].includes(r.status)) {
-            const delay = retryAfterMs(r.headers.get('Retry-After'));
-            await r.body?.cancel();
-            const code = r.status === 429 ? 'relayer_rate_limited' : 'relayer_unavailable';
-            const error = new AdapterError(
-              code,
-              'Relayer admission is delayed; retry the saved operation later.',
-              4,
-            );
-            if (delay === null) throw error;
-            throw Object.assign(error, { retryAfterMs: delay });
-          }
           if (![200, 202].includes(r.status)) {
-            const body = (await r.json().catch(() => null)) as { error?: unknown } | null;
-            if (r.status === 409 && body?.error === 'duplicate')
-              throw new Error('relayer in flight; retry');
-            if (r.status === 425 || body?.error === 'payment_not_safe') {
-              const safe = publicError({ code: 'payment_not_safe' });
-              const hint = r.headers.get('Retry-After');
-              throw Object.assign(new AdapterError(safe.code, safe.message, safe.exitCode), {
-                safetyDelayMs: hint
-                  ? Math.max(
-                      0,
-                      /^\d+$/.test(hint) ? Number(hint) * 1000 : Date.parse(hint) - Date.now(),
-                    )
-                  : 0,
-              });
-            }
-            throw new Error('relayer refused');
+            const body = (await r.json().catch(() => null)) as Record<string, unknown> | null;
+            const fallback =
+              r.status === 425
+                ? 'settlement_pending'
+                : r.status === 429
+                  ? 'relayer_rate_limited'
+                  : r.status === 503
+                    ? 'relayer_unavailable'
+                    : 'operation_failed';
+            const code = isAnnonErrorCode(body?.error) ? body.error : fallback;
+            const delay = parseRetryAfterMs(r.headers.get('Retry-After'));
+            const safe = publicError({
+              ...(body && isAnnonErrorCode(body.error) ? body : {}),
+              code,
+              ...(delay !== undefined ? { retryAfterSeconds: Math.ceil(delay / 1000) } : {}),
+            });
+            const error = Object.assign(
+              new AdapterError(safe.code, safe.message, safe.exitCode),
+              safe,
+            );
+            if (code === 'settlement_pending')
+              throw Object.assign(error, { safetyDelayMs: (safe.retryAfterSeconds ?? 30) * 1000 });
+            const waitMs =
+              delay ??
+              (safe.retryAfterSeconds === undefined ? 5000 : safe.retryAfterSeconds * 1000);
+            if ([429, 503].includes(r.status) && waitMs <= 60000)
+              throw Object.assign(error, { retryAfterMs: waitMs });
+            throw error;
           }
           const body = (await r.json()) as { txHash?: string; signer?: string; pending?: boolean };
           if (r.status === 202 && body.pending === true)
-            throw new Error('relayer in flight; retry');
+            throw new AdapterError('in_flight', 'Relayer operation is pending.', 4);
           if (
             typeof body.txHash !== 'string' ||
             !body.txHash ||
@@ -511,7 +506,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         });
         if (result.state === 'released') return result.answer;
         if (result.state === 'done') return result.value;
-        if ('reason' in result && /prepaid|storage balance|storage[_ ]deposit/i.test(result.reason))
+        if ('reason' in result && isStorageRequired(result.reason))
           throw new AdapterError(
             'storage_required',
             'Prepay Annon storage with the SDK storageDeposit helper, then resume the saved operation.',
@@ -535,9 +530,9 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           if (
             method === 'unlock' &&
             error instanceof AdapterError &&
-            error.code === 'payment_not_safe'
+            error.code === 'settlement_pending'
           ) {
-            if (o.command === 'status') throw new AdapterError(error.code, error.message, 4);
+            if (o.command === 'status') throw error;
             if (o.command !== 'open' || d.agent || o.json) throw error;
             const planned = [10000, 20000, 30000, 40000, 60000][safetyWaits++];
             const minimum = (error as AdapterError & { safetyDelayMs?: number }).safetyDelayMs ?? 0;
@@ -547,8 +542,10 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
             await wait(delay);
             continue;
           }
-          const inFlight = /in flight/i.test(error instanceof Error ? error.message : '');
-          const timeout = /timeout|timed out/i.test(error instanceof Error ? error.message : '');
+          const inFlight =
+            error instanceof AdapterError && ['in_flight', 'duplicate'].includes(error.code);
+          const timeout =
+            isTransient(error) || (error instanceof Error && error.name === 'TimeoutError');
           if (
             !['unlock', 'reopen', 'claim_key'].includes(method) ||
             (!inFlight && !timeout) ||
@@ -955,7 +952,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           },
           recovery: buyer,
           ...(baseSponsorship ? { baseSponsorship } : {}),
-          route: route === 'base' ? 'base-usdc' : route === 'near' ? 'near-usdc' : 'oneclick',
+          route,
           refund: buyer.identity,
           ...(route === '1click' ? {} : { payer: buyer }),
           maxPrice,
@@ -1019,7 +1016,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           const next = { ...bought.record, revision: bought.record.revision + 1, payment };
           await sdk.store.compareAndSet(purchaseKey(next.id), bought.record, next);
         } catch {
-          // The purchase already completed. Its public summary is optional metadata.
+          // Keep the completed purchase when saving source details fails.
         }
         // Raw purchase records and signed payment payloads never cross the adapter boundary.
         return {
@@ -1050,7 +1047,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     }
     if (o.command === 'recover') {
       if (!o.recovery || (o.purchase && !isId(o.purchase))) throw usage();
-      const errors: { purchaseId: string; code: string; message: string }[] = [];
+      const errors: { purchaseId: string; code: AnnonErrorCode; message: string }[] = [];
       const recovered = await sdk.recover({
         onError: (purchaseId, error) => {
           const { code, message } = publicError(error);
@@ -1137,8 +1134,9 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       if (d.agent) await settlementGate.defer('settlement_pending', 30);
 
       throw new AdapterError(
-        'settlement_processing',
-        publicError({ code: 'settlement_processing' }).message,
+        'settlement_pending',
+        publicError({ code: 'settlement_pending' }).message,
+        4,
       );
     }
     let readFileSource: () => Awaited<ReturnType<typeof fileSource>> | ReadableStream<Uint8Array>;

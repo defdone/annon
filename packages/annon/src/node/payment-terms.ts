@@ -68,12 +68,12 @@ function validSource(value: unknown): value is SourcePayment {
   );
 }
 
-/** Project only public facts from verified, encrypted purchase state, including legacy records. */
+/** Project only public facts from verified, encrypted purchase state, from required payment summaries. */
 export function savedPayment(
   record: PurchaseRecord,
-  source = record.payment?.source,
+  source = record.payment.source,
 ): PaymentSummary {
-  const route = record.purchase.route === 'base-usdc' ? 'base' : record.quote ? '1click' : 'near';
+  const route = record.payment.route;
   return {
     amountUsdc: usdc(BigInt(record.terms.price)),
     amountBaseUnits: record.terms.price,

@@ -1,5 +1,7 @@
 /** Service entrypoint for relayer admission, durable sponsorship and settlement. */
 
+export { clientKey } from '../net/ip.js';
+export { NEAR_USDC } from '../settle-near/terms.js';
 export { checkProtocolFee, type ProtocolFee } from './fees.js';
 export { keeperBalance } from './keeper-balance.js';
 export type { KeeperRecord, KeepOptions, KeepResult, RefundSource } from './keeper-runner.js';

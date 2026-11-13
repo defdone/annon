@@ -75,13 +75,13 @@ describe('1Click with synthetic response fixtures', () => {
       expect(JSON.parse(result.deposit.qrData).address).toBe(result.deposit.address);
     },
   );
-  it('uses INTENTS for a NEAR origin/refund; refuses malformed messages without HTTP', async () => {
+  it('uses the source-chain refund default for NEAR origins too; refuses malformed messages without HTTP', async () => {
     const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
       Response.json(recorded(JSON.parse(String(_init?.body)))),
     );
     const c = new OneClick({ fetch: fetcher as typeof fetch, now: () => now });
     await c.quote(message, { asset: `nep141:${NEAR_USDC}`, chain: 'near', refundTo: 'buyer.near' });
-    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).refundType).toBe('INTENTS');
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body)).refundType).toBe('ORIGIN_CHAIN');
     await expect(c.quote(message.replace('"annon":2', '"annon":1'), origin)).rejects.toThrow();
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
@@ -216,14 +216,14 @@ it('surfaces a safe quote refusal and decimal USDC minimum, discarding other res
   const { publicError } = await import('../node/errors.js');
   const error = await c.quote(message, origin).catch((e: unknown) => e);
   expect(publicError(error)).toMatchObject({
-    code: 'oneclick_refused',
-    message: 'Amount is too low for bridge, try at least 149983',
+    code: 'quote_refused',
+    message: expect.any(String),
     minimumAmountUsdc: '0.149983',
   });
   expect(JSON.stringify(publicError(error))).not.toContain('SECRET_VALUE');
 });
 it.each(['private_key=SECRET_VALUE', '<html>bad gateway</html>'])(
-  'keeps unrecognized 1Click failures generic: %s',
+  'uses a safe quote refusal for arbitrary upstream wording: %s',
   async (messageText) => {
     const c = new OneClick({
       now: () => now,
@@ -231,7 +231,26 @@ it.each(['private_key=SECRET_VALUE', '<html>bad gateway</html>'])(
     });
     const { publicError } = await import('../node/errors.js');
     expect(publicError(await c.quote(message, origin).catch((e: unknown) => e)).code).toBe(
-      'operation_failed',
+      'quote_refused',
     );
   },
 );
+
+it('names its private transport error and gives it the shared transient code', async () => {
+  const client = new OneClick({ fetch: async () => new Response(null, { status: 503 }) });
+  await expect(client.tokens()).rejects.toMatchObject({
+    name: 'TransportError',
+    code: 'transport',
+  });
+});
+
+it('uses the shared pending code when a bounded swap poll is still processing', async () => {
+  const client = new OneClick({ fetch: async () => Response.json({ status: 'PROCESSING' }) });
+  const progress = vi.fn();
+  await expect(
+    client.poll('synthetic', { maxPolls: 1, onProgress: progress }),
+  ).rejects.toMatchObject({ code: 'settlement_pending' });
+  expect(progress).toHaveBeenCalledWith(
+    expect.objectContaining({ lastStatus: { status: 'PROCESSING' } }),
+  );
+});

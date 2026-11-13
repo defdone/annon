@@ -1,3 +1,4 @@
+import { AnnonError, isTransient } from '../errors.js';
 import type { FileInfo } from '../near/rpc.js';
 import { parseRetryAfterMs } from '../net/retry.js';
 import { PayError } from '../pay/base.js';
@@ -48,7 +49,7 @@ const error = (
   code: 'not_sponsored' | 'relayer_unavailable' | 'transport_required',
   retryAfterSeconds?: number,
 ) =>
-  Object.assign(new Error(code), {
+  Object.assign(new AnnonError(code), {
     code,
     ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
   });
@@ -131,9 +132,7 @@ export async function checkBaseSplit(file: FileInfo, baseRpc: string): Promise<v
     });
   } catch (e) {
     if (e instanceof PayError && e.code === 'network_mismatch') throw e;
-    throw error(
-      e instanceof PayError && e.code !== 'transport' ? 'not_sponsored' : 'relayer_unavailable',
-    );
+    throw error(e instanceof PayError && !isTransient(e) ? 'not_sponsored' : 'relayer_unavailable');
   }
 }
 /** Fail closed before signatures, payment submission or release of payment instructions. */

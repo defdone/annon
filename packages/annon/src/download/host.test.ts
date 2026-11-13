@@ -10,9 +10,10 @@ afterEach(() => vi.resetAllMocks());
 
 it.each([
   ['transport', 502, {}],
+  ['base_rpc_rate_limited', 502, {}],
   ['payment_id_conflict', 409, {}],
   ['bad_requirements', 400, {}],
-  ['settlement_processing', 503, { 'Retry-After': '10' }],
+  ['settlement_pending', 503, { 'Retry-After': '10' }],
 ] as const)('reports %s only to the host callback', async (code, status, headers) => {
   vi.mocked(getFile).mockResolvedValue({ takenDown: null } as never);
   const error = new PayError(code, 'private diagnostic');
@@ -27,7 +28,7 @@ it.each([
   const result = await serveFile(req, options);
   expect(result).toMatchObject(expected);
   expect(await new Response(result.body).json()).toMatchObject({
-    error: code === 'settlement_processing' ? 'settlement_pending' : code,
+    error: code,
   });
   expect(onPaymentError).toHaveBeenCalledExactlyOnceWith(error);
   expect(await serveFile(req, {} as FileHostOptions)).toMatchObject(expected);
@@ -42,7 +43,7 @@ it.each(['throwing', 'rejecting'] as const)(
       'transport',
       'payment_id_conflict',
       'bad_requirements',
-      'settlement_processing',
+      'settlement_pending',
     ] as const) {
       vi.mocked(settle).mockRejectedValue(new PayError(code));
       const baseline = await serveFile(req, {} as FileHostOptions);

@@ -1,6 +1,10 @@
+import { AnnonError } from '../errors.js';
 import type { Store, Versioned } from '../pay/store.js';
-export class BudgetError extends Error {
-  readonly code = 'budget_exceeded';
+export class BudgetError extends AnnonError {
+  constructor(message?: string) {
+    super('budget_exceeded', message);
+    this.name = 'BudgetError';
+  }
 }
 export interface BudgetRecord extends Versioned {
   day: number;

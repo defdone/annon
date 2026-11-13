@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { createAdapter, type Input, publicError } from '@defdone/annon/node';
+import { annonErrorCodes, createAdapter, type Input, publicError } from '@defdone/annon/node';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod/v4';
 
@@ -102,20 +102,29 @@ const outputSchema = z.object({
             .optional(),
         })
         .optional(),
-      retryAfterSeconds: z.number().optional(),
+      retryAfterSeconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
     })
     .catchall(z.unknown())
     .optional(),
   error: z
     .object({
-      code: z.string(),
+      code: z.enum(annonErrorCodes),
       message: z.string(),
-      exitCode: z.number(),
-      purchaseId: z.string().optional(),
+      exitCode: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
+      purchaseId: z
+        .string()
+        .regex(/^0x[0-9a-f]{64}$/)
+        .optional(),
       txHash: z.string().optional(),
-      fileId: z.string().optional(),
-      minimumAmountUsdc: z.string().optional(),
-      retryAfterSeconds: z.number().optional(),
+      fileId: z
+        .string()
+        .regex(/^0x[0-9a-f]{64}$/)
+        .optional(),
+      minimumAmountUsdc: z
+        .string()
+        .regex(/^(0|[1-9][0-9]*)(\.[0-9]+)?$/)
+        .optional(),
+      retryAfterSeconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
     })
     .optional(),
 });

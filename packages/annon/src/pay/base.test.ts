@@ -19,6 +19,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { purchase as sample } from '../../test/fixtures.js';
 import { bitCases } from '../../test/sampling.js';
+import { usdc } from '../settle-near/codec.js';
 import { baseNonceV2, purchaseId } from '../settle-near/purchase.js';
 import { blockHeader, type Expected, type PayError, paymentLogs } from './base.js';
 import { type Authorization, digest, signer, typedData } from './eip3009.js';
@@ -482,6 +483,14 @@ describe('status', () => {
     over: { block?: number; validBefore?: string; payload?: string } = {},
   ): PurchaseRecord => ({
     schemaVersion: 2,
+    recoveryProved: false,
+    payment: {
+      route: sample.route === 'base-usdc' ? 'base' : 'near',
+      amountUsdc: usdc(BigInt(sample.price)),
+      amountBaseUnits: sample.price,
+      asset: { symbol: 'USDC', id: sample.asset },
+      network: sample.network,
+    },
     purchase: sample,
     message: '',
     buyerSecret: '',

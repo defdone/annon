@@ -122,7 +122,7 @@ it.each(['inventory', 'ineligible-fee', 'invalid-split', 'unavailable-split', 'm
   'seals a complete cutover with %s evidence',
   async (mode) => {
     const { sealLegacy } = await import('./cutover-scan.ts');
-    const { RelayLedger } = await import('../../packages/annon/src/relay/ledger.ts');
+    const { RelayLedger } = await import('@defdone/annon/relay');
     const { memoryStore } = await import('../../packages/annon/src/pay/store.ts');
     const { terms } = await import('../../packages/annon/test/fixtures.ts');
     const { termsHash } = await import('../../packages/annon/src/settle-near/terms.ts');

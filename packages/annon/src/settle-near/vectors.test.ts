@@ -1,13 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { bitCases } from '../../test/sampling.js';
-import {
-  inspectHeader,
-  open,
-  type PreviewPackage,
-  sealWithKey,
-  verifyPreview,
-} from '../envelope/pay2.js';
+import { inspectHeader, open, type PreviewPackage, sealWithKey } from '../envelope/pay2.js';
 import { openStream, sealStreamWithKey } from '../envelope/stream.js';
 import {
   type Authorization,
@@ -15,7 +9,6 @@ import {
   type Identity,
   identityJson,
   identityText,
-  intentsAccount,
   parseIdentity,
   verifyAuthorization,
 } from './identity.js';
@@ -153,7 +146,7 @@ describe('independent near-settlement wire vectors', () => {
       expect(hex(encodeIdentity(x.identity))).toBe(x.borsh);
       expect(identityJson(x.identity)).toBe(x.json);
       expect(identityText(x.identity)).toBe(x.text);
-      expect(intentsAccount(x.identity)).toBe(x.intents_account);
+      expect(parseIdentity(x.identity).id).toBe(x.intents_account);
       if (x.base58) expect(parseIdentity({ kind: 'solana', id: x.base58 })).toEqual(x.identity);
     });
   for (const x of v.terms)
@@ -232,9 +225,6 @@ describe('independent near-settlement wire vectors', () => {
       expect((await open(b64(x.file), opts)).data).toEqual(data);
       expect(hex((await inspectHeader(b64(x.header), listing, i.contractId)).headerHash)).toBe(
         x.whole_header_hash,
-      );
-      expect((await verifyPreview(x.preview, listing)).preview).toEqual(
-        data.subarray(0, i.previewLen),
       );
       expect(publishTextV2(i.contractId, i.fileId, x.header_hash)).toBe(x.publish_text);
       const sealOpts = {

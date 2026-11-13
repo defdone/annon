@@ -1,8 +1,8 @@
-import type { BuyRoute } from '../api/annon.js';
 import type { PollCheckpoint } from '../oneclick/oneclick.js';
-import type { RecoveryRecord } from './backup.js';
-import type { PurchaseRecord } from './purchase.js';
-import type { Versioned } from './store.js';
+import type { RecoveryRecord } from '../pay/backup.js';
+import type { PurchaseRecord } from '../pay/purchase.js';
+import type { Versioned } from '../pay/store.js';
+import type { BuyRoute } from '../routes.js';
 
 export const purchaseStates = [
   'terms_review',
@@ -36,13 +36,12 @@ export interface BrowserPurchaseRecord extends Versioned {
   checkpoint?: PollCheckpoint;
   /** Imported receipts require a fresh ownership proof before deposit instructions. */
   needsProof?: boolean;
-  /** Set durably before entering a payment submission boundary. Missing on older records. */
-  submission?: 'not_submitted' | 'uncertain' | 'submitted';
+  /** Set durably before entering a payment submission boundary. */
+  submission: 'not_submitted' | 'uncertain' | 'submitted';
 }
-export interface BrowserIndex extends Versioned {
-  kind: 'browser-index';
-  entries: BrowserPurchaseRecord[];
-  backups: Record<string, string>;
+export interface BrowserReceipt {
+  kind: 'browser-receipt';
+  entry: BrowserPurchaseRecord;
 }
 
 /** Durable metadata only. Full workflow records live under their own keys. */

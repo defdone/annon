@@ -4,15 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { pay2Boundaries } from '../../test/pay2-boundaries.js';
 import { bitCases } from '../../test/sampling.js';
 import type { Identity } from '../settle-near/identity.js';
-import {
-  inspect,
-  type Listing,
-  open,
-  parseHeader,
-  sealWithKey,
-  sha256,
-  verifyPreview,
-} from './pay2.js';
+import { inspect, type Listing, open, parseHeader, sealWithKey, sha256 } from './pay2.js';
 import { blobSource, openTo } from './replay.js';
 import { openStream, sealStreamWithKey } from './stream.js';
 
@@ -98,25 +90,10 @@ for (const authKind of [0, 1, 2] as const)
       );
       expect(Buffer.concat(pieces)).toEqual(Buffer.from(data));
       expect((await inspect(file, listing, contractId)).usable).toBe(true);
-      expect(
-        (await verifyPreview(await sealed.preview({ meta: true, data: true }), listing)).preview,
-      ).toEqual(data.subarray(0, 10));
       const s = await sealStreamWithKey(K, stream(data), data.length, opts);
       expect(s.cipherHash).toEqual(sealed.cipherHash);
       expect(await collect(await s.finish(stream(data), finish))).toEqual(file);
       expect(await collect(openStream(stream(file), openOpts))).toEqual(data);
-    });
-    it('checks preview auth kind against the registered seller', async () => {
-      const { sealed, listing } = await make();
-      const pkg = await sealed.preview({ meta: true });
-      const header = Uint8Array.from(Buffer.from(pkg.header, 'base64'));
-      header[7] = (authKind + 1) % 3;
-      await expect(
-        verifyPreview({ ...pkg, header: Buffer.from(header).toString('base64') }, listing),
-      ).rejects.toHaveProperty('code', 'preview_invalid');
-      await expect(
-        verifyPreview(pkg, { fileId: listing.fileId, cipherHash: listing.cipherHash }),
-      ).rejects.toHaveProperty('code', 'preview_invalid');
     });
     it('EVM address shorthand still selects the single version 2 model', async () => {
       if (authKind !== 0) return;
@@ -214,28 +191,6 @@ it('rejects invalid contract accounts in buffered and streaming NEAR headers', a
   const streamed = await sealStreamWithKey(K, stream(data), data.length, opts);
   await expect(buffered.finish(finish)).rejects.toThrow();
   await expect(streamed.finish(stream(data), finish)).rejects.toThrow();
-});
-
-it('checks preview kinds even when all signed body bytes are unchanged', async () => {
-  const seller = { kind: 'near', id: 'seller.near' } as const;
-  const sealed = await sealWithKey(K, data, { fileId, name: '', mime: '', authKind: 2 });
-  const file = await sealed.finish({ contractId, ckdSecret: ckd, seller });
-  const h = parseHeader(file);
-  const pkg = await sealed.preview({ meta: true });
-  const listing = {
-    fileId,
-    cipherHash: sealed.cipherHash,
-    seller,
-    publishedHeaderHash: await sha256(file.subarray(0, h.headerLen - 65)),
-  };
-  await verifyPreview(pkg, listing);
-  for (const kind of [0, 1, 3, 255]) {
-    const header = Uint8Array.from(Buffer.from(pkg.header, 'base64'));
-    header[7] = kind;
-    await expect(
-      verifyPreview({ ...pkg, header: Buffer.from(header).toString('base64') }, listing),
-    ).rejects.toHaveProperty('name', 'Pay2Error');
-  }
 });
 
 it('binds kind to seller even with a valid EVM signature over the altered header', async () => {

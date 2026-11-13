@@ -2,6 +2,7 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { base58 } from '@scure/base';
 import { signedBy } from '../envelope/evm.js';
+import { AnnonError } from '../errors.js';
 import { account, bytes, compare, concat, exactKeys, hex, str, utf8 } from './codec.js';
 
 export type Identity =
@@ -52,7 +53,6 @@ export function identityText(input: Identity): string {
       ? `EVM ${id.id}`
       : `Solana ${base58.encode(bytes(`0x${id.id}`, 32))}`;
 }
-export const intentsAccount = (id: Identity): string => parseIdentity(id).id;
 
 /** Malformed signatures and auth of a different kind always fail closed. */
 export function verifyAuthorization(
@@ -86,9 +86,9 @@ export function solanaWalletAuth(
     !(result.signedMessage instanceof Uint8Array) ||
     compare(result.signedMessage, utf8.encode(text)) !== 0
   )
-    throw new Error('wallet returned different signed bytes');
+    throw new AnnonError('invalid_signature', 'wallet returned different signed bytes');
   const auth: Authorization = { kind: 'solana', sig: hex(result.signature) };
   if (id.kind !== 'solana' || !verifyAuthorization(id, text, auth))
-    throw new Error('the signature is not from the seller');
+    throw new AnnonError('invalid_signature', 'the signature is not from the seller');
   return auth;
 }

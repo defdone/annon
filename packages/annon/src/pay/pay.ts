@@ -1,3 +1,4 @@
+import { usdc } from '../settle-near/codec.js';
 /**
  * Paying for an Annon file on Base: the checks before the buyer's wallet is asked anything, then
  * the EIP-3009 signature, checked and dry-run against USDC before it leaves the client.
@@ -77,7 +78,7 @@ export interface PreflightOptions {
   url: string;
   /**
    * The PAY2 header served at `extensions.annon.info.header`; the whole file when the offer says
-   * `public`. Checked against the registration before anything is signed (profile section 7).
+   * `public`. Checked against the registration before anything is signed (x402-annon.md section 7).
    */
   pay2: Uint8Array;
   /** USDC base units: refused above it. */
@@ -268,12 +269,12 @@ export interface AuthorizeOptions {
   purchase: Purchase;
   buyerSecret: Uint8Array;
   wallet: Wallet;
-  /** Where the purchase is recorded by purchase_id (profile section 5). */
+  /** Where the purchase is recorded by purchase_id (x402-annon.md section 5). */
   store: Store<PurchaseRecord>;
 }
 
 /** The authorization an attempt signs. */
-export const authorizationOf = (
+const authorizationOf = (
   r: PurchaseRecord,
   attempt: PaymentAttempt = r.attempts[0] as PaymentAttempt,
 ): Authorization => ({
@@ -338,11 +339,19 @@ export async function authorize(
   const start = Math.min(h.timestamp, local);
   const created: PurchaseRecord = {
     schemaVersion: 2,
+    recoveryProved: false,
+    payment: {
+      route: 'base',
+      amountUsdc: usdc(q.price),
+      amountBaseUnits: q.price.toString(),
+      asset: { symbol: 'USDC', id: q.usdc },
+      network: BASE_NETWORK,
+    },
     id,
     purchase: p,
     message,
     buyerSecret: toHex(o.buyerSecret),
-    quote: q.paymentRequired,
+    quote: null,
     recovery: p.recovery,
     checkedHeaderHash: toHex(sha256(q.header)),
     revision: 0,

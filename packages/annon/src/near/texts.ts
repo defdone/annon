@@ -26,7 +26,7 @@ export interface SellerArgs {
   deadline: number;
 }
 /** The contract's `hex0x(bytes::<N>(s))`: optional lowercase `0x`, any case, printed lowercase. */
-export function hex0x(s: string, bytes: number, name: string): string {
+function hex0x(s: string, bytes: number, name: string): string {
   const h = s.startsWith('0x') ? s.slice(2) : s;
   if (!new RegExp(`^[0-9a-fA-F]{${2 * bytes}}$`).test(h)) {
     throw new TypeError(`${name} must be ${bytes} bytes of hex`);

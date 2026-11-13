@@ -51,7 +51,7 @@ it('uses frozen sponsorship, method, storage and keeper defaults and rejects mal
       prepaidUnlockFloor: 10n ** 24n,
       registrationsPerSeller: 5,
       listedRegistrationsPerSeller: 20,
-      claimsPerPurchase: 3,
+      claimsPerGrant: 3,
       unlocksPerFile: 10,
       unlocksPerSeller: 20,
       listedUnlocksPerFile: 100,

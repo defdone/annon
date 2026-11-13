@@ -65,3 +65,22 @@ it('does not shorten concurrent gates and isolates the settlement gate from gran
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+it('rejects an obsolete saved gate code instead of translating it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'annon-obsolete-gate-'));
+  try {
+    const gate = retryGate(
+      {
+        stateDir: dir,
+        network: 'near:mainnet',
+        contractId: 'annon.near',
+        purchaseId: `0x${'11'.repeat(32)}`,
+      },
+      () => 1000,
+    );
+    await gate.defer('settlement_processing' as never, 30);
+    await expect(gate.check()).rejects.toMatchObject({ code: 'invalid_record' });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -596,3 +596,19 @@ it('binds sponsored funding to deployment, registered seller, amount, nonce and 
   for (const amount of ['0', '-1', '01', '1e3'])
     expect(() => fileFundingText({ ...request, amount })).toThrow();
 });
+
+it('classifies only decoded contract storage refusal reasons', async () => {
+  const { isStorageRequired } = await import('./rpc.js');
+  expect(
+    isStorageRequired(
+      JSON.stringify({
+        ActionError: {
+          kind: { FunctionCallError: { ExecutionError: 'not enough prepaid balance' } },
+        },
+      }),
+    ),
+  ).toBe(true);
+  expect(isStorageRequired('call storage_deposit first')).toBe(true);
+  expect(isStorageRequired('network unavailable')).toBe(false);
+  expect(isStorageRequired(new Error('not enough prepaid balance'))).toBe(false);
+});

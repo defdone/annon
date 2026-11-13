@@ -24,7 +24,7 @@ it.each(['matching', 'missing', 'foreign', 'invalid JSON'])(
       }),
     );
     await expect(block(url, 'safe')).rejects.toMatchObject({
-      code: 'transport',
+      code: 'base_rpc_rate_limited',
       message: 'Base RPC rate limited (429)',
     });
   },
@@ -62,6 +62,33 @@ it.each([200, 400, 500])('preserves structured RPC errors on HTTP %i', async (st
     code: 'transport',
     message: `Base RPC error: ${JSON.stringify(error)}`,
   });
+  await expect(
+    dryRun(
+      url,
+      `0x${'01'.repeat(20)}`,
+      {
+        from: `0x${'02'.repeat(20)}`,
+        to: `0x${'03'.repeat(20)}`,
+        value: 1n,
+        validAfter: 0n,
+        validBefore: 1n,
+        nonce: `0x${'04'.repeat(32)}`,
+      },
+      `0x${'05'.repeat(65)}`,
+    ),
+  ).rejects.toMatchObject({ code: 'transport' });
+});
+
+it('uses a structured execution failure code independently of RPC wording', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url, init) =>
+      Response.json({
+        id: JSON.parse(String(init?.body)).id,
+        error: { code: 3, message: 'RPC_CALL_FAILED' },
+      }),
+    ),
+  );
   await expect(
     dryRun(
       url,

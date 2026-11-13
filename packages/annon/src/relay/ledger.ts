@@ -52,6 +52,8 @@ export interface Admission {
   ip: string;
   storage: string;
   allocation: string;
+  /** Final file balance observed before a sponsored top-up is prepared. */
+  fundingBalanceBefore?: string;
   limits: RelayLimits;
   decision?: SponsorshipDecision;
   reservation?: { key: string; binding: string };
@@ -135,7 +137,12 @@ export class RelayLedger {
         !s.nonces ||
         !s.work ||
         Object.values(s.counters).some((v) => !amount(v)) ||
-        Object.values(s.operations).some((op) => !amount(op.storage) || !amount(op.allocation)) ||
+        Object.values(s.operations).some(
+          (op) =>
+            !amount(op.storage) ||
+            !amount(op.allocation) ||
+            (op.fundingBalanceBefore !== undefined && !amount(op.fundingBalanceBefore)),
+        ) ||
         Object.values(s.decisions).some((d) => d.allocated !== null && !amount(d.allocated)))
     )
       throw new RelayError('unavailable', 'Sponsorship state is unavailable.');

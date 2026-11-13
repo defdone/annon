@@ -16,7 +16,7 @@ export function signedBy(text: string, sig: Uint8Array, address: string): boolea
  * The address that signed `text` with EIP-191 (r ‖ s ‖ v, low s, v 27 or 28), lowercase 0x, or
  * null for a signature that recovers to nobody.
  */
-export function signerOf(text: string, sig: Uint8Array): string | null {
+function signerOf(text: string, sig: Uint8Array): string | null {
   if (sig.length !== 65 || (sig[64] !== 27 && sig[64] !== 28)) return null;
   const s = BigInt(`0x${toHex(sig.subarray(32, 64))}`);
   if (s > secp256k1.Point.Fn.ORDER / 2n) return null;

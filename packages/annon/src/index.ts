@@ -7,10 +7,19 @@ export {
   SellError,
   type SellOptions,
 } from './api/annon.js';
+export { PurchaseLeaseBusy } from './browser/purchases.js';
+export { BrowserWalletError, type BrowserWalletErrorCode } from './browser/wallets.js';
 export { DownloadError, type DownloadErrorCode } from './download/download.js';
 export { Pay2Error, type Pay2ErrorCode } from './envelope/pay2.js';
 export { blobSource, type ReplayableSource, type Spool } from './envelope/replay.js';
 export { SourceChangedError } from './envelope/stream.js';
+export {
+  AnnonError,
+  type AnnonErrorCode,
+  isTransient,
+  type PublicError,
+  toPublicError,
+} from './errors.js';
 export { CkdError, type CkdErrorCode } from './keys/near-ckd.js';
 export { HTTP_RETRY_MAX_WAIT_SECONDS, MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES } from './limits.js';
 export {

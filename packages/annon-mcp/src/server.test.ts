@@ -29,7 +29,7 @@ import { type PurchaseRecord, purchaseKey } from '../../annon/src/pay/purchase.j
 import { paymentRequired } from '../../annon/src/pay/seller.js';
 import * as splitModule from '../../annon/src/pay/split.js';
 import { fileStore } from '../../annon/src/pay/store-node.js';
-import { bytes, hex } from '../../annon/src/settle-near/codec.js';
+import { bytes, hex, usdc } from '../../annon/src/settle-near/codec.js';
 import { parseIdentity } from '../../annon/src/settle-near/identity.js';
 import {
   baseNonceV2,
@@ -268,6 +268,14 @@ async function harness(
           const id = purchaseId(p);
           const record: PurchaseRecord = {
             schemaVersion: 2,
+            recoveryProved: true,
+            payment: {
+              route: must(args.route),
+              amountUsdc: usdc(BigInt(p.price)),
+              amountBaseUnits: p.price,
+              asset: { symbol: 'USDC', id: p.asset },
+              network: p.network,
+            },
             id,
             revision: 0,
             purchase: p,
@@ -305,11 +313,11 @@ async function harness(
             saved = next;
             await args.onQuote?.(quote);
             await afterBuy?.(sdk, o);
-            return { route: p.route, record: next, instructions: quote.deposit };
+            return { route: record.payment.route, record: next, instructions: quote.deposit };
           }
           await args.submitBase?.('SIGNED_PAYMENT_PAYLOAD');
           await afterBuy?.(sdk, o);
-          return { route: p.route, record, payment: 'SIGNED_PAYMENT_PAYLOAD' };
+          return { route: record.payment.route, record, payment: 'SIGNED_PAYMENT_PAYLOAD' };
         });
       vi.spyOn(sdk, 'accept').mockImplementation(async () => {
         accepts();
@@ -491,7 +499,7 @@ it.each(['near', 'base', '1click'] as const)(
           revision: saved.revision + 1,
           payment: {
             ...must(saved.payment),
-            amountUsdc: 'HOST_TEXT',
+            amountUsdc: saved.payment.amountUsdc,
             authorization: 'SIGNED_PAYMENT_PAYLOAD',
             ...(saved.payment?.source
               ? { source: { ...saved.payment.source, address: 'deposit-address' } }
@@ -512,26 +520,10 @@ it.each(['near', 'base', '1click'] as const)(
           );
         }
 
-        // Simulate an older backup and encrypted record without the new optional field.
-        const legacy: PurchaseRecord = {
-          ...withExtraFields,
-          revision: withExtraFields.revision + 1,
-        };
-        delete legacy.payment;
-        await store.compareAndSet(purchaseKey(saved.id), withExtraFields, legacy);
-        const legacyBackup = join(h.dir, 'legacy.json');
-        await writeFile(legacyBackup, await exportPurchase(legacy, h.options.backupSecret));
-        const { source: _, ...legacyExpected } = expected;
-        expect((await call('status', { target: saved.id })).payment).toEqual(legacyExpected);
-        expect(
-          (
-            await call('open', {
-              target: legacyBackup,
-              file: h.localFile,
-              output: join(h.dir, 'legacy-output.txt'),
-            })
-          ).payment,
-        ).toEqual(legacyExpected);
+        const { payment: _payment, ...old } = withExtraFields;
+        await expect(
+          exportPurchase(old as PurchaseRecord, h.options.backupSecret),
+        ).rejects.toMatchObject({ code: 'invalid_record' });
       } finally {
         await connection.close();
       }
@@ -832,24 +824,6 @@ it.each(['near', 'base', '1click'] as const)(
   },
 );
 
-it.each(['packages/annon-mcp/README.md', 'skills/annon/SKILL.md'])(
-  'documents the two route meanings in %s',
-  async (file) => {
-    const text = await readFile(new URL(`../../../${file}`, import.meta.url), 'utf8');
-    expect(text).toContain(
-      'Top-level `route` is the contract route (`near-usdc`/`base-usdc`); `payment.route` is how the buyer paid (`near`/`base`/`1click`).',
-    );
-  },
-);
-
-it('keeps the skill buy examples together before the URL rule', async () => {
-  const text = await readFile(new URL('../../../skills/annon/SKILL.md', import.meta.url), 'utf8');
-  const examples = text.indexOf('Buy directly with NEAR USDC');
-  const code = text.indexOf('```sh', examples);
-  const end = text.indexOf('```', code + 5);
-  expect(text.indexOf('URLs accept HTTPS', examples)).toBeGreaterThan(end);
-});
-
 it('creates the production MCP adapter in agent mode', async () => {
   const factory = vi.spyOn(adapterModule, 'createAdapter').mockReturnValue(async () => ({}));
   const server = createServer();
@@ -946,7 +920,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
       });
       expect(bought.result).toMatchObject({
         state: 'deposit_required',
-        route: 'near-usdc',
+        route: '1click',
         instructions: { address: 'deposit-address', amount: '210000', memo: '123' },
       });
       const id = h.saved.id;
@@ -1053,14 +1027,14 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
         }
         expect(result).toMatchObject({
           ok: false,
-          error: { code: 'host_payment_failed', message: expect.stringContaining(String(status)) },
+          error: { code: 'host_payment_failed', message: expect.any(String) },
         });
         expect(JSON.stringify(result)).not.toContain('PRIVATE_UPSTREAM');
         expect(h.saved.id).toBeTruthy();
       }
     },
   );
-  it('returns payment_not_safe immediately through MCP without unlock waits', async () => {
+  it('returns settlement_pending immediately through MCP without unlock waits', async () => {
     const h = await harness(true, undefined, true);
     const bought = await h.adapter({
       ...h.defaults,
@@ -1070,7 +1044,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     });
     h.fetcher.mockClear();
     h.fetcher.mockImplementation(async () =>
-      Response.json({ error: 'payment_not_safe', message: 'PRIVATE_UPSTREAM' }, { status: 425 }),
+      Response.json({ error: 'settlement_pending', message: 'PRIVATE_UPSTREAM' }, { status: 425 }),
     );
     await patchConfig(h.defaults.config, { relayer: 'https://relay.example' });
     const connection = await connect((o) => h.adapter({ ...h.defaults, ...o }));
@@ -1080,10 +1054,10 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
         arguments: { target: bought.purchaseId, output: join(h.dir, 'out') },
       });
       expect(result.isError).toBe(true);
-      expect(JSON.stringify(result)).toContain('payment_not_safe');
+      expect(JSON.stringify(result)).toContain('settlement_pending');
       expect(result.structuredContent).toMatchObject({
         error: {
-          message: expect.stringContaining('status again in about 30 seconds'),
+          message: expect.stringContaining('saved purchase'),
           retryAfterSeconds: 30,
         },
       });
@@ -1133,17 +1107,17 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
             }
           : {
               code: 'near_rpc_rate_limited',
-              message: 'Configure a NEAR RPC endpoint with an API key (nearRpc)',
+              message: 'Configure a NEAR RPC endpoint with an API key (nearRpc).',
             };
       const connection = await connect(execute);
       try {
         const output: string[] = [];
         expect(
           await runCli(['status', terms.file_id, '--json'], execute, (s) => output.push(s)),
-        ).toBe(1);
+        ).toBe(4);
         expect(JSON.parse(must(output[0]))).toEqual({
           ok: false,
-          error: { ...expected, exitCode: 1 },
+          error: { ...expected, exitCode: 4 },
         });
         const result = await connection.client.callTool({
           name: 'annon_status',
@@ -1152,7 +1126,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toEqual({
           ok: false,
-          error: { ...expected, exitCode: 1 },
+          error: { ...expected, exitCode: 4 },
         });
         expect(JSON.stringify(result)).not.toContain('PRIVATE_UPSTREAM');
       } finally {
@@ -1220,7 +1194,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     });
     const call = vi
       .fn()
-      .mockRejectedValueOnce(new Error('request timed out SECRET'))
+      .mockRejectedValueOnce(new DOMException('request timed out SECRET', 'TimeoutError'))
       .mockResolvedValueOnce(null);
     const owner: NearWallet = {
       identity: { kind: 'near', id: 'caller.near' },
@@ -1234,7 +1208,9 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     expect(call.mock.calls[0]).toEqual(call.mock.calls[1]);
     expect(h.wait).toHaveBeenCalledWith(1000);
     expect(JSON.stringify(h.notify.mock.calls)).not.toContain('SECRET');
-    call.mockReset().mockRejectedValue(new Error('request timed out SECRET'));
+    call
+      .mockReset()
+      .mockRejectedValue(new DOMException('request timed out SECRET', 'TimeoutError'));
     await expect(must(h.options.send)('reopen', args, owner)).rejects.toThrow();
     expect(call).toHaveBeenCalledTimes(3);
     call.mockClear();
@@ -1290,7 +1266,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
     expect(out).toHaveBeenCalledTimes(1);
     expect(JSON.parse(must(out.mock.calls[0])[0])).toMatchObject({
       ok: true,
-      result: { route: 'base-usdc', state: 'submitted' },
+      result: { route: 'base', state: 'submitted' },
     });
     for (const value of [
       h.env.ANNON_EVM_PRIVATE_KEY,
@@ -1621,8 +1597,8 @@ it('returns a quote refusal through both CLI and MCP with a decimal minimum and 
     ),
   ).toBe(1);
   const expected = {
-    code: 'oneclick_refused',
-    message: 'Amount is too low for bridge, try at least 149983',
+    code: 'quote_refused',
+    message: 'The 1Click quote was refused. Review the source asset and amount before retrying.',
     minimumAmountUsdc: '0.149983',
   };
   expect(JSON.parse(out.mock.calls[0]?.[0] ?? '').error).toEqual({ ...expected, exitCode: 1 });
@@ -1757,7 +1733,7 @@ it.each(['near', 'base'] as const)(
 );
 
 it.each(['invalid', '0'])(
-  'preserves oneclick_refused when the budget refund encounters a corrupt ledger (%s)',
+  'preserves quote_refused when the budget refund encounters a corrupt ledger (%s)',
   async (daily) => {
     const h = await harness();
     const original = must(h.fetcher.getMockImplementation());
@@ -1791,7 +1767,7 @@ it.each(['invalid', '0'])(
         origin: 'base-usdc',
       }),
     ).rejects.toMatchObject({
-      code: 'oneclick_refused',
+      code: 'quote_refused',
       message: 'No routes found',
     });
     expect((await ledger.load('agent:USDC'))?.daily).toBe(daily);
@@ -2631,10 +2607,10 @@ it('enforces a settlement wait before another accept call', async () => {
     file: h.localFile,
     output: 'out.txt',
   };
-  await expect(h.adapter(args)).rejects.toMatchObject({ code: 'payment_not_safe' });
+  await expect(h.adapter(args)).rejects.toMatchObject({ code: 'settlement_pending' });
   const count = h.fetcher.mock.calls.length;
   await expect(h.adapter(args)).rejects.toMatchObject({
-    code: 'payment_not_safe',
+    code: 'settlement_pending',
     retryAfterSeconds: expect.any(Number),
   });
   expect(h.fetcher).toHaveBeenCalledTimes(count);
@@ -2952,3 +2928,44 @@ it.each([false, true])(
     expect(h.calls.filter((call) => call.command === 'buy')).toHaveLength(1);
   },
 );
+
+it('declares and preserves pending transaction evidence in its error schema', async () => {
+  const id = `0x${'11'.repeat(32)}`;
+  const { TransactionUncertain } = await import('../../annon/src/wallet/uncertain.js');
+  const connection = await connect(async () => {
+    throw new TransactionUncertain('transaction-hash', id);
+  });
+  try {
+    const { tools } = await connection.client.listTools();
+    const schema = tools[0]?.outputSchema as unknown as {
+      properties: { error: { properties: Record<string, unknown> } };
+    };
+    expect(Object.keys(schema.properties.error.properties).sort()).toEqual(
+      [
+        'code',
+        'message',
+        'exitCode',
+        'fileId',
+        'purchaseId',
+        'txHash',
+        'minimumAmountUsdc',
+        'retryAfterSeconds',
+      ].sort(),
+    );
+    const response = await connection.client.callTool({
+      name: 'annon_status',
+      arguments: { target: id },
+    });
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      error: {
+        code: 'transaction_uncertain',
+        purchaseId: id,
+        txHash: 'transaction-hash',
+        exitCode: 4,
+      },
+    });
+  } finally {
+    await connection.close();
+  }
+});

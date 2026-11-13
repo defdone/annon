@@ -1,11 +1,9 @@
+import { termsHash } from '@defdone/annon';
 /** Read-only archival inventory. Never infer historical existence from current state. */
-import { getFile, rpcReply } from '../../packages/annon/src/near/rpc.ts';
+import { getFile, rpcReply } from '@defdone/annon/near/rpc';
 
-import { readSplitState } from '../../packages/annon/src/pay/split.ts';
-import { checkProtocolFee } from '../../packages/annon/src/relay/fees.ts';
-import { RelayError } from '../../packages/annon/src/relay/relay.ts';
-import { ZERO_FEE } from '../../packages/annon/src/relay/sponsorship.ts';
-import { termsHash } from '../../packages/annon/src/settle-near/terms.ts';
+import { readSplitState } from '@defdone/annon/pay/split';
+import { checkProtocolFee, RelayError, ZERO_FEE } from '@defdone/annon/relay';
 
 function withinDeadline(deadline: number) {
   return async <T>(work: Promise<T>): Promise<T> => {
@@ -210,9 +208,9 @@ export async function scanRegistrations(
 
 /** Seal only a complete historical scan and an explicit prior-policy snapshot. */
 export async function sealLegacy(
-  o: import('../../packages/annon/src/relay/relay.ts').CheckOptions & {
-    ledger?: import('../../packages/annon/src/relay/ledger.ts').RelayLedger;
-    seal?: import('../../packages/annon/src/relay/ledger.ts').RelayLedger['seal'];
+  o: import('@defdone/annon/relay').CheckOptions & {
+    ledger?: import('@defdone/annon/relay').RelayLedger;
+    seal?: import('@defdone/annon/relay').RelayLedger['seal'];
     archivalRpc: string;
     scanProgress?: ScanProgress;
   },
@@ -221,12 +219,12 @@ export async function sealLegacy(
     height: number;
     fromHeight: number;
     maxSeconds?: number;
-    fee: import('../../packages/annon/src/relay/fees.ts').ProtocolFee;
+    fee: import('@defdone/annon/relay').ProtocolFee;
     inventory: string[];
     sponsor: string;
   },
   rpc: typeof rpcReply = rpcReply,
-  splitReader: typeof import('../../packages/annon/src/pay/split.ts').readSplitState = readSplitState,
+  splitReader: typeof import('@defdone/annon/pay/split').readSplitState = readSplitState,
   fileReader: typeof getFile = getFile,
 ): Promise<{ scanned: number; eligible: number }> {
   if (
@@ -270,7 +268,7 @@ export async function sealLegacy(
   );
   if (snapshot.inventory.some((id) => !files.includes(id)))
     throw new Error('Inventory is absent from historical events.');
-  const decisions: import('../../packages/annon/src/relay/ledger.ts').SponsorshipDecision[] = [];
+  const decisions: import('@defdone/annon/relay').SponsorshipDecision[] = [];
   for (const id of files) {
     const file = await bounded(fileReader(o.archivalRpc, o.contractId, id, snapshot.hash));
     if (!file) throw new Error('Historical registration is missing.');

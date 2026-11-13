@@ -8,17 +8,20 @@ import { createSplit } from '../pay/split.js';
 import { memoryStore } from '../pay/store.js';
 import { buildPurchaseMessage } from '../settle-near/purchase.js';
 import { termsHash } from '../settle-near/terms.js';
-import { RelayLedger, type RelayState } from './ledger.js';
-import {
-  type CheckOptions,
+import type { RelayState } from './ledger.js';
+
+let { RelayLedger } = await import('./ledger.js');
+
+import type { CheckOptions } from './relay.js';
+
+let {
   canonicalRequest,
   contractArgs,
   reconcileRelayStorage,
   relay,
   relayStatus,
-  resetRelayState,
   retryPaidUnlocks,
-} from './relay.js';
+} = await import('./relay.js');
 
 vi.mock('../near/rpc.js', async (original) => ({
   ...(await original<typeof import('../near/rpc.js')>()),
@@ -139,9 +142,12 @@ const funding = async (amount = '1', nonce = `0x${'66'.repeat(32)}`, deadline = 
     },
   };
 };
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetAllMocks();
-  resetRelayState();
+  vi.resetModules();
+  ({ RelayLedger } = await import('./ledger.js'));
+  ({ canonicalRequest, contractArgs, reconcileRelayStorage, relay, relayStatus, retryPaidUnlocks } =
+    await import('./relay.js'));
   created.mockResolvedValue({ transaction: { encode: () => new Uint8Array([1, 2, 3]) } });
   vi.mocked(getFile).mockResolvedValue(null);
   vi.mocked(getPurchase).mockResolvedValue(null);
@@ -302,7 +308,10 @@ it('retries a quota-delayed paid unlock after restart under its frozen policy', 
     retryAt: 86400000,
   });
   expect(Object.keys((await ledger.read()).work)).toHaveLength(1);
-  resetRelayState();
+  vi.resetModules();
+  ({ RelayLedger } = await import('./ledger.js'));
+  ({ canonicalRequest, contractArgs, reconcileRelayStorage, relay, relayStatus, retryPaidUnlocks } =
+    await import('./relay.js'));
   clock.mockReturnValue(86400001);
   const restarted = {
     ...capped,
@@ -896,3 +905,66 @@ it('retires a deferred unlock whose purchase already exists without signing', as
   expect((await ledger.read()).work).toEqual({});
   expect(created).not.toHaveBeenCalled();
 });
+
+it.each([1007n, 7n, 900n])(
+  'records a nonzero funding baseline through relay and reconciles balance %s',
+  async (balance) => {
+    const now = 2_000_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now * 1000);
+    const { o, ledger } = await options();
+    delete o.now;
+    await ledger.remember({
+      network: terms.network,
+      contract: terms.contract,
+      fileId: terms.file_id,
+      termsHash: termsHash(terms),
+      terms,
+      eligible: true,
+      tier: 'external',
+      listed: false,
+      policyVersion: 'v1',
+      minPrice: '100000',
+      fee: { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
+      decidedAt: now,
+      allocated: '0',
+      outcome: 'registered',
+    });
+    vi.mocked(getFile).mockResolvedValue({ ...file, purchaseStorageBalance: 7n });
+    vi.mocked(rpcReply).mockImplementation(async (_rpc, method) =>
+      method === 'tx'
+        ? { error: { cause: { name: 'UNKNOWN_TRANSACTION' } } }
+        : { result: { final_execution_status: 'NONE' } },
+    );
+    expect(await relay(await funding('1000', `0x${'66'.repeat(32)}`, now + 600), o)).toMatchObject({
+      uncertain: true,
+    });
+    const id = must(Object.keys((await ledger.read()).operations)[0]);
+    expect(await ledger.operation(id)).toMatchObject({
+      fundingBalanceBefore: '7',
+      stage: 'submitted',
+    });
+    const counters = (await ledger.read()).counters;
+    vi.mocked(rpcReply).mockImplementation(async (_rpc, method) =>
+      method === 'tx'
+        ? { error: { cause: { name: 'UNKNOWN_TRANSACTION' } } }
+        : { error: { cause: { info: { InvalidTxError: 'Expired' } } } },
+    );
+    vi.mocked(getFile).mockResolvedValue({ ...file, purchaseStorageBalance: balance });
+    clock.mockReturnValue((now + 60) * 1000);
+    const alert = vi.fn();
+    await reconcileRelayStorage({ ...o, alert });
+    const operation = await ledger.operation(id);
+    expect(operation?.stage).toBe('submitted');
+    expect((await ledger.read()).counters).toEqual(counters);
+    expect((await ledger.decision(terms.file_id, termsHash(terms)))?.allocated).toBe('1000');
+    if (balance === 1007n) {
+      expect(operation).toMatchObject({ storageFinalized: true, finalState: 'done' });
+      expect(await ledger.pendingStorage()).toBe(0n);
+      expect(alert).not.toHaveBeenCalled();
+    } else {
+      expect(operation?.storageFinalized).toBeUndefined();
+      expect(await ledger.pendingStorage()).toBe(1000n);
+      expect(alert).toHaveBeenCalledWith('reconcile_held');
+    }
+  },
+);

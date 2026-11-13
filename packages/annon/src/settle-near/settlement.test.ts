@@ -9,7 +9,6 @@ import {
   encodeIdentity,
   identityJson,
   identityText,
-  intentsAccount,
   parseIdentity,
   solanaWalletAuth,
   verifyAuthorization,
@@ -77,7 +76,7 @@ const purchase: Purchase = {
 };
 
 describe('identities and authoritative authorization', () => {
-  it('normalizes API values and writes Borsh, JSON, text and Intents ids', () => {
+  it('normalizes API values and writes Borsh, JSON and text', () => {
     expect(parseIdentity({ kind: 'evm', id: `0x${'AB'.repeat(20)}` })).toEqual({
       kind: 'evm',
       id: `0x${'ab'.repeat(20)}`,
@@ -89,7 +88,6 @@ describe('identities and authoritative authorization', () => {
     expect(identityText(evm)).toBe(`EVM ${evm.id}`);
     expect(identityText(near)).toBe('NEAR seller.near');
     expect(identityJson(sol)).toBe(JSON.stringify(sol));
-    for (const id of [evm, sol, near]) expect(intentsAccount(id)).toBe(id.id);
     expect(hex(encodeIdentity(evm))).toBe(`0x00${evm.id.slice(2)}`);
     expect(hex(encodeIdentity(sol))).toBe(`0x01${sol.id}`);
     expect(hex(encodeIdentity(near))).toBe(`0x020b000000${Buffer.from(near.id).toString('hex')}`);

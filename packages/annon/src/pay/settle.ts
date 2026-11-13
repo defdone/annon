@@ -1,5 +1,5 @@
 /**
- * A seller settles each purchase once (profile section 10). Two records in the seller's store: the
+ * A seller settles each purchase once (x402-annon.md section 10). Two records in the seller's store: the
  * payment id bound to the payload it first came with, and the purchase `(network, asset, from,
  * nonce)` with its state. The answer always follows the purchase's state now; a purchase the store
  * doesn't know, or whose settlement is unclear, is read from Base by its nonce before anything is
@@ -117,7 +117,7 @@ const FACILITATOR_TIMEOUT_MS = 50_000;
 const LEASE_MARGIN_SECONDS = 10;
 /** After a facilitator call that did not settle, the next one waits this long. */
 export const RETRY_SECONDS = 10;
-/** The longest window a payload this seller accepts can have (profile section 4). */
+/** The longest window a payload this seller accepts can have (x402-annon.md section 4). */
 const MAX_WINDOW_SECONDS = 240;
 
 const canonical = (v: unknown): unknown =>
@@ -156,10 +156,10 @@ async function blockAt(url: string, t: number): Promise<number> {
  * `taken_down` (410) first, whatever the state; `bad_requirements`, `bad_signature` for a payload
  * whose purchase terms are wrong; `payment_id_conflict` (409); the refusals of `verifyPayment` for
  * a new payment (`sales_stopped`, a deadline too long, a changed offer); `payment_expired` for a
- * purchase that can no longer be paid; `settlement_processing` when it is under way or unclear: send
+ * purchase that can no longer be paid; `settlement_pending` when it is under way or unclear: send
  * the same payload again later.
  */
-/** Where `settle` keeps a purchase: its identity (profile section 10). */
+/** Where `settle` keeps a purchase: its identity (x402-annon.md section 10). */
 export const purchaseRecordKey = (usdc: string, payer: string, nonce: string) =>
   `annon/seller/purchase/${BASE_NETWORK}/${usdc}/${payer}/${nonce}`;
 
@@ -225,7 +225,7 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
     if (r?.state === 'settled' || (r?.state === 'submitted' && r.transaction)) return answerOf(r);
     if (r?.state === 'unpaid')
       return fail('payment_expired', 'this purchase can no longer be paid');
-    return fail('settlement_processing', `${why}; send it again shortly`);
+    return fail('settlement_pending', `${why}; send it again shortly`);
   };
   /** After a write that lost: the record that won decides the answer. */
   const winner = async () => answerFrom((await o.store.load(key)) as SellerPurchase | null);
@@ -262,7 +262,7 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
     if (r?.state === 'unpaid')
       return fail('payment_expired', 'this purchase can no longer be paid');
     // A purchase already recorded is settled with its recorded payload, never another one: another
-    // payload of the same nonce has not passed the checks of a new payment (profile section 10).
+    // payload of the same nonce has not passed the checks of a new payment (x402-annon.md section 10).
     const base: SellerPurchase = {
       kind: 'purchase',
       id: key,

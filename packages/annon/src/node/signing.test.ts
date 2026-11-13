@@ -242,28 +242,32 @@ it('retries a lost create response with identical id and payload, signing once',
   expect(approve).toHaveBeenCalledTimes(1);
 });
 
-it('returns the known transaction hash when finalized verification is unavailable', async () => {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () => {
-      throw new Error('offline');
-    }),
-  );
-  try {
-    const q = signingRequest('near.signTransaction', 'near:testnet', 'bot.near', {
-      receiverId: 'token.near',
-      method: 'ft_transfer_call',
-      args: {},
-      gas: '150000000000000',
-      deposit: '1',
-    });
-    await expect(
-      verifySigningResult(q, { txHash: 'KNOWN-HASH' }, 'https://fake.rpc'),
-    ).rejects.toMatchObject({ code: 'transaction_uncertain', txHash: 'KNOWN-HASH' });
-  } finally {
-    vi.unstubAllGlobals();
-  }
-});
+it.each(['offline', 'rate limited'])(
+  'returns the known transaction hash when finalized verification is %s',
+  async (mode) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        if (mode === 'rate limited') return new Response('', { status: 429 });
+        throw new Error('offline');
+      }),
+    );
+    try {
+      const q = signingRequest('near.signTransaction', 'near:testnet', 'bot.near', {
+        receiverId: 'token.near',
+        method: 'ft_transfer_call',
+        args: {},
+        gas: '150000000000000',
+        deposit: '1',
+      });
+      await expect(
+        verifySigningResult(q, { txHash: 'KNOWN-HASH' }, 'https://fake.rpc'),
+      ).rejects.toMatchObject({ code: 'transaction_uncertain', txHash: 'KNOWN-HASH' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  },
+);
 
 it.each(['receiver', 'method', 'args', 'gas', 'deposit', 'failed', 'signer', 'hash', 'actions'])(
   'rejects definite finalized %s mismatches without uncertain evidence',

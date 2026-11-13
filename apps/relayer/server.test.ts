@@ -400,7 +400,6 @@ describe.runIf(process.env.ANNON_TEST_CONTAINER === '1')(
           [
             'install',
             '--frozen-lockfile',
-            '--prod',
             '--filter',
             '@defdone/annon',
             '--filter',
@@ -417,6 +416,42 @@ describe.runIf(process.env.ANNON_TEST_CONTAINER === '1')(
         );
         expect(install.status, install.stdout + install.stderr).toBe(0);
         const app = join(dir, 'apps/relayer');
+        const build = spawnSync(
+          process.execPath,
+          ['--no-warnings', 'apps/relayer/build-runtime.ts'],
+          {
+            cwd: dir,
+            encoding: 'utf8',
+            timeout: 30000,
+            env: { PATH: process.env.PATH },
+          },
+        );
+        expect(build.status, build.stdout + build.stderr).toBe(0);
+        // Install the same production filters used by the runtime stage, then discard build inputs.
+        const production = spawnSync(
+          'pnpm',
+          [
+            'install',
+            '--frozen-lockfile',
+            '--prod',
+            '--filter',
+            '@defdone/annon',
+            '--filter',
+            '@defdone/annon-relayer',
+            '--store-dir',
+            join(dir, 'store'),
+          ],
+          {
+            cwd: dir,
+            encoding: 'utf8',
+            timeout: 120000,
+            env: { PATH: process.env.PATH, CI: 'true', npm_config_cache: join(dir, 'npm-cache') },
+          },
+        );
+        expect(production.status, production.stdout + production.stderr).toBe(0);
+        await rm(join(dir, 'packages/annon/src'), { recursive: true });
+        await rm(join(app, 'build-runtime.ts'));
+
         const noDev = spawnSync(
           process.execPath,
           [
@@ -469,7 +504,7 @@ describe('adapter to relayer boundary without a signing transport', () => {
   it.each([
     'outcome',
     'lost-post-pending',
-    'legacy-duplicate',
+    'duplicate',
     'rate-limited-seconds',
     'rate-limited-date',
   ] as const)(
@@ -484,14 +519,15 @@ describe('adapter to relayer boundary without a signing transport', () => {
       let lookups = 0;
       const send = vi.fn(async (input: unknown) => {
         const req = canonicalRequest(input);
-        await checkRelay(req, c);
+        await checkRelay(req, c as unknown as Parameters<typeof checkRelay>[1]);
         wire = contractArgs(req);
         return { txHash: 'H' };
       });
       const fetcher = vi.fn<typeof fetch>(async (url, init) => {
         if (String(url).endsWith('/v1/relay')) {
           httpRequests++;
-          if (mode !== 'outcome' && httpRequests === 1) throw new Error('POST timed out');
+          if (mode !== 'outcome' && httpRequests === 1)
+            throw new DOMException('POST timed out', 'TimeoutError');
           if (mode.startsWith('rate-limited') && httpRequests === 2)
             return Response.json(
               { error: 'rate_limited' },
@@ -505,7 +541,7 @@ describe('adapter to relayer boundary without a signing transport', () => {
                 },
               },
             );
-          if (mode === 'legacy-duplicate' && httpRequests === 2)
+          if (mode === 'duplicate' && httpRequests === 2)
             return Response.json({ error: 'duplicate' }, { status: 409 });
           if (mode === 'lost-post-pending' && httpRequests === 2)
             return Response.json({ pending: true, retryAfterMs: 5000 }, { status: 202 });

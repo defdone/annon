@@ -24,7 +24,7 @@ const withSource = (value: unknown) =>
     purchase: { route: 'near-usdc' },
     quote: {},
     terms: { price: '200000', usdc: 'test-token', network: 'near:sandbox' },
-    payment: { source: value },
+    payment: { route: '1click', source: value },
   }) as unknown as PurchaseRecord;
 
 it.each(

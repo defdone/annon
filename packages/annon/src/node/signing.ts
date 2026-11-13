@@ -4,8 +4,10 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { base58, base64 } from '@scure/base';
 import { decodeSignedTransaction } from 'near-api-js';
 import { verifyTypedData } from 'viem';
+import { isTransient } from '../errors.js';
 import { type NearMessage, type NearSignedMessage, verifyNearMessage } from '../near/nep413.js';
-import { isFullAccessKey, NearError, type RpcReply, readOutcome, rpcReply } from '../near/rpc.js';
+import { isFullAccessKey, type RpcReply, readOutcome, rpcReply } from '../near/rpc.js';
+import { sleep } from '../net/retry.js';
 import { parseIdentity, verifyAuthorization } from '../settle-near/identity.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
 export type Operation =
@@ -153,8 +155,7 @@ export async function verifySigningResult(
       wait_until: 'FINAL',
     });
   } catch (error) {
-    if (error instanceof NearError && error.code === 'transport')
-      throw new TransactionUncertain(r.txHash);
+    if (isTransient(error)) throw new TransactionUncertain(r.txHash);
     throw error;
   }
   const t = reply.result as {
@@ -247,7 +248,7 @@ export function remoteSigner(o: {
           Date.now() >= q.expiresAt
         )
           throw error;
-        await (o.wait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(1000);
+        await (o.wait ?? sleep)(1000);
       }
     }
     for (;;) {
@@ -259,7 +260,7 @@ export function remoteSigner(o: {
         return r.result;
       }
       if (r.status !== 'pending') throw new Error('invalid signer status');
-      await (o.wait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(1000);
+      await (o.wait ?? sleep)(1000);
       r = await call(`/v1/requests/${encodeURIComponent(q.id)}`);
     }
   };

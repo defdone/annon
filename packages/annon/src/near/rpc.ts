@@ -1,3 +1,4 @@
+import { AnnonError } from '../errors.js';
 import { type Identity, parseIdentity } from '../settle-near/identity.js';
 import { buyerKey } from '../settle-near/purchase.js';
 import { type Terms, termsHash } from '../settle-near/terms.js';
@@ -14,22 +15,24 @@ import { type Terms, termsHash } from '../settle-near/terms.js';
 export type NearErrorCode =
   /** The RPC couldn't be reached or answered something malformed; safe to retry. */
   | 'transport'
+  | 'near_rpc_rate_limited'
   /** The contract refused (a panic); retrying the same call gives the same answer. */
   | 'refused';
 
-export class NearError extends Error {
+export class NearError extends AnnonError {
   readonly code: NearErrorCode;
   constructor(code: NearErrorCode, message: string = code) {
-    super(message);
+    super(code, message);
     this.code = code;
     this.name = 'NearError';
   }
 }
 
-/** A typed rate limit that keeps the transport code used by SDK callers. */
+/** A typed RPC rate limit; callers retry through isTransient. */
 export class NearRpcRateLimited extends NearError {
   constructor(message = 'NEAR RPC rate limited (429)') {
-    super('transport', message);
+    super('near_rpc_rate_limited', message);
+    this.name = 'NearRpcRateLimited';
   }
 }
 
@@ -584,4 +587,9 @@ export async function fileStorageBalance(
     available: BigInt(value.available as string),
     admissionRequirement: BigInt(value.admission_requirement as string),
   };
+}
+
+/** Contract storage refusal diagnostics, shared by transaction transports. */
+export function isStorageRequired(reason: unknown): boolean {
+  return typeof reason === 'string' && /prepaid|storage balance|storage[_ ]deposit/i.test(reason);
 }

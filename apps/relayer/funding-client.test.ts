@@ -7,13 +7,12 @@ const { privateKeyToAccount } = createRequire(
   new URL('../../packages/annon/package.json', import.meta.url),
 )('viem/accounts');
 
+import { RelayLedger } from '@defdone/annon/relay';
 import { afterEach, expect, it, vi } from 'vitest';
 import * as rpc from '../../packages/annon/src/near/rpc.ts';
 import { fileFundingText } from '../../packages/annon/src/near/texts.ts';
 import { createAdapter } from '../../packages/annon/src/node/adapter.ts';
 import { memoryStore } from '../../packages/annon/src/pay/store.ts';
-import { RelayLedger } from '../../packages/annon/src/relay/ledger.ts';
-import { resetRelayState } from '../../packages/annon/src/relay/relay.ts';
 import { termsHash } from '../../packages/annon/src/settle-near/terms.ts';
 import { terms as initial, must } from '../../packages/annon/test/fixtures.ts';
 import { type Config, handle } from './server.ts';
@@ -30,7 +29,6 @@ vi.mock('../../packages/annon/node_modules/near-api-js/lib/index.js', async (ori
 }));
 afterEach(() => {
   vi.restoreAllMocks();
-  resetRelayState();
 });
 it('CLI funding reaches the real relayer with the exact seller-signed envelope and stripped contract args', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'annon-funding-client-'));

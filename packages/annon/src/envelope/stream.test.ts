@@ -8,7 +8,7 @@ import { pay2Boundaries } from '../../test/pay2-boundaries.js';
 import { bitCases, sampleCases } from '../../test/sampling.js';
 import { type Listing, open, Pay2Error, sealWithKey } from './pay2.js';
 import { blobSource, openTo, prepareOpen, prepareSeal } from './replay.js';
-import { openStream, sealStream, sealStreamWithKey } from './stream.js';
+import { openStream, SourceChangedError, sealStream, sealStreamWithKey } from './stream.js';
 
 interface Input {
   K: string;
@@ -341,7 +341,9 @@ describe('streaming sealing', () => {
     }
     const s = await sealStream(source(data), data.length, options);
     for (const replay of [data.subarray(0, data.length - 1), new Uint8Array([...data, 0])]) {
-      await expect(collect(await s.finish(source(replay), finishOpts))).rejects.toThrow(RangeError);
+      await expect(collect(await s.finish(source(replay), finishOpts))).rejects.toThrow(
+        SourceChangedError,
+      );
     }
     const changed = data.slice();
     changed[0] = (changed[0] ?? 0) ^ 1;

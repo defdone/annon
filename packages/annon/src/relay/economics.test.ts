@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { must, terms } from '../../test/fixtures.js';
-import { applyProtocolFee, checkProtocolFee, requiredFeeBps } from './fees.js';
+import { applySponsoredFee, checkProtocolFee, requiredFeeBps } from './fees.js';
 
 describe('sponsored protocol economics', () => {
   const treasury = { kind: 'near', id: 'treasury.test' } as const;
@@ -12,7 +12,7 @@ describe('sponsored protocol economics', () => {
     expect(requiredFeeBps('100000', { fixed: '0', bps: 0 })).toBe(0);
   });
   it('scales seller shares and gives the original remainder recipient the rounding remainder', () => {
-    const split = applyProtocolFee(terms.near, fee, false);
+    const split = applySponsoredFee(terms.near, fee);
     expect(split.recipients.reduce((n, r) => n + r.bps, 0)).toBe(10000);
     expect(split.recipients.find((r) => r.identity.id === treasury.id)?.bps).toBe(1600);
     expect(
@@ -24,7 +24,7 @@ describe('sponsored protocol economics', () => {
     expect(() => checkProtocolFee({ ...terms, base: null }, fee)).toThrow();
   });
   it('refuses missing route treasury, excessive fees and more than eight recipients', () => {
-    expect(() => applyProtocolFee(terms.near, fee, true)).toThrow();
+    expect(() => applySponsoredFee(terms.near, fee, terms.near.price)).toThrow();
     expect(() => requiredFeeBps('1', fee)).toThrow();
     const eight = {
       ...terms.near,
@@ -34,12 +34,11 @@ describe('sponsored protocol economics', () => {
       })),
       remainder: 0,
     };
-    expect(() => applyProtocolFee(eight, fee, false)).toThrow();
+    expect(() => applySponsoredFee(eight, fee)).toThrow();
   });
 });
 
 it('uses one EVM treasury at the larger route requirement', async () => {
-  const { applySponsoredFee } = await import('./fees.js');
   const treasuryNear = { kind: 'evm', id: `0x${'44'.repeat(20)}` } as const;
   const treasuryEvm = { kind: 'evm', id: `0x${'55'.repeat(20)}` } as const;
   const fee = { fixed: '30000', bps: 100, treasuryNear, treasuryEvm };
@@ -64,17 +63,17 @@ it('allocates proportional bps rounding to the original first recipient after ca
     ],
     remainder: 0,
   };
-  const split = applyProtocolFee(
-    near,
-    { fixed: '30000', bps: 100, treasuryNear: treasury, treasuryEvm: treasury },
-    false,
-  );
+  const split = applySponsoredFee(near, {
+    fixed: '30000',
+    bps: 100,
+    treasuryNear: treasury,
+    treasuryEvm: treasury,
+  });
   expect(split.recipients.map((r) => r.bps)).toEqual([6437, 344, 3219]);
   expect(split.remainder).toBe(2);
 });
 
 it('uses an EVM treasury for NEAR-only files when no NEAR treasury is configured', async () => {
-  const { applySponsoredFee } = await import('./fees.js');
   const treasuryEvm = { kind: 'evm' as const, id: `0x${'55'.repeat(20)}` };
   const fee = { fixed: '30000', bps: 100, treasuryNear: null, treasuryEvm };
   const near = applySponsoredFee(terms.near, fee);
@@ -93,10 +92,11 @@ it('keeps a treasury-first split from receiving additional rounding', () => {
     ],
     remainder: 0,
   };
-  const split = applyProtocolFee(
-    near,
-    { fixed: '30000', bps: 100, treasuryNear: treasury, treasuryEvm: treasury },
-    false,
-  );
+  const split = applySponsoredFee(near, {
+    fixed: '30000',
+    bps: 100,
+    treasuryNear: treasury,
+    treasuryEvm: treasury,
+  });
   expect(split.recipients[split.remainder]?.identity).toEqual(seller);
 });

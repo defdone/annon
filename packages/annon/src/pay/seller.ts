@@ -40,7 +40,7 @@ export interface OfferOptions {
    * grant there to get it again (specs/download.md). https only.
    */
   url: string;
-  /** URL of the complete PAY2 header, public (profile section 7): the client checks it first. */
+  /** URL of the complete PAY2 header, public (x402-annon.md section 7): the client checks it first. */
   header: string;
   /** The seller publishes the body too: the client then checks the whole file before signing. */
   public?: boolean;
@@ -49,7 +49,7 @@ export interface OfferOptions {
   paymentMinValiditySeconds?: number;
   /** The seller app's x402 builder code (`^[a-z0-9_]{1,32}$`), declared as `builder-code`. */
   appCode?: string;
-  /** Describes the file for x402 discovery (`bazaar`, profile section 11). */
+  /** Describes the file for x402 discovery (`bazaar`, x402-annon.md section 11). */
   discovery?: {
     description?: string;
     mimeType?: string;
@@ -131,7 +131,7 @@ const discoveryDeclaration = () => ({
  * `sales_stopped` or `taken_down` for a file that must not be offered (answer 410), and
  * `unknown_file` for one that isn't registered.
  */
-export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
+async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
   const file = await getFile(o.nearRpc, o.contractId, o.fileId);
   if (!file) return fail('unknown_file', 'the file is not registered on the Annon contract');
   if (file.takenDown) fail('taken_down', `the file was taken down (${file.takenDown})`);
@@ -148,7 +148,7 @@ export async function offerFor(o: OfferOptions): Promise<PaymentRequired> {
 
 /**
  * The `PaymentRequired` for a registration already read: the offer while sales are open, none once
- * they are stopped (profile section 2: buyers still prove their purchase grant to download).
+ * they are stopped: buyers still prove their purchase grant to download.
  */
 export function paymentRequired(o: OfferOptions, file: FileInfo, usdc: string): PaymentRequired {
   // An Annon client won't sign without the header, and the file itself goes over https only
@@ -234,7 +234,7 @@ export function paymentRequired(o: OfferOptions, file: FileInfo, usdc: string): 
 }
 
 /** JSON Schema of `extensions.annon.info` (the buyer adds `buyerKey`). */
-export const ANNON_SCHEMA = {
+const ANNON_SCHEMA = {
   $schema: 'https://json-schema.org/draft/2020-12/schema',
   type: 'object',
   required: ['version', 'network', 'contract', 'fileId'],
@@ -342,7 +342,7 @@ function paymentIdOf(p: Payload): string | undefined {
 }
 
 /**
- * What never changes for a purchase (profile section 10): the authorization signed by `from`, for
+ * What never changes for a purchase (x402-annon.md section 10): the authorization signed by `from`, for
  * the Annon nonce of this file and the buyer key, paying `offer` exactly. Shared by a new payment
  * (`checkPayment`) and by a retry of one already settling (`settle`).
  */
@@ -402,7 +402,7 @@ function checkSigned(p: Payload, contract: string, fileId: string, offer: Offer)
 
 /**
  * The purchase terms of a payload against the registration and the contract's configuration,
- * without the seller's settings, the sale status or the deadline (profile section 10, order of
+ * without the seller's settings, the sale status or the deadline (x402-annon.md section 10, order of
  * checks): what a retry of a payment already settling must still pass.
  */
 export function checkTerms(
@@ -448,7 +448,7 @@ export function checkTerms(
 
 /**
  * @internal Use `verifyPayment`: this checks against a `PaymentRequired` that may be stale.
- * Checks `PAYMENT-SIGNATURE` against the `PaymentRequired` this server sent (profile section 3):
+ * Checks `PAYMENT-SIGNATURE` against the `PaymentRequired` this server sent (x402-annon.md section 3):
  * the offer echoed unchanged, the `annon` extension echoed with a valid buyer key, an advertised
  * `payment-identifier` echoed with a valid id, and the nonce the one that key gives. Run it before
  * settling: a payment with any other nonce would move the buyer's money and never release the key.
@@ -500,7 +500,7 @@ export function checkPayment(
   return { ...c, ...(paymentId ? { paymentId } : {}) };
 }
 
-/** builder-code (profile section 11): the declared app code and every declared service code echoed. */
+/** builder-code (x402-annon.md section 11): the declared app code and every declared service code echoed. */
 function checkBuilderCode(pr: PaymentRequired, p: Payload) {
   const declared = (pr.extensions?.[BUILDER_CODE] as { info?: { a?: unknown; s?: unknown } })?.info;
   const sent = p.extensions?.[BUILDER_CODE];
@@ -540,7 +540,7 @@ export function forFacilitator(header: string, offer: Offer) {
   if (!p) return fail('bad_requirements', 'PAYMENT-SIGNATURE is not base64 JSON');
   const paymentRequirements = { ...offer, scheme: 'exact' };
   // bazaar stays out: a facilitator would catalog the offer renamed `exact`, which an ordinary x402
-  // client cannot pay (profile section 11).
+  // client cannot pay (x402-annon.md section 11).
   const { [BAZAAR]: _, ...extensions } = (p.extensions ?? {}) as Record<string, unknown>;
   return {
     x402Version: 2 as const,

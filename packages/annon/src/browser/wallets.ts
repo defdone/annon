@@ -1,5 +1,6 @@
 /** Page-owned providers adapted to Annon wallets. No wallet packages or browser globals. */
 import { base58, base64 } from '@scure/base';
+import { AnnonError } from '../errors.js';
 import { type NearMessage, type NearSignedMessage, proveNearControl } from '../near/nep413.js';
 import { BASE_CHAIN_ID, digest, signer, type TypedData } from '../pay/eip3009.js';
 import { hex } from '../settle-near/codec.js';
@@ -20,13 +21,13 @@ export type BrowserWalletErrorCode =
   | 'missing_method'
   | 'invalid_response'
   | 'wallet_error';
-export class BrowserWalletError extends Error {
+export class BrowserWalletError extends AnnonError {
   constructor(
     readonly code: BrowserWalletErrorCode,
     message: string,
     options?: ErrorOptions,
   ) {
-    super(message, options);
+    super(code, message, options);
     this.name = 'BrowserWalletError';
   }
 }
@@ -42,12 +43,7 @@ async function checked<T>(run: () => Promise<T>): Promise<T> {
     let cause: unknown = error;
     for (let depth = 0; depth < 8 && cause && typeof cause === 'object'; depth++) {
       const e = cause as { code?: unknown; message?: unknown; cause?: unknown };
-      if (
-        e.code === 4001 ||
-        e.code === 'ACTION_REJECTED' ||
-        (typeof e.message === 'string' &&
-          /user (rejected|denied)|request rejected|user cancelled/i.test(e.message))
-      )
+      if (e.code === 4001 || e.code === 'ACTION_REJECTED')
         throw new BrowserWalletError('rejected', 'The wallet request was rejected.', {
           cause: error,
         });
@@ -111,7 +107,7 @@ export function browserEvmWallet(provider: InjectedEvmProvider, address: string)
         try {
           auth = await underlying.authorize(text);
         } catch (error) {
-          if (error instanceof Error && /signature/.test(error.message))
+          if (error instanceof AnnonError && error.code === 'invalid_signature')
             fail('invalid_signature', 'The wallet returned an invalid recovery signature.');
           throw error;
         }
@@ -282,7 +278,7 @@ export function browserNearWallet(
           });
         } catch (error) {
           if (error instanceof BrowserWalletError) throw error;
-          if (error instanceof Error && /signature|key type|full-access/.test(error.message))
+          if (error instanceof AnnonError && error.code === 'invalid_signature')
             fail('invalid_signature', 'The wallet returned an invalid NEP-413 ownership proof.');
           throw error;
         }

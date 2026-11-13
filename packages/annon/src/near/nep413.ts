@@ -2,6 +2,7 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { base58, base64 } from '@scure/base';
+import { AnnonError } from '../errors.js';
 import { account, concat, le, str } from '../settle-near/codec.js';
 import { isFullAccessKey } from './rpc.js';
 
@@ -61,7 +62,10 @@ export async function verifyNearMessage(
 ): Promise<void> {
   const hash = nep413Hash(payload);
   if (!result || result.accountId !== accountId || !result.publicKey.startsWith('ed25519:'))
-    throw new Error('NEP-413 proof belongs to another account or key type');
+    throw new AnnonError(
+      'invalid_signature',
+      'NEP-413 proof belongs to another account or key type',
+    );
   const key = base58.decode(result.publicKey.slice(8));
   const signature = base64.decode(result.signature);
   if (
@@ -69,7 +73,7 @@ export async function verifyNearMessage(
     signature.length !== 64 ||
     !ed25519.verify(signature, hash, key, { zip215: false })
   )
-    throw new Error('invalid NEP-413 recovery signature');
+    throw new AnnonError('invalid_signature', 'invalid NEP-413 recovery signature');
   if (!(await isFullAccessKey(nearRpc, accountId, result.publicKey)))
-    throw new Error('NEP-413 recovery requires a full-access key');
+    throw new AnnonError('invalid_signature', 'NEP-413 recovery requires a full-access key');
 }

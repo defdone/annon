@@ -41,7 +41,7 @@ it('retains prepaid reservations beyond two minutes until a bound FINAL outcome'
   expect(await ledger.pendingStorage(9999999)).toBe(100n);
 });
 
-it.each(['counter', 'storage'] as const)(
+it.each(['counter', 'storage', 'funding baseline'] as const)(
   'fails closed on a corrupt negative %s reservation',
   async (kind) => {
     const store = memoryStore<RelayState>(),
@@ -53,7 +53,10 @@ it.each(['counter', 'storage'] as const)(
     if (kind === 'counter') next.counters['0|all'] = '-1';
     else {
       const op = next.operations.op;
-      if (op) op.storage = '-100';
+      if (op) {
+        if (kind === 'funding baseline') op.fundingBalanceBefore = '-1';
+        else op.storage = '-100';
+      }
     }
     await store.compareAndSet('scope', old, next);
     await expect(ledger.read()).rejects.toMatchObject({ code: 'unavailable' });

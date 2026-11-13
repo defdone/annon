@@ -1,7 +1,9 @@
+import type { OneClickQuote } from '../oneclick/oneclick.js';
+import type { BuyRoute } from '../routes.js';
 import type { Identity } from '../settle-near/identity.js';
 import type { Purchase } from '../settle-near/purchase.js';
 /**
- * A purchase on the buyer's side (profile section 5): what is recorded before the wallet signs,
+ * A purchase on the buyer's side (x402-annon.md section 5): what is recorded before the wallet signs,
  * and the signed payload recorded before anything else sees it. Records are addressed by purchase commitment; the original grant secret remains available after acceptance.
  */
 
@@ -23,7 +25,7 @@ export interface PurchaseTerms {
   buyerKey: string;
   /** base_nonce for the purchase commitment. */
   nonce: string;
-  /** `SHA256` of the PAY2 header checked before signing (profile section 7), 0x and lowercase. */
+  /** `SHA256` of the PAY2 header checked before signing (x402-annon.md section 7), 0x and lowercase. */
   headerHash: string;
   cipherHash: string;
   moderator: string | null;
@@ -66,22 +68,22 @@ export interface PaymentSummary {
   amountBaseUnits: string;
   asset: { symbol: 'USDC'; id: string };
   network: string;
-  route: 'near' | 'base' | '1click';
+  route: BuyRoute;
   source?: SourcePayment;
 }
 
 export interface PurchaseRecord extends Versioned {
   schemaVersion: 2;
-  /** Durable ownership proof checkpoint. Missing on older receipts. */
-  recoveryProved?: boolean;
-  /** Optional for older records. Source details are the reviewed 1Click quote. */
-  payment?: PaymentSummary;
+  /** Durable ownership proof checkpoint. */
+  recoveryProved: boolean;
+  /** Source details are the reviewed 1Click quote. */
+  payment: PaymentSummary;
   nearSubmission?: { state: 'uncertain'; txHash: string };
   paymentState?: 'expired' | 'canceled';
   purchase: Purchase;
   message: string;
   buyerSecret: string;
-  quote: unknown;
+  quote: OneClickQuote | null;
   recovery: Identity;
   checkedHeaderHash: string;
   terms: PurchaseTerms;

@@ -1,4 +1,5 @@
 /** Downloads are authorized only by a final purchase grant (§9). */
+import { isTransient } from '../errors.js';
 import { getFile, getGrant, getPurchase } from '../near/rpc.js';
 import { PayError } from '../pay/base.js';
 import { paymentRequired } from '../pay/seller.js';
@@ -72,7 +73,7 @@ export async function serveFile(req: HostRequest, o: FileHostOptions): Promise<H
       } catch {
         // Diagnostics must not change the payment response.
       }
-      const code = e.code === 'settlement_processing' ? 'settlement_pending' : e.code;
+      const code = e.code;
       const retry =
         e.retryAfterSeconds ??
         (code === 'settlement_pending' || code === 'facilitator_busy' || code === 'unavailable'
@@ -88,7 +89,7 @@ export async function serveFile(req: HostRequest, o: FileHostOptions): Promise<H
               code === 'unavailable' ||
               code === 'relayer_unavailable'
             ? 503
-            : code === 'transport'
+            : isTransient(e)
               ? 502
               : code === 'payment_id_conflict'
                 ? 409

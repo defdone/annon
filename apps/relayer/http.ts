@@ -1,5 +1,5 @@
 /** Relayer settings for the shared exact-origin CORS policy. */
-import { corsPolicy, DEFAULT_ORIGINS } from '../../packages/annon/src/download/http.ts';
+import { corsPolicy, DEFAULT_ORIGINS } from '@defdone/annon/download/http';
 export interface CorsSettings {
   allow?: string[];
   previews?: string[];

@@ -1,5 +1,6 @@
+import { parseIdentity } from '@defdone/annon';
 /**
- * The public Annon relayer: an HTTP front for `relay` (packages/annon/src/relay). Relay admission
+ * The public Annon relayer: an HTTP front for `@defdone/annon/relay`. Relay admission
  * persists sponsorship, admissions and optional keeper work on mounted storage. Requests are checked
  * and sent, and one log line records each response on stdout.
  *
@@ -15,33 +16,30 @@
 import { mkdir } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { corsHeaders, preflight } from '../../packages/annon/src/download/http.ts';
-import { getConfig, getFile, rpcReply, view } from '../../packages/annon/src/near/rpc.ts';
-import { clientKey } from '../../packages/annon/src/net/ip.ts';
-import type { BudgetRecord } from '../../packages/annon/src/node/budget.ts';
-import { fileStore, ownDirectory } from '../../packages/annon/src/pay/store-node.ts';
-import { keeperBalance } from '../../packages/annon/src/relay/keeper-balance.ts';
-import type {
-  KeeperRecord,
-  KeepOptions,
-  RefundSource,
-} from '../../packages/annon/src/relay/keeper-runner.ts';
-import { RelayLedger, type RelayState } from '../../packages/annon/src/relay/ledger.ts';
+import { corsHeaders, preflight } from '@defdone/annon/download/http';
+import { getConfig, getFile, rpcReply, view } from '@defdone/annon/near/rpc';
+import type { BudgetRecord } from '@defdone/annon/node';
+import { fileStore, ownDirectory } from '@defdone/annon/pay/store-node';
+import type { KeeperRecord, KeepOptions, RefundSource } from '@defdone/annon/relay';
 import {
+  baseEligibility,
   type CheckOptions,
+  clientKey,
   deferPaidUnlock,
   keep,
+  keeperBalance,
+  NEAR_USDC,
   RelayError,
   type RelayErrorCode,
+  RelayLedger,
+  type RelayState,
   reconcileRelayStorage,
   relay,
+  relayLimits,
   relayStatus,
   retryPaidUnlocks,
   type Sender,
-} from '../../packages/annon/src/relay/relay.ts';
-import { baseEligibility, relayLimits } from '../../packages/annon/src/relay/sponsorship.ts';
-import { identityJson, parseIdentity } from '../../packages/annon/src/settle-near/identity.ts';
-import { NEAR_USDC } from '../../packages/annon/src/settle-near/terms.ts';
+} from '@defdone/annon/relay';
 import {
   type MonitorRecord,
   type MonitorSettings,
@@ -1113,7 +1111,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
     .filter(Boolean)
     .map((s) => {
       const separator = s.indexOf(':');
-      return identityJson(
+      return JSON.stringify(
         parseIdentity({ kind: s.slice(0, separator), id: s.slice(separator + 1) }),
       );
     });
@@ -1269,7 +1267,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
           treasuryEvm,
         },
         maxDeadlineSeconds: count('MAX_DEADLINE_SECONDS', '600'),
-        claimsPerPurchase: count('CLAIMS_PER_GRANT_DAY', '3'),
+        claimsPerGrant: count('CLAIMS_PER_GRANT_DAY', '3'),
         registrationsPerSeller: count('REGISTRATIONS_PER_SELLER_DAY', '5'),
         reopensPerWalletFile: count('REOPENS_PER_PURCHASE_DAY', '10'),
         holdMs: count('HOLD_SECONDS', '900') * 1000,

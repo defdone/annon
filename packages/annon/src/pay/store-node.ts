@@ -2,9 +2,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { link, mkdir, open, readdir, readFile, rename, rmdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { sleep } from '../net/retry.js';
 import { checkNext, holds, type Store, type Versioned } from './store.js';
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const alive = (pid: number) => {
   try {

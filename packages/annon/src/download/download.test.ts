@@ -427,7 +427,7 @@ describe('download (buyer)', () => {
         ...quick,
       }),
     );
-    expect(stuck.error).toBe('settling');
+    expect(stuck.error).toBe('settlement_pending');
   });
 
   it('stops everything when cancelled, even while the first request is pending', async () => {

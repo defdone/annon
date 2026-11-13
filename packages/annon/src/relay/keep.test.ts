@@ -5,7 +5,8 @@ import type { BudgetRecord } from '../node/budget.js';
 import { memoryStore } from '../pay/store.js';
 import { termsHash } from '../settle-near/terms.js';
 import type { KeeperRecord } from './keeper-runner.js';
-import { keep, resetRelayState } from './relay.js';
+
+let { keep } = await import('./relay.js');
 
 it('near-api-js decodes blockHash as a plain array, which the keeper must convert', async () => {
   const real = await vi.importActual<typeof import('near-api-js')>('near-api-js');
@@ -83,8 +84,9 @@ const opts = () => ({
   now: () => 100000,
   jitter: () => 0.5,
 });
-beforeEach(() => {
-  resetRelayState();
+beforeEach(async () => {
+  vi.resetModules();
+  ({ keep } = await import('./relay.js'));
   created.mockReset();
   let nonce = 0;
   created.mockImplementation(async () => {
@@ -710,7 +712,8 @@ it('keeps InvalidNonce and unrecognized invalid-transaction replies uncertain un
     { cause: { name: 'INVALID_TRANSACTION' } },
     { data: { TxExecutionError: { InvalidTxError: 'FutureVariant' } } },
   ]) {
-    resetRelayState();
+    vi.resetModules();
+    ({ keep } = await import('./relay.js'));
     const o = opts();
     unknown = true;
     sendRejection = error;

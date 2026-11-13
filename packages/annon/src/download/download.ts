@@ -1,5 +1,6 @@
 /** Download a final purchase grant with Range retries and checked chunks. */
 import { type Bytes, copy, equal, parseHeader, sha256, TAG } from '../envelope/pay2.js';
+import { AnnonError } from '../errors.js';
 import { HTTP_RETRY_MAX_WAIT_SECONDS, MAX_PAY2_BYTES } from '../limits.js';
 import { parseRetryAfterMs, sleep } from '../net/retry.js';
 import { BUYER_PROOF_HEADER, purchaseProof, sameResource } from './proof.js';
@@ -9,12 +10,12 @@ export type DownloadErrorCode =
   /** The host did not accept the payment or purchase grant proof. */
   | 'not_authorized'
   /** The payment is still settling after every retry; send the same payload again later. */
-  | 'settling'
+  | 'settlement_pending'
   /** The bytes are not the file whose header was checked before paying. */
   | 'file_mismatch'
   /** The caller cancelled the download. */
   | 'cancelled'
-  /** In-memory browser opening is limited; use the CLI for larger files. */
+  /** Encrypted downloads enforce the shared PAY2 size limit. */
   | 'too_large'
   | 'download_limited'
   | 'download_in_progress'
@@ -23,13 +24,13 @@ export type DownloadErrorCode =
   | 'not_sponsored'
   | 'relayer_unavailable';
 
-export class DownloadError extends Error {
+export class DownloadError extends AnnonError {
   readonly code: DownloadErrorCode;
   retryAfterSeconds?: number;
   purchaseId?: string;
   fileId?: string;
   constructor(code: DownloadErrorCode, message: string = code) {
-    super(message);
+    super(code, message);
     this.code = code;
     this.name = 'DownloadError';
   }
@@ -158,7 +159,7 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   const get = (headers: Record<string, string>, start: number) => {
     live();
     // No redirects: one could move the request to plain HTTP or another host.
-    // No cookies either: the grant proof travels in `Annon-Buyer-Proof` (profile section 9).
+    // No cookies either: the grant proof travels in `Annon-Buyer-Proof` (x402-annon.md section 9).
     return untilAbort(
       fetcher(o.url, {
         redirect: 'error',
@@ -197,7 +198,7 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
       }
       const pending = r.status === 503 || r.status === 402 || r.status === 429;
       let code: DownloadErrorCode =
-        r.status === 429 ? 'rate_limited' : r.status === 503 ? 'unavailable' : 'settling';
+        r.status === 429 ? 'rate_limited' : r.status === 503 ? 'unavailable' : 'settlement_pending';
       let seconds: number | undefined;
       if ([429, 403, 503].includes(r.status)) {
         // Read only a bounded control response, never an unbounded error document.

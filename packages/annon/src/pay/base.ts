@@ -1,3 +1,4 @@
+import { AnnonError } from '../errors.js';
 /**
  * Reading Base over JSON-RPC: what the buyer's checks need before signing (balance, code, the
  * head block), a dry run of the signed authorization against USDC itself, and, after the payment,
@@ -13,6 +14,8 @@ import type { PurchaseRecord } from './purchase.js';
 export type PayErrorCode =
   /** The RPC couldn't be reached or answered something malformed; safe to retry. */
   | 'transport'
+  | 'base_rpc_rate_limited'
+  | 'refused'
   /** The payment request or the registration don't allow this purchase; nothing was signed. */
   | 'storage_required'
   | 'unknown_file'
@@ -47,7 +50,6 @@ export type PayErrorCode =
   /** A seller: this payment id came with another payload before (HTTP 409). */
   | 'payment_id_conflict'
   /** A seller: the settlement of this purchase is under way or unclear; send the same payload later. */
-  | 'settlement_processing'
   | 'settlement_pending'
   | 'not_sponsored'
   | 'wrong_identity'
@@ -57,7 +59,7 @@ export type PayErrorCode =
   /** A seller: this purchase can no longer be paid (expired or canceled, finalized). */
   | 'payment_expired';
 
-export class PayError extends Error {
+export class PayError extends AnnonError {
   readonly code: PayErrorCode;
   /**
    * Set when the wallet had already signed: the authorization may have reached an RPC and could
@@ -66,16 +68,17 @@ export class PayError extends Error {
   purchase?: PurchaseRecord;
   retryAfterSeconds?: number;
   constructor(code: PayErrorCode, message: string = code) {
-    super(message);
+    super(code, message);
     this.code = code;
     this.name = 'PayError';
   }
 }
 
-/** A typed rate limit that keeps the transport code used by SDK callers. */
+/** A typed RPC rate limit; callers retry through isTransient. */
 export class BaseRpcRateLimited extends PayError {
   constructor() {
-    super('transport', 'Base RPC rate limited (429)');
+    super('base_rpc_rate_limited', 'Base RPC rate limited (429)');
+    this.name = 'BaseRpcRateLimited';
   }
 }
 
@@ -129,7 +132,11 @@ async function rpc(url: string, method: string, params: unknown[]) {
 
 async function ask(url: string, method: string, params: unknown[]): Promise<unknown> {
   const body = await rpc(url, method, params);
-  if (body.error) fail('transport', `Base RPC error: ${JSON.stringify(body.error)}`);
+  if (body.error)
+    fail(
+      method === 'eth_call' && body.error.code === 3 ? 'refused' : 'transport',
+      `Base RPC error: ${JSON.stringify(body.error)}`,
+    );
   if (body.result === undefined) return malformed(`no result for ${method}`);
   return body.result;
 }
@@ -255,7 +262,7 @@ export async function dryRun(url: string, usdc: string, a: Authorization, signat
   ]);
   if (body.error) {
     const message = String(body.error.message ?? '');
-    if (/revert/i.test(message)) {
+    if (body.error.code === 3) {
       fail('payment_rejected', `USDC refused the authorization: ${message}`);
     }
     fail('transport', `Base RPC error: ${JSON.stringify(body.error)}`);

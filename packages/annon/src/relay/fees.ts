@@ -80,21 +80,6 @@ function allocate(
   recipients.sort((a, b) => compare(encodeIdentity(a.identity), encodeIdentity(b.identity)));
   return { ...near, recipients, remainder: recipients.indexOf(rounding) };
 }
-export function applyProtocolFee(
-  near: NearTerms,
-  fee: ProtocolFee,
-  base: boolean,
-  price = near.price,
-): NearTerms {
-  if (base && requiredFeeBps(price, fee) && fee.treasuryEvm?.kind !== 'evm')
-    throw new TypeError('EVM treasury required');
-  return allocate(near, [
-    {
-      identity: base ? fee.treasuryEvm : (fee.treasuryNear ?? fee.treasuryEvm),
-      bps: requiredFeeBps(price, fee),
-    },
-  ]);
-}
 /** Base terms use one EVM treasury share satisfying the larger route requirement. */
 export function applySponsoredFee(
   near: NearTerms,

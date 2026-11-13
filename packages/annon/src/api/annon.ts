@@ -1,3 +1,5 @@
+import { AnnonError } from '../errors.js';
+import type { BuyRoute } from '../routes.js';
 /** Sell, buy, open, recover and stop, using the single purchase/grant settlement model. */
 
 import { DownloadError } from '../download/download.js';
@@ -27,6 +29,7 @@ import {
   getFile,
   getGrant,
   getPurchase,
+  isStorageRequired,
   purchasesOf,
   readOutcome,
   view,
@@ -59,6 +62,7 @@ import {
   type RecoveryRecord,
   type SellerKeyRecord,
   type SellRecord,
+  validatePurchaseRecord,
 } from '../pay/backup.js';
 import { balanceOf, hasCode, head, PayError } from '../pay/base.js';
 import { authorize, preflight } from '../pay/pay.js';
@@ -79,7 +83,7 @@ import {
   type ProtocolFee,
   protocolFeeAboveMax,
 } from '../relay/fees.js';
-import { account, bytes, compare, hex, network } from '../settle-near/codec.js';
+import { account, bytes, compare, hex, network, usdc } from '../settle-near/codec.js';
 import {
   type Authorization,
   encodeIdentity,
@@ -150,7 +154,7 @@ export interface SellOptions<T extends SellData = Uint8Array> {
     terms: Terms;
   }) => Promise<void>;
 }
-export type BuyRoute = 'near-usdc' | 'base-usdc' | 'oneclick';
+export type { BuyRoute } from '../routes.js';
 export interface BuyOptions {
   /** Explicit selection never falls back to another payment route. */
   route?: BuyRoute;
@@ -179,7 +183,7 @@ export interface BuyOptions {
   submitBase?: (header: string) => Promise<void>;
 }
 export interface Bought {
-  route: Purchase['route'];
+  route: BuyRoute;
   record: PurchaseRecord;
   instructions?: Deposit;
   uncertain?: { purchaseId: string; txHash: string };
@@ -187,7 +191,7 @@ export interface Bought {
 }
 const asNear = (w: IdentityWallet): NearWallet => {
   if (w.identity.kind !== 'near' || !('call' in w) || typeof w.call !== 'function')
-    throw new TypeError('a NEAR transaction wallet is required');
+    throw new AnnonError('near_wallet_required', 'a NEAR transaction wallet is required');
   return w as NearWallet;
 };
 const assetsFor = (terms: Terms) => ({
@@ -200,26 +204,25 @@ const listing = (fileId: string, f: FileInfo): Listing => ({
   seller: f.seller,
   ...(f.headerHash ? { publishedHeaderHash: f.headerHash } : {}),
 });
-export class SellError extends Error {
-  readonly code?: string;
+export class SellError extends AnnonError {
   constructor(
     readonly fileId: string,
     options?: ErrorOptions,
   ) {
+    const cause = options?.cause;
+    const code =
+      cause instanceof AnnonError || cause instanceof SourceChangedError
+        ? cause.code
+        : 'sell_incomplete';
     super(
-      options?.cause instanceof Error
-        ? options.cause.message
-        : 'Sell incomplete; resume with fileId.',
+      code,
+      cause instanceof Error ? cause.message : 'Sell incomplete; resume with fileId.',
       options,
     );
-    if (
-      options?.cause instanceof PayError ||
-      options?.cause instanceof FileFundingRefused ||
-      options?.cause instanceof SourceChangedError
-    )
-      this.code = options.cause.code;
+    this.name = 'SellError';
   }
 }
+
 export class Annon {
   readonly store: Store<PurchaseRecord>;
   private readonly sellerKeys: Store<SellerKeyRecord>;
@@ -263,29 +266,21 @@ export class Annon {
     const id = parseIdentity(wallet.identity);
     const auth = await wallet.authorize(text);
     if (!verifyAuthorization(id, text, auth, id.kind === 'near' ? id.id : undefined))
-      throw new Error('wallet did not authorize the exact text');
+      throw new AnnonError('invalid_signature', 'wallet did not authorize the exact text');
     return auth;
   }
   private async call(method: string, args: object, wallet?: IdentityWallet): Promise<unknown> {
     const near = wallet?.identity.kind === 'near' ? asNear(wallet) : undefined;
-    let result: unknown;
-    try {
-      result = this.o.send
-        ? await this.o.send(method, args, near)
-        : near
-          ? await near.call({ receiverId: this.o.contractId, method, args })
-          : (() => {
-              throw new Error('configure a transaction transport for relayed calls');
-            })();
-    } catch (error) {
-      if (
-        /prepaid|storage balance|storage[_ ]deposit/i.test(
-          error instanceof Error ? error.message : '',
-        )
-      )
-        throw new PayError('storage_required');
-      throw error;
-    }
+    const result = this.o.send
+      ? await this.o.send(method, args, near)
+      : near
+        ? await near.call({ receiverId: this.o.contractId, method, args })
+        : (() => {
+            throw new AnnonError(
+              'transport_required',
+              'configure a transaction transport for relayed calls',
+            );
+          })();
     if (result && typeof result === 'object' && 'transaction' in result) {
       const transaction = (result as { transaction: { hash: string; signer_id: string } })
         .transaction;
@@ -305,13 +300,9 @@ export class Annon {
       });
       if (outcome.state === 'released') return outcome.answer;
       if (outcome.state === 'done') return outcome.value;
-      if (
-        /prepaid|storage balance|storage[_ ]deposit/i.test(
-          'reason' in outcome ? outcome.reason : '',
-        )
-      )
+      if (isStorageRequired('reason' in outcome ? outcome.reason : ''))
         throw new PayError('storage_required');
-      throw new Error(`contract ${method}: ${outcome.state}`);
+      throw new AnnonError(outcome.state === 'pending' ? 'settlement_pending' : 'refused');
     }
     return result;
   }
@@ -359,9 +350,12 @@ export class Annon {
       domain_id: config.ckdDomain,
     });
     if (typeof mpcKey !== 'string' || !mpcKey.startsWith('bls12381g2:'))
-      throw new Error('MPC domain has no CKD key');
+      throw new AnnonError('ckd_invalid', 'MPC domain has no CKD key');
     if (this.o.mpcKey && this.o.mpcKey !== mpcKey)
-      throw new Error('configured MPC key differs from the contract MPC domain');
+      throw new AnnonError(
+        'ckd_invalid',
+        'configured MPC key differs from the contract MPC domain',
+      );
     return openAnswer(answer, {
       secret,
       appId: fileAppId(this.o.contractId, bytes(fileId, 32)),
@@ -387,9 +381,9 @@ export class Annon {
     if ((o.data instanceof Uint8Array ? o.data.length : o.data.size) > MAX_PLAINTEXT_BYTES)
       throw new DownloadError('too_large');
     if (o.storageBudget !== undefined && (o.storageBudget <= 0n || o.storageBudget >= 2n ** 128n))
-      throw new TypeError('invalid storage budget');
+      throw new AnnonError('invalid_arguments', 'invalid storage budget');
     if (o.storageBudget !== undefined && o.seller.identity.kind !== 'near')
-      throw new TypeError('storage budget requires a NEAR wallet');
+      throw new AnnonError('near_wallet_required', 'storage budget requires a NEAR wallet');
     const config = await getConfig(this.o.nearRpc, this.o.contractId);
     if (config.network !== this.o.network) throw new PayError('network_mismatch');
     const assets = { nearUsdc: config.nearUsdc, baseUsdc: config.usdc };
@@ -451,10 +445,10 @@ export class Annon {
       base: null,
     };
     termsHash(terms, assets); // Validate all local terms before even creating a Base split.
-    let baseSplit: SellRecord['baseSplit'];
+    let baseSplit: SellRecord['baseSplit'] = null;
     if (o.base) {
       if (recipients.some((r) => r.identity.kind !== 'evm'))
-        throw new TypeError('Base split requires only EVM recipients');
+        throw new AnnonError('bad_requirements', 'Base split requires only EVM recipients');
       const kind = o.base.kind ?? 'push';
       const salt = `0x${randomHex(32)}`;
       const split = createSplit(
@@ -479,7 +473,7 @@ export class Annon {
       id: `sell:${fileId}`,
       revision: 0,
       terms,
-      ...(baseSplit ? { baseSplit } : {}),
+      baseSplit,
       fileKey: hex(fileKey),
       sellerSecret: hex(key.secret),
       deadline: this.now() + 540,
@@ -506,17 +500,18 @@ export class Annon {
     if ((o.data instanceof Uint8Array ? o.data.length : o.data.size) > MAX_PLAINTEXT_BYTES)
       throw new DownloadError('too_large');
     const job = await this.sells.load(`annon/sell/${o.fileId}`);
-    if (!job) throw new Error('no saved sell job');
+    if (!job) throw new AnnonError('invalid_record', 'no saved sell job');
     if (job.published) {
       await this.o.writeBackup(job.id, await exportSell(job, this.o.backupSecret));
-      throw new Error('sell already published; secrets cleared');
+      throw new AnnonError('invalid_record', 'sell already published; secrets cleared');
     }
-    if (!job.fileKey || !job.sellerSecret) throw new Error('sell job has no file key');
+    if (!job.fileKey || !job.sellerSecret)
+      throw new AnnonError('invalid_record', 'sell job has no file key');
     if (
       job.terms.contract !== this.o.contractId ||
       identityJson(job.terms.seller) !== identityJson(o.seller.identity)
     )
-      throw new Error('sell job identity mismatch');
+      throw new AnnonError('wrong_identity', 'sell job identity mismatch');
     await this.o.writeBackup(job.id, await exportSell(job, this.o.backupSecret));
     const s = await prepareSeal(bytes(job.fileKey, 32), o.data, {
       fileId: bytes(o.fileId, 32),
@@ -526,10 +521,10 @@ export class Annon {
       previewLen: job.previewLen,
     });
     if (hex(s.cipherHash) !== job.terms.cipher_hash)
-      throw new Error('original data cipher hash mismatch');
+      throw new AnnonError('cipher_hash_mismatch', 'original data cipher hash mismatch');
     const registered = await getFile(this.o.nearRpc, this.o.contractId, o.fileId);
     if (registered && registered.termsHash !== termsHash(job.terms, assetsFor(job.terms)))
-      throw new Error('registered sell job mismatch');
+      throw new AnnonError('file_mismatch', 'registered sell job mismatch');
     try {
       return await this.finishSell(job, s, o.seller, o.publish, registered !== null);
     } catch (cause) {
@@ -540,7 +535,7 @@ export class Annon {
   async reopenSeller(o: { fileId: string; seller: IdentityWallet }): Promise<Uint8Array> {
     const f = await this.file(o.fileId);
     if (identityJson(f.seller) !== identityJson(o.seller.identity))
-      throw new Error('not the registered seller');
+      throw new AnnonError('wrong_identity', 'not the registered seller');
     const keyName = `annon/seller-key/${o.fileId}`;
     const previous = await this.sellerKeys.load(keyName);
     const key = oneTimeKey();
@@ -613,7 +608,7 @@ export class Annon {
         );
       }
       const current = await this.sells.load(`annon/sell/${fileId}`);
-      if (!current) throw new Error('sell job missing');
+      if (!current) throw new AnnonError('invalid_record', 'sell job missing');
       const next = { ...current, revision: current.revision + 1, ckdSecret: hex(ckd) };
       if (!(await this.sells.compareAndSet(`annon/sell/${fileId}`, current, next)))
         throw new PayError('store_conflict');
@@ -627,7 +622,7 @@ export class Annon {
         : {
             sign: async (text: string) => {
               const a = await this.auth(seller, text);
-              if (!a) throw new Error('missing header authorization');
+              if (!a) throw new AnnonError('invalid_signature', 'missing header authorization');
               const signature = bytes(a.sig, seller.identity.kind === 'evm' ? 65 : 64);
               return seller.identity.kind === 'solana'
                 ? { signature, signedMessage: new TextEncoder().encode(text) }
@@ -646,7 +641,7 @@ export class Annon {
       if (job.storageBudget) {
         const name = `annon/sell/${fileId}`;
         let current = await this.sells.load(name);
-        if (!current) throw new Error('sell job missing');
+        if (!current) throw new AnnonError('invalid_record', 'sell job missing');
         const target = BigInt(job.storageBudget);
         if (current.storageFunding === 'pending') {
           // The call may have landed and its allocation may already have been spent.
@@ -692,7 +687,11 @@ export class Annon {
           throw new PayError('store_conflict');
       }
       await publish({ file, header, terms: job.terms });
-      if (!consumed()) throw new Error('publish did not consume the complete file stream');
+      if (!consumed())
+        throw new AnnonError(
+          'upload_incomplete',
+          'publish did not consume the complete file stream',
+        );
     } catch (error) {
       await cancel(error).catch(() => {});
       throw error;
@@ -727,29 +726,32 @@ export class Annon {
       ...(job.baseSplit ? { baseSplit: job.baseSplit } : {}),
       file,
       header,
-      preview: s.preview,
     };
   }
   async buy(o: BuyOptions): Promise<Bought> {
     if (typeof o.maxPrice !== 'bigint' || o.maxPrice <= 0n || o.maxPrice >= 2n ** 128n)
-      throw new TypeError('maxPrice must be a positive human-approved cap');
+      throw new AnnonError('max_price_required', 'maxPrice must be a positive human-approved cap');
     const f = await this.file(o.fileId, true);
     if (f.moderator !== null && !(o.moderators ?? []).includes(f.moderator))
       throw new PayError('unknown_moderator');
     const checked = await inspectHeader(o.header, listing(o.fileId, f), this.o.contractId);
     if (!checked.usable) throw new PayError('file_invalid');
-    if (o.route !== undefined && !['near-usdc', 'base-usdc', 'oneclick'].includes(o.route))
-      throw new TypeError('invalid purchase route');
-    if (o.route === 'near-usdc' && o.payer?.identity.kind !== 'near')
-      throw new TypeError('direct NEAR requires a NEAR payment wallet');
-    if (o.route === 'oneclick' && !o.origin) throw new TypeError('a 1Click origin is required');
+    if (o.route !== undefined && !['near', 'base', '1click'].includes(o.route))
+      throw new AnnonError('invalid_arguments', 'invalid purchase route');
+    if (o.route === 'near' && o.payer?.identity.kind !== 'near')
+      throw new AnnonError('near_wallet_required', 'direct NEAR requires a NEAR payment wallet');
+    if (o.route === '1click' && !o.origin)
+      throw new AnnonError('origin_required', 'a 1Click origin is required');
     if (
-      o.route === 'base-usdc' &&
+      o.route === 'base' &&
       (!f.terms.base || o.payer?.identity.kind !== 'evm' || !('signTypedData' in o.payer))
     )
-      throw new TypeError('Base requires Base terms and an EVM payment wallet');
+      throw new AnnonError(
+        'base_wallet_required',
+        'Base requires Base terms and an EVM payment wallet',
+      );
     const oneclick =
-      o.route === 'oneclick' || (o.route === undefined && o.payer?.identity.kind !== 'near');
+      o.route === '1click' || (o.route === undefined && o.payer?.identity.kind !== 'near');
     const store: Store<PurchaseRecord> = {
       load: (name) => this.store.load(name),
       compareAndSet: async (name, expected, next) => {
@@ -759,7 +761,7 @@ export class Annon {
         return ok;
       },
     };
-    let route: Purchase['route'] = o.route === 'base-usdc' ? 'base-usdc' : 'near-usdc';
+    let wireRoute: Purchase['route'] = o.route === 'base' ? 'base-usdc' : 'near-usdc';
     if (
       o.route === undefined &&
       o.payer?.identity.kind === 'evm' &&
@@ -772,23 +774,22 @@ export class Annon {
         (await balanceOf(this.o.baseRpc, f.terms.base.usdc, o.payer.identity.id, h.number)) >=
           BigInt(f.terms.base.price)
       )
-        route = 'base-usdc';
+        wireRoute = 'base-usdc';
     }
-    if (route === 'near-usdc' && oneclick && o.origin) validateOrigin(o.origin);
-    const price = route === 'base-usdc' && f.terms.base ? f.terms.base.price : f.terms.near.price;
+    const route: BuyRoute = wireRoute === 'base-usdc' ? 'base' : oneclick ? '1click' : 'near';
+    if (wireRoute === 'near-usdc' && oneclick && o.origin) validateOrigin(o.origin);
+    const price =
+      wireRoute === 'base-usdc' && f.terms.base ? f.terms.base.price : f.terms.near.price;
     if (BigInt(price) > o.maxPrice) throw new PayError('price_above_max');
     let ensureBase = async () => {};
-    if (route === 'base-usdc') {
+    if (wireRoute === 'base-usdc') {
       if (o.baseUnlock !== undefined && !['relayer', 'self'].includes(o.baseUnlock))
-        throw new TypeError('invalid Base unlock transport');
+        throw new AnnonError('invalid_arguments', 'invalid Base unlock transport');
       if (o.baseUnlock === 'self') {
         asNear(o.recovery);
         ensureBase = async () => checkBaseSplit(f, this.o.baseRpc);
       } else {
-        if (!this.o.relayer)
-          throw Object.assign(new Error('Configure a relayer before paying.'), {
-            code: 'transport_required',
-          });
+        if (!this.o.relayer) throw new AnnonError('transport_required');
         const config = await getConfig(this.o.nearRpc, this.o.contractId);
         const options = {
           deployment: {
@@ -811,21 +812,24 @@ export class Annon {
       }
     }
     await ensureBase();
-    if (route === 'near-usdc') {
+    if (wireRoute === 'near-usdc') {
       const budget = await fileStorageBalance(this.o.nearRpc, this.o.contractId, o.fileId);
       if (budget.available < budget.admissionRequirement) throw new PayError('file_storage_low');
     }
-    if (route === 'near-usdc' && o.payer?.identity.kind !== 'near' && !o.origin)
-      throw new TypeError('a 1Click origin is required for cross-chain payment');
+    if (wireRoute === 'near-usdc' && o.payer?.identity.kind !== 'near' && !o.origin)
+      throw new AnnonError(
+        'origin_required',
+        'a 1Click origin is required for cross-chain payment',
+      );
     const recovery = parseIdentity(o.recovery.identity);
     const key = oneTimeKey();
     const p: Purchase = {
       version: 2,
       refund: parseIdentity(o.refund),
-      network: route === 'base-usdc' ? 'eip155:8453' : this.o.network,
+      network: wireRoute === 'base-usdc' ? 'eip155:8453' : this.o.network,
       contract: this.o.contractId,
-      route,
-      asset: route === 'base-usdc' && f.terms.base ? f.terms.base.usdc : f.terms.near.token,
+      route: wireRoute,
+      asset: wireRoute === 'base-usdc' && f.terms.base ? f.terms.base.usdc : f.terms.near.token,
       file_id: o.fileId,
       terms_hash: f.termsHash,
       price,
@@ -846,13 +850,16 @@ export class Annon {
       if (recovery.kind === 'near') {
         const w = asNear(o.recovery);
         if (!w.proveControl)
-          throw new Error('NEAR recovery requires an account ownership proof before payment');
+          throw new AnnonError(
+            'missing_method',
+            'NEAR recovery requires an account ownership proof before payment',
+          );
         await w.proveControl(proofText, { contractId: this.o.contractId, nearRpc: this.o.nearRpc });
       } else await this.auth(o.recovery, proofText);
     };
-    const deferProof = route === 'near-usdc' && oneclick && o.onQuote;
+    const deferProof = wireRoute === 'near-usdc' && oneclick && o.onQuote;
     if (!deferProof) await proveRecovery();
-    if (route === 'base-usdc') {
+    if (wireRoute === 'base-usdc') {
       if (!o.paymentRequired || !o.url || !o.payer || !('signTypedData' in o.payer))
         throw new TypeError(
           'Base requires paymentRequired, resource URL and an EVM payment wallet',
@@ -892,6 +899,13 @@ export class Annon {
     const headerHash = hex(checked.headerHash);
     let record: PurchaseRecord = {
       schemaVersion: 2,
+      payment: {
+        route,
+        amountUsdc: usdc(BigInt(price)),
+        amountBaseUnits: price,
+        asset: { symbol: 'USDC', id: p.asset },
+        network: p.network,
+      },
       recoveryProved: !deferProof,
       id,
       revision: 0,
@@ -937,7 +951,11 @@ export class Annon {
       }
       return { route, record };
     }
-    if (!o.origin) throw new TypeError('a 1Click origin is required for cross-chain payment');
+    if (!o.origin)
+      throw new AnnonError(
+        'origin_required',
+        'a 1Click origin is required for cross-chain payment',
+      );
     const quote = await (o.oneClick ?? new OneClick()).quote(message, o.origin);
     const next = { ...record, revision: record.revision + 1, quote };
     if (!(await store.compareAndSet(purchaseKey(id), record, next)))
@@ -972,14 +990,17 @@ export class Annon {
       current.purchase.network !==
         (current.purchase.route === 'base-usdc' ? 'eip155:8453' : this.o.network)
     )
-      throw new Error('saved purchase is outside this SDK scope');
+      throw new AnnonError('network_mismatch', 'saved purchase is outside this SDK scope');
     if (identityJson(parseIdentity(wallet.identity)) !== identityJson(current.recovery))
-      throw new Error('purchase recovery identity mismatch');
+      throw new AnnonError('wrong_identity', 'purchase recovery identity mismatch');
     const text = `Annon: verify purchase recovery\ncontract: ${this.o.contractId}\npurchase: ${current.id}\nrecovery: ${identityText(current.recovery)}`;
     if (current.recovery.kind === 'near') {
       const w = asNear(wallet);
       if (!w.proveControl)
-        throw new Error('NEAR recovery requires an account ownership proof before payment');
+        throw new AnnonError(
+          'missing_method',
+          'NEAR recovery requires an account ownership proof before payment',
+        );
       await w.proveControl(text, { contractId: this.o.contractId, nearRpc: this.o.nearRpc });
     } else await this.auth(wallet, text);
     const next = { ...current, revision: current.revision + 1, recoveryProved: true };
@@ -993,10 +1014,12 @@ export class Annon {
     id = record?.id,
     options: { unlockWallet?: NearWallet } = {},
   ): Promise<boolean> {
-    if (!id) throw new TypeError('missing purchase id');
+    if (record) validatePurchaseRecord(record);
+    if (!id) throw new AnnonError('purchase_required', 'missing purchase id');
     if (await getPurchase(this.o.nearRpc, this.o.contractId, id)) return true;
     if (record?.purchase.route !== 'base-usdc') return false;
-    if (!this.o.baseRpc) throw new Error('configure baseRpc to resume a Base purchase');
+    if (!this.o.baseRpc)
+      throw new AnnonError('base_rpc_required', 'configure baseRpc to resume a Base purchase');
     const next = await nextStep(record, {
       nearRpc: this.o.nearRpc,
       baseRpc: this.o.baseRpc,
@@ -1043,18 +1066,19 @@ export class Annon {
     if ((o.file instanceof Uint8Array ? o.file.length : o.file.size) > MAX_PAY2_BYTES)
       throw new DownloadError('too_large');
     if (!o.record && !o.recovery)
-      throw new TypeError('a saved purchase or recovery grant is required');
+      throw new AnnonError('purchase_required', 'a saved purchase or recovery grant is required');
     const r = o.recovery;
-    if (r && r.grant === null) throw new Error('recovery grant is not final');
+    if (r && r.grant === null)
+      throw new AnnonError('recovery_not_final', 'recovery grant is not final');
     const id = r?.purchase_id ?? o.record?.id;
-    if (!id) throw new TypeError('missing purchase id');
+    if (!id) throw new AnnonError('purchase_required', 'missing purchase id');
     if (!(await this.accept(o.record, id)))
-      throw new PayError('settlement_processing', 'purchase not accepted; check status and resume');
+      throw new PayError('settlement_pending', 'purchase not accepted; check status and resume');
     const fileId = r?.file_id ?? o.record?.purchase.file_id;
-    if (!fileId) throw new TypeError('missing file id');
+    if (!fileId) throw new AnnonError('file_required', 'missing file id');
     const grant = r?.grant ?? 0;
     const secretHex = r?.buyerSecret ?? o.record?.buyerSecret;
-    if (!secretHex) throw new TypeError('missing buyer secret');
+    if (!secretHex) throw new AnnonError('invalid_record', 'missing buyer secret');
     const secret = bytes(secretHex, 32);
     const final = await getPurchase(this.o.nearRpc, this.o.contractId, id);
     const g = await getGrant(this.o.nearRpc, this.o.contractId, id, grant);
@@ -1064,7 +1088,7 @@ export class Annon {
       !g ||
       hex(keyFromSecret(secret).publicKeyBytes) !== g.buyer_key
     )
-      throw new Error('saved key does not match the final grant');
+      throw new AnnonError('invalid_record', 'saved key does not match the final grant');
     const f = await this.file(fileId);
     const prepared =
       o.file instanceof Uint8Array
@@ -1087,7 +1111,7 @@ export class Annon {
       this.o.contractId,
     );
     if (o.record && hex(inspected.headerHash) !== o.record.checkedHeaderHash)
-      throw new Error('header differs from the checked purchase header');
+      throw new AnnonError('file_mismatch', 'header differs from the checked purchase header');
     const cached = grant === 0 ? this.unlocked.get(id) : undefined;
     if (grant === 0) this.unlocked.delete(id);
     let ckd: Uint8Array | undefined;
@@ -1105,7 +1129,7 @@ export class Annon {
         fileId,
       );
     if (prepared) {
-      if (!o.sink) throw new TypeError('a plaintext sink is required');
+      if (!o.sink) throw new AnnonError('invalid_arguments', 'a plaintext sink is required');
       const meta = await prepared.writeTo(o.sink, async () => ckd);
       if (meta.size > MAX_PLAINTEXT_BYTES) throw new DownloadError('too_large');
       return { meta };
@@ -1141,7 +1165,7 @@ export class Annon {
       try {
         const p = await getPurchase(this.o.nearRpc, this.o.contractId, id);
         if (!p || identityJson(p.recovery) !== identityJson(recovery))
-          throw new Error('purchase recovery identity mismatch');
+          throw new AnnonError('wrong_identity', 'purchase recovery identity mismatch');
         await this.file(p.file_id);
         const keyName = `annon/recovery/${id}`;
         let r = await this.recoveries.load(keyName);
@@ -1214,7 +1238,11 @@ export class Annon {
           const final = await getPurchase(this.o.nearRpc, this.o.contractId, id);
           grant = await findGrant(final?.grants ?? p.grants);
         }
-        if (grant === null) throw new Error('reopen grant is not final; resume the saved recovery');
+        if (grant === null)
+          throw new AnnonError(
+            'recovery_not_final',
+            'reopen grant is not final; resume the saved recovery',
+          );
         // Validate any returned CKD answer; claim_key is repeatable if it was absent/failed.
         if (result && typeof result === 'object' && ('big_y' in result || 'answer' in result))
           await this.answer(result, bytes(r.buyerSecret, 32), p.file_id);
@@ -1232,7 +1260,7 @@ export class Annon {
   async stop(o: { fileId: string; seller: IdentityWallet }): Promise<void> {
     const f = await this.file(o.fileId);
     if (identityJson(f.seller) !== identityJson(o.seller.identity))
-      throw new Error('not the registered seller');
+      throw new AnnonError('wrong_identity', 'not the registered seller');
     const args = { file_id: o.fileId, key: null, deadline: this.now() + 540 };
     const auth = await this.auth(o.seller, stopSalesText(this.o.contractId, args, f.seller));
     await this.call('stop_sales', { args, ...(auth ? { auth } : {}) }, o.seller);
