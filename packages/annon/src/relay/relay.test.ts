@@ -1,12 +1,16 @@
 import { bls12_381 as bls } from '@noble/curves/bls12-381.js';
-import { base58 } from '@scure/base';
+import { ed25519 } from '@noble/curves/ed25519.js';
+import { base58, base64urlnopad } from '@scure/base';
 import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { terms as initial, must, purchase } from '../../test/fixtures.js';
 import { txOutcome } from '../near/rpc.js';
-import { registerText, reopenSellerText, stopSalesText } from '../near/texts.js';
+import { fileFundingText, registerText, reopenSellerText, stopSalesText } from '../near/texts.js';
 import { createSplit } from '../pay/split.js';
+import { memoryStore } from '../pay/store.js';
+import { hex } from '../settle-near/codec.js';
 import { termsHash } from '../settle-near/terms.js';
+import { RelayLedger, type RelayState } from './ledger.js';
 import {
   canonicalRequest,
   checkRelay,
@@ -15,6 +19,7 @@ import {
   relayStatus,
   resetRelayState,
 } from './relay.js';
+import { reservationText } from './reservation.js';
 
 const wallet = privateKeyToAccount(`0x${'44'.repeat(32)}`);
 const provenance = { kind: 'push' as 'push' | 'pull', salt: `0x${'01'.repeat(32)}` };
@@ -33,12 +38,22 @@ const terms = {
   base: { ...must(initial.base), pay_to: split.address },
   seller: { kind: 'evm', id: wallet.address.toLowerCase() } as const,
 };
+let registry: RelayLedger;
 const opts = {
+  get ledger() {
+    return registry;
+  },
   nearRpc: 'https://near.rpc',
   baseRpc: 'https://base.rpc',
   contractId: terms.contract,
   usdc: purchase.asset,
-  policy: { minPrice: 10000n, maxDeadlineSeconds: 600, fileBudget: 0n },
+  policy: {
+    minPrice: 10000n,
+    maxDeadlineSeconds: 600,
+    fileBudget: 41000000000000000000000n,
+    prepaidUnlockFloor: 0n,
+    sellerAllowed: () => true,
+  },
   now: 1800000000,
 };
 const sender = { accountId: 'relayer.near', key: 'ed25519:test-double' };
@@ -54,6 +69,34 @@ const sign = async () => {
     },
   };
 };
+let fundingNonce = 1;
+const signFunding = async (file_id: string, amount: string) => {
+  const args = {
+    file_id,
+    amount,
+    nonce: `0x${(fundingNonce++).toString(16).padStart(64, '0')}`,
+    deadline: opts.now + 600,
+  };
+  return {
+    method: 'fund_file_storage',
+    args,
+    auth: {
+      kind: 'evm',
+      sig: await wallet.signMessage({
+        message: fileFundingText({
+          ...args,
+          network: terms.network,
+          contract: terms.contract,
+          seller: terms.seller,
+        }),
+      }),
+    },
+  };
+};
+vi.mock('../pay/split.js', async (original) => ({
+  ...(await original<typeof import('../pay/split.js')>()),
+  readSplitState: vi.fn(async () => ({ kind: 'push', shares: [], distributorPercent: 0 })),
+}));
 const created = vi.hoisted(() => vi.fn());
 vi.mock('near-api-js', async (importOriginal) => {
   const original = await importOriginal<typeof import('near-api-js')>();
@@ -65,7 +108,20 @@ vi.mock('near-api-js', async (importOriginal) => {
     encodeTransaction: () => new Uint8Array([1, 2, 3]),
   };
 });
-beforeEach(() => {
+beforeEach(async () => {
+  registry = new RelayLedger(memoryStore<RelayState>(), `${terms.network}|${terms.contract}`);
+  await registry.seal(
+    {
+      policyVersion: 'legacy-v0',
+      blockHash: 'cutover',
+      blockHeight: 1,
+      scannedThrough: 1,
+      minPrice: '100000',
+      fee: { fixed: '30000', bps: 100, treasuryNear: null, treasuryEvm: null },
+      inventory: [],
+    },
+    [],
+  );
   resetRelayState();
   created.mockReset();
   created.mockResolvedValue({ transaction: { encode: () => new Uint8Array([1, 2, 3]) } });
@@ -77,20 +133,22 @@ const rpc = (read: (method: string, args: Record<string, unknown>) => unknown) =
     vi.fn(async (_url, init) => {
       const q = JSON.parse(String(init?.body));
       const result =
-        q.method === 'query'
-          ? {
-              result: [
-                ...Buffer.from(
-                  JSON.stringify(
-                    read(
-                      q.params.method_name,
-                      JSON.parse(Buffer.from(q.params.args_base64, 'base64').toString()),
+        q.method === 'EXPERIMENTAL_protocol_config'
+          ? { runtime_config: { storage_amount_per_byte: '10000000000000000000' } }
+          : q.method === 'query'
+            ? {
+                result: [
+                  ...Buffer.from(
+                    JSON.stringify(
+                      read(
+                        q.params.method_name,
+                        JSON.parse(Buffer.from(q.params.args_base64, 'base64').toString()),
+                      ),
                     ),
                   ),
-                ),
-              ],
-            }
-          : { final_execution_status: 'INCLUDED' };
+                ],
+              }
+            : { final_execution_status: 'INCLUDED' };
       return { json: async () => ({ id: q.id, result }) };
     }),
   );
@@ -132,14 +190,17 @@ describe('relay purchase arguments and authorization', () => {
     ).rejects.toMatchObject({ code: 'not_sponsored' });
   });
   it('serializes source args to transactions and suppresses duplicate writes', async () => {
-    rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+    rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
     const r = await sign();
     const o = { ...opts, sender };
     const result = await relay(r, o);
     expect(result.txHash).toBeTruthy();
     expect(must(created.mock.calls[0])[0].actions[0].functionCall.methodName).toBe('register');
     const sent = must(created.mock.calls[0])[0].actions[0].functionCall.args;
-    expect(JSON.parse(new TextDecoder().decode(sent))).toEqual(contractArgs(r));
+    expect(JSON.parse(new TextDecoder().decode(sent))).toEqual({
+      args: { ...r.args, file_budget: '50000000000000000000000' },
+      auth: r.auth,
+    });
     expect(await relay(r, o)).toEqual(result);
     expect(created).toHaveBeenCalledTimes(1);
   });
@@ -157,9 +218,11 @@ describe('relay purchase arguments and authorization', () => {
   it('keeps failed checks out of admission holds and preserves storage/gas budgets', async () => {
     rpc((method) => (method === 'storage_balance_of' ? '0' : null));
     const r = await sign();
-    await expect(relay(r, { ...opts, sender })).rejects.toMatchObject({ code: 'unavailable' });
+    await expect(relay(r, { ...opts, sender })).rejects.toMatchObject({
+      code: 'relayer_unavailable',
+    });
     expect(created).not.toHaveBeenCalled();
-    rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+    rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
     expect((await relay(r, { ...opts, sender })).txHash).toBeTruthy();
   });
   it('returns uncertainty after lost RPC answers, so a caller never assumes a transaction did not land', async () => {
@@ -168,6 +231,11 @@ describe('relay purchase arguments and authorization', () => {
       'fetch',
       vi.fn(async (_url, init) => {
         const q = JSON.parse(String(init?.body));
+        if (q.method === 'EXPERIMENTAL_protocol_config')
+          return Response.json({
+            id: q.id,
+            result: { runtime_config: { storage_amount_per_byte: '10000000000000000000' } },
+          });
         if (q.method === 'query')
           return {
             json: async () => ({
@@ -177,7 +245,7 @@ describe('relay purchase arguments and authorization', () => {
                   ...Buffer.from(
                     JSON.stringify(
                       q.params.method_name === 'storage_balance_of'
-                        ? '100000000000000000000000'
+                        ? '1000000000000000000000000'
                         : null,
                     ),
                   ),
@@ -196,7 +264,7 @@ describe('relay purchase arguments and authorization', () => {
 });
 
 it('returns a retryable pending state for a duplicate still waiting for its tx hash', async () => {
-  rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+  rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
   const r = await sign();
   let release!: (v: unknown) => void;
   let started!: () => void;
@@ -213,7 +281,7 @@ it('returns a retryable pending state for a duplicate still waiting for its tx h
   await entered;
   try {
     expect(await relayStatus(r, opts)).toBe('pending');
-    expect(await relayStatus(r, { ...opts, nearRpc: 'https://other.rpc' })).toBeNull();
+    expect(await relayStatus(r, { ...opts, nearRpc: 'https://other.rpc' })).toBe('pending');
     const reads = vi.mocked(fetch).mock.calls.length;
     await expect(relay(r, { ...opts, sender })).rejects.toMatchObject({ code: 'in_flight' });
     expect(vi.mocked(fetch).mock.calls).toHaveLength(reads);
@@ -225,7 +293,7 @@ it('returns a retryable pending state for a duplicate still waiting for its tx h
 });
 
 it('returns the signed hash while the original POST is still awaiting send confirmation', async () => {
-  rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+  rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
   const original = globalThis.fetch;
   let release!: (v: Response) => void;
   let started!: () => void;
@@ -270,7 +338,7 @@ it('refuses a dust Base registration even when its NEAR price meets the floor', 
 it.each(['NotEnoughBalance', 'NotEnoughAllowance', 'Expired', 'InvalidSignature'])(
   'releases holds and quota after a definite %s refusal',
   async (variant) => {
-    rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+    rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
     const original = globalThis.fetch;
     let reject = true;
     vi.stubGlobal(
@@ -287,7 +355,7 @@ it.each(['NotEnoughBalance', 'NotEnoughAllowance', 'Expired', 'InvalidSignature'
     );
     const r = await sign();
     const o = { ...opts, sender, policy: { ...opts.policy, registrationsPerSeller: 1 } };
-    await expect(relay(r, o)).rejects.toMatchObject({ code: 'unavailable' });
+    await expect(relay(r, o)).rejects.toMatchObject({ code: 'relayer_unavailable' });
     expect(await relayStatus(r, o)).toBeNull();
     reject = false;
     expect((await relay(r, o)).uncertain).toBeUndefined();
@@ -295,7 +363,7 @@ it.each(['NotEnoughBalance', 'NotEnoughAllowance', 'Expired', 'InvalidSignature'
   },
 );
 it('checks chain state outside the signing queue', async () => {
-  rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+  rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
   let entered!: () => void;
   let release!: (v: unknown) => void;
   const started = new Promise<void>((r) => {
@@ -314,7 +382,7 @@ it('checks chain state outside the signing queue', async () => {
   other.args.terms = { ...other.args.terms, file_id: `0x${'aa'.repeat(32)}` };
   other.auth.sig = await wallet.signMessage({ message: registerText(terms.contract, other.args) });
   const read = vi.fn((method) =>
-    method === 'storage_balance_of' ? '100000000000000000000000' : null,
+    method === 'storage_balance_of' ? '1000000000000000000000000' : null,
   );
   rpc(read);
   const second = relay(other, { ...opts, sender });
@@ -454,13 +522,13 @@ it('retains a claim hash for the entire quota window without charging repeats', 
     expect(created).toHaveBeenCalledTimes(2);
     clock.mockReturnValue(100000 + 86400000);
     await relay(req, o);
-    expect(created).toHaveBeenCalledTimes(3);
+    expect(created).toHaveBeenCalledTimes(2);
   } finally {
     clock.mockRestore();
   }
 });
 it('keeps a later definite rejection uncertain after an earlier lost send', async () => {
-  rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+  rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
   const original = fetch;
   let sends = 0;
   vi.stubGlobal(
@@ -495,7 +563,7 @@ it('bounds preflight reads before chain lookup and does not read for a held oper
   const started = new Promise<void>((r) => {
     entered = r;
   });
-  rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+  rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
   const original = fetch;
   let reads = 0;
   vi.stubGlobal(
@@ -515,7 +583,7 @@ it('bounds preflight reads before chain lookup and does not read for a held oper
   const first = relay(r, o);
   await started;
   try {
-    await expect(relay(r, o)).rejects.toMatchObject({ code: 'unavailable' });
+    await expect(relay(r, o)).rejects.toMatchObject({ code: 'relayer_unavailable' });
     expect(reads).toBe(1);
   } finally {
     release();
@@ -659,9 +727,7 @@ it.each([
       expect(await relay(req, o)).toEqual(first);
       expect(lookups).toBe(0);
       clock.mockReturnValue(100000 + 900000);
-      const retry = ['failed', 'mpc-error', 'empty', 'null', 'final-started', 'unknown'].includes(
-        state,
-      );
+      const retry = ['failed', 'mpc-error', 'empty', 'null'].includes(state);
       const next = await relay(req, o);
       expect(next.txHash).toBeTruthy();
       expect(lookups).toBe(1);
@@ -670,7 +736,7 @@ it.each([
         clock.mockReturnValue(100000 + 1800000);
         await expect(relay(req, o)).rejects.toMatchObject({
           code: 'limited',
-          retryAt: 100000 + 86400000,
+          retryAt: 86400000,
         });
         expect(created).toHaveBeenCalledTimes(2);
       } else {
@@ -685,7 +751,7 @@ it.each([
   },
 );
 it('sends exactly once when two identical requests both finish preflight', async () => {
-  rpc((method) => (method === 'storage_balance_of' ? '100000000000000000000000' : null));
+  rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
   const original = fetch;
   let release!: () => void;
   let entered!: () => void;
@@ -715,11 +781,9 @@ it('sends exactly once when two identical requests both finish preflight', async
   await ready;
   release();
   const results = await pending;
-  expect(checked).toBe(2);
-  expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-  expect(results.filter((r) => r.status === 'rejected')).toEqual([
-    { status: 'rejected', reason: expect.objectContaining({ code: 'in_flight' }) },
-  ]);
+  expect(checked).toBeGreaterThanOrEqual(2);
+  expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+  expect(results.filter((r) => r.status === 'rejected')).toEqual([]);
   expect(created).toHaveBeenCalledTimes(1);
   expect(
     vi
@@ -737,7 +801,14 @@ it('keeps one grant quota exhausted without spending another grant quota', async
     vi.fn(async (url, init) => {
       const q = JSON.parse(String(init?.body));
       if (q.method !== 'tx') return original(url, init);
-      return Response.json({ id: q.id, error: { cause: { name: 'UNKNOWN_TRANSACTION' } } });
+      return Response.json({
+        id: q.id,
+        result: claimOutcome(
+          q.params.tx_hash,
+          { purchase_id: terms.file_id, grant: 0 },
+          { Failure: { ActionError: {} } },
+        ),
+      });
     }),
   );
   const o = { ...opts, sender, policy: { ...opts.policy, claimsPerPurchase: 1 } };
@@ -750,7 +821,7 @@ it('keeps one grant quota exhausted without spending another grant quota', async
     clock.mockReturnValue(100000 + 900000);
     await expect(relay(request(0), o)).rejects.toMatchObject({
       code: 'limited',
-      retryAt: 100000 + 86400000,
+      retryAt: 86400000,
     });
     const other = await relay(request(1), o);
     expect(await relay(request(1), o)).toEqual(other);
@@ -760,7 +831,7 @@ it('keeps one grant quota exhausted without spending another grant quota', async
     clock.mockRestore();
   }
 });
-it('an old lookup cannot retire a replacement admitted after its cache window expires', async () => {
+it('an old lookup cannot retire a replacement admitted after final proof', async () => {
   const clock = vi.spyOn(Date, 'now').mockReturnValue(100000);
   claimViews();
   let nonce = 0;
@@ -798,6 +869,7 @@ it('an old lookup cannot retire a replacement admitted after its cache window ex
     old = relayStatus(req, o);
     await started;
     clock.mockReturnValue(100000 + 86400000 + 1);
+    await registry.retire(`claim:${terms.file_id}:0`, first.txHash);
     const replacement = await relay(req, o);
     expect(replacement.txHash).not.toBe(first.txHash);
     release();
@@ -859,16 +931,55 @@ it('coalesces simultaneous stale claim lookups into one RPC request', async () =
 it('sponsors an unlisted seller and funds the file in the same transaction from prepaid storage', async () => {
   rpc((method) => (method === 'storage_balance_of' ? '1000000000000000000000000' : null));
   const r = await sign();
-  await relay(r, {
-    ...opts,
-    sender,
-    policy: { ...opts.policy, sellerAllowed: () => false, fileBudget: 50000000000000000000000n },
-  });
+  const seed = new Uint8Array(32).fill(7);
+  const proof = {
+    v: 1 as const,
+    uploadId: '55'.repeat(32),
+    network: terms.network,
+    contract: terms.contract,
+    fileId: terms.file_id,
+    termsHash: termsHash(terms),
+    seller: terms.seller,
+    cipherHash: terms.cipher_hash,
+    byteSize: 1635,
+    plaintextSize: 1024,
+    headerSize: 323,
+    metadataHash: `0x${'99'.repeat(32)}`,
+    hostOrigin: 'https://host.example',
+    issuedAt: opts.now,
+    expiresAt: opts.now + 600,
+  };
+  const reservation = {
+    ...proof,
+    signature: base64urlnopad.encode(
+      ed25519.sign(new TextEncoder().encode(reservationText(proof)), seed),
+    ),
+  };
+  await relay(
+    { ...r, hostingReservation: reservation },
+    {
+      ...opts,
+      sender,
+      policy: { ...opts.policy, sellerAllowed: () => false, fileBudget: 41000000000000000000000n },
+      reservation: {
+        hostOrigin: proof.hostOrigin,
+        publicKey: hex(ed25519.getPublicKey(seed)).slice(2),
+        fetch: async () =>
+          Response.json({
+            state: 'reserved',
+            fileId: proof.fileId,
+            termsHash: proof.termsHash,
+            expiresAt: proof.expiresAt,
+            reservation,
+          }),
+      },
+    },
+  );
   const actions = must(created.mock.calls[0])[0].actions;
   expect(actions).toHaveLength(1);
   expect(actions[0].functionCall.methodName).toBe('register');
   expect(JSON.parse(new TextDecoder().decode(actions[0].functionCall.args))).toMatchObject({
-    args: { file_budget: '50000000000000000000000' },
+    args: { file_budget: '41000000000000000000000' },
   });
 });
 
@@ -901,8 +1012,8 @@ it('bounds topups to files this relayer sponsored and keeps the per-file cap und
     policy: {
       ...opts.policy,
       fileBudget: 50000000000000000000000n,
-      topupPerFile: 100000000000000000000000n,
-      topupPerFileDay: 100000000000000000000000n,
+      listedTopupPerFile: 100000000000000000000000n,
+      listedTopupPerFileDay: 100000000000000000000000n,
     },
   };
   await relay(await sign(), o);
@@ -919,17 +1030,14 @@ it('bounds topups to files this relayer sponsored and keeps the per-file cap und
           }
         : null,
   );
-  const topup = {
-    method: 'fund_file_storage',
-    args: { file_id: terms.file_id, amount: '30000000000000000000000' },
-  };
+  const topup = await signFunding(terms.file_id, '30000000000000000000000');
   expect((await relay(topup, o)).txHash).toBeTruthy();
   // A different amount bypasses operation deduplication, but cannot bypass the allocation cap.
   await expect(
-    relay({ ...topup, args: { ...topup.args, amount: '30000000000000000000001' } }, o),
+    relay(await signFunding(terms.file_id, '30000000000000000000001'), o),
   ).rejects.toMatchObject({ code: 'limited' });
   await expect(
-    relay({ ...topup, args: { ...topup.args, file_id: `0x${'77'.repeat(32)}` } }, o),
+    relay(await signFunding(`0x${'77'.repeat(32)}`, topup.args.amount), o),
   ).rejects.toBeDefined();
 });
 
@@ -938,7 +1046,12 @@ it('enforces topup per-file and global daily amount caps independently', async (
   const o = {
     ...opts,
     sender,
-    policy: { ...opts.policy, topupPerFile: 100n, topupPerFileDay: 2n, topupPerDay: 3n },
+    policy: {
+      ...opts.policy,
+      listedTopupPerFile: 50000000000000000000100n,
+      listedTopupPerFileDay: 2n,
+      topupPerDay: 3n,
+    },
   };
   await relay(await sign(), o);
   const r = await sign();
@@ -957,8 +1070,8 @@ it('enforces topup per-file and global daily amount caps independently', async (
       taken_down: null,
     };
   });
-  const topup = (file_id: string, amount: string) =>
-    relay({ method: 'fund_file_storage', args: { file_id, amount } }, o);
+  const topup = async (file_id: string, amount: string) =>
+    relay(await signFunding(file_id, amount), o);
   await topup(terms.file_id, '2');
   await expect(topup(terms.file_id, '1')).rejects.toMatchObject({ code: 'limited' });
   await expect(topup(r.args.terms.file_id, '2')).rejects.toMatchObject({ code: 'limited' });
@@ -992,7 +1105,7 @@ it('refuses a sponsored Base registration paying an arbitrary address even with 
   ).rejects.toMatchObject({ code: 'not_sponsored' });
 });
 
-it('allows a repeat same-amount topup after the hold expires', async () => {
+it('allows another seller-signed same-amount topup with a fresh nonce', async () => {
   const clock = vi.spyOn(Date, 'now').mockReturnValue(1800000000000);
   try {
     const r = await sign();
@@ -1011,10 +1124,10 @@ it('allows a repeat same-amount topup after the hold expires', async () => {
             taken_down: null,
           },
     );
-    const topup = { method: 'fund_file_storage', args: { file_id: terms.file_id, amount: '1' } };
+    const topup = await signFunding(terms.file_id, '1');
     await relay(topup, o);
     clock.mockReturnValue(1800000001001);
-    await relay(topup, o);
+    await relay(await signFunding(terms.file_id, '1'), o);
     expect(created).toHaveBeenCalledTimes(3);
   } finally {
     clock.mockRestore();

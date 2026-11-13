@@ -15,7 +15,7 @@ import {
   viewWord,
 } from '../pay/base.js';
 import { cloneCode, createSplit, SPLIT_FACTORIES, splitHash } from '../pay/split.js';
-import { buildPurchaseMessage } from '../settle-near/purchase.js';
+import { buildPurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import { termsHash } from '../settle-near/terms.js';
 import { applySponsoredFee } from './fees.js';
 import { canonicalRequest, checkRelay, contractArgs, resetRelayState } from './relay.js';
@@ -141,13 +141,13 @@ describe('Base unlock contract timing', () => {
     });
     vi.mocked(block).mockResolvedValueOnce({ number: 41, timestamp: 1300 });
     await expect(checkRelay(request(), options)).rejects.toMatchObject({
-      code: 'payment_not_safe',
+      code: 'settlement_pending',
     });
     vi.mocked(block)
       .mockResolvedValueOnce({ number: 42, timestamp: 1300 })
       .mockResolvedValueOnce({ number: 42, timestamp: 1300, hash: `0x${'ff'.repeat(32)}` });
     await expect(checkRelay(request(), options)).rejects.toMatchObject({
-      code: 'payment_not_safe',
+      code: 'settlement_pending',
     });
     vi.mocked(paymentLogs).mockReturnValueOnce(null);
     await expect(checkRelay(request(), options)).rejects.toMatchObject({
@@ -384,4 +384,20 @@ it('caches refused split checks for 60 seconds by exact terms and RPC, then retr
   } finally {
     clock.mockRestore();
   }
+});
+
+it('applies MIN_PRICE to claim_key before reading its grant', async () => {
+  vi.mocked(getPurchase).mockResolvedValue({
+    purchase_id: purchaseId(purchase, { baseUsdc: sample.asset }),
+    file_id: terms.file_id,
+  } as never);
+  await expect(
+    checkRelay(
+      {
+        method: 'claim_key',
+        args: { purchase_id: purchaseId(purchase, { baseUsdc: sample.asset }) },
+      },
+      { ...options, policy: { ...options.policy, minPrice: file.price + 1n } },
+    ),
+  ).rejects.toMatchObject({ code: 'not_sponsored' });
 });

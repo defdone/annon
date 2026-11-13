@@ -183,8 +183,9 @@ export async function getFile(
   url: string,
   contractId: string,
   fileId: string,
+  blockId?: string | number,
 ): Promise<FileInfo | null> {
-  const f = (await view(url, contractId, 'get_file', { file_id: fileId })) as {
+  const f = (await view(url, contractId, 'get_file', { file_id: fileId }, blockId)) as {
     purchase_storage_balance?: string;
     terms: Terms;
     terms_hash: string;

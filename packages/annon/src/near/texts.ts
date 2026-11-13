@@ -1,4 +1,4 @@
-import { utc } from '../settle-near/codec.js';
+import { bytes, uint, utc } from '../settle-near/codec.js';
 
 export { usdc, utc } from '../settle-near/codec.js';
 
@@ -64,5 +64,31 @@ export function stopSalesText(contract: string, a: SellerArgs, seller: Identity)
     `file: ${hex0x(a.file_id, 32, 'file_id')}`,
     `seller: ${identityText(seller)}`,
     `valid until: ${utc(a.deadline)}`,
+  ].join('\n');
+}
+
+export interface FileFundingArgs {
+  file_id: string;
+  amount: string;
+  nonce: string;
+  deadline: number;
+}
+/** Seller authorization for a sponsored top-up; not forwarded to the contract. */
+export function fileFundingText(
+  a: FileFundingArgs & { network: string; contract: string; seller: Identity },
+): string {
+  bytes(a.file_id, 32);
+  bytes(a.nonce, 32);
+  if (uint(a.amount, 128) <= 0n || !Number.isSafeInteger(a.deadline) || a.deadline < 0)
+    throw new TypeError('Invalid file funding authorization.');
+  return [
+    'Annon: request sponsored file storage',
+    `network: ${a.network}`,
+    `contract: ${a.contract}`,
+    `seller: ${identityText(a.seller)}`,
+    `file: ${a.file_id}`,
+    `amount: ${a.amount}`,
+    `nonce: ${a.nonce}`,
+    `expires: ${a.deadline}`,
   ].join('\n');
 }

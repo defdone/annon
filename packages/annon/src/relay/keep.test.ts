@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { purchase as sample, terms } from '../../test/fixtures.js';
+import { must, purchase as sample, terms } from '../../test/fixtures.js';
 import finalizedSettle from '../../test/keeper-final.json' with { type: 'json' };
 import type { BudgetRecord } from '../node/budget.js';
 import { memoryStore } from '../pay/store.js';
@@ -593,7 +593,7 @@ it('skips signing, budget reservation and tx persistence on low liquid balance, 
   all = [d(1)];
   accountAmount = '449700000000000000000000';
   await keep(o);
-  expect(o.alert).toHaveBeenCalledTimes(2);
+  expect(o.alert.mock.calls.filter(([a]) => a.type === 'low_balance')).toHaveLength(2);
 });
 it('honors a configured keeper liquid balance low water even when the transaction is affordable', async () => {
   const o = { ...opts(), balanceLowWater: 20n * 10n ** 24n, alert: vi.fn() };
@@ -891,4 +891,134 @@ it('sponsors a dust purchase with an excess refund slot', async () => {
   all = [{ ...d(0, 0, [0, 0]), purchase: `0x${'12'.repeat(32)}`, amount: '11' }];
   const result = await keep({ ...opts(), minPayout: 10000n });
   expect(result.sent).toHaveLength(1);
+});
+
+it('persists the dust verdict per delivery across passes and policy changes', async () => {
+  all = [{ ...d(), purchase: `0x${'12'.repeat(32)}` }];
+  const o = opts();
+  await keep({ ...o, minPayout: 100000n });
+  const first = queries.filter(
+    (q) => q.params.method_name === 'get_purchase' || q.params.method_name === 'get_file',
+  ).length;
+  queries = [];
+  await keep({ ...o, minPayout: 0n });
+  expect(first).toBeGreaterThan(0);
+  expect(
+    queries.filter(
+      (q) => q.params.method_name === 'get_purchase' || q.params.method_name === 'get_file',
+    ),
+  ).toHaveLength(0);
+  expect(created).not.toHaveBeenCalled();
+});
+
+it('emits uncertainty once per persisted submission and contains it across restart', async () => {
+  const o = opts();
+  const alert = vi.fn();
+  await keep({ ...o, alert });
+  await keep({ ...o, alert });
+  await keep({ ...o, alert });
+  expect(alert.mock.calls.filter(([a]) => a.type === 'uncertain')).toHaveLength(1);
+});
+
+it('uses the 0.10 USDC default and retains the dust verdict after repeated passes', async () => {
+  const amount = '50000';
+  all = [
+    {
+      ...d(),
+      purchase: `0x${'12'.repeat(32)}`,
+      amount,
+      slots: [{ ...must(d().slots[0]), amount }],
+    },
+  ];
+  const fetcher = globalThis.fetch;
+  vi.stubGlobal(
+    'fetch',
+    async (url: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      const q = JSON.parse(String(init?.body));
+      if (q.params?.method_name === 'get_file') {
+        const t = { ...terms, near: { ...terms.near, price: amount } };
+        return Response.json({
+          id: q.id,
+          result: {
+            result: [
+              ...Buffer.from(
+                JSON.stringify({
+                  terms: t,
+                  terms_hash: termsHash(t),
+                  header_hash: null,
+                  sales_stopped_at: null,
+                  taken_down: null,
+                }),
+              ),
+            ],
+          },
+        });
+      }
+      return fetcher(url, init);
+    },
+  );
+  const o = opts();
+  await keep(o);
+  queries = [];
+  await keep(o);
+  expect(created).not.toHaveBeenCalled();
+  expect(queries.filter((q) => q.params.method_name === 'get_purchase')).toHaveLength(0);
+});
+
+it('tracks open-delivery age durably and alerts once after the configured wait', async () => {
+  const o = opts(),
+    alert = vi.fn();
+  let now = 100000;
+  await keep({ ...o, now: () => now, alert });
+  now += 1800001;
+  await keep({ ...o, now: () => now, alert });
+  await keep({ ...o, now: () => now, alert });
+  expect(alert.mock.calls.filter(([a]) => a.type === 'old_delivery')).toEqual([
+    [{ type: 'old_delivery', deliveryId: 0, seconds: 1800 }],
+  ]);
+});
+
+it('alerts immediately when the initial keeper send is uncertain', async () => {
+  failSend = true;
+  unknown = true;
+  const alert = vi.fn();
+  await keep({ ...opts(), alert });
+  expect(alert.mock.calls.filter(([a]) => a.type === 'uncertain')).toHaveLength(1);
+});
+
+it('alerts again when the same delivery starts a new uncertain transaction', async () => {
+  const o = opts(),
+    alert = vi.fn();
+  failSend = true;
+  unknown = true;
+  await keep({ ...o, alert });
+  const id = 'near:mainnet|annon.near|delivery:0|submission';
+  const old = await o.store.load(id);
+  if (!old) throw new Error('missing submitted job');
+  await o.store.compareAndSet(id, old, {
+    ...old,
+    revision: old.revision + 1,
+    tx: null,
+    stage: 'ready',
+    nextAt: 0,
+  });
+  await keep({ ...o, alert });
+  expect(alert.mock.calls.filter(([a]) => a.type === 'uncertain')).toHaveLength(2);
+});
+
+it('continues the keeper page when one dust lookup is unavailable', async () => {
+  all = [{ ...d(0), purchase: `0x${'12'.repeat(32)}` }, d(1)];
+  const fetcher = globalThis.fetch;
+  vi.stubGlobal(
+    'fetch',
+    async (url: Parameters<typeof fetch>[0], init: Parameters<typeof fetch>[1]) => {
+      const q = JSON.parse(String(init?.body));
+      if (q.params?.method_name === 'get_purchase')
+        return Response.json({ id: q.id, error: { cause: { name: 'UNAVAILABLE' } } });
+      return fetcher(url, init);
+    },
+  );
+  const result = await keep({ ...opts(), minPayout: 100000n });
+  expect(result.errors).toContainEqual(expect.objectContaining({ deliveryId: 0 }));
+  expect(result.sent.map((s) => (s.args as { delivery_id: number }).delivery_id)).toContain(1);
 });

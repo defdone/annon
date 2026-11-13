@@ -44,6 +44,10 @@ export interface KeeperRecord extends Versioned {
   balanceLow?: boolean;
   reserveCheckedAt?: number;
   inFlightAlerted?: boolean;
+  uncertainAlerted?: boolean;
+  belowMinimum?: boolean;
+  firstSeenAt?: number;
+  oldDeliveryAlerted?: boolean;
 }
 export interface RefundSource {
   /** Supply current proofs from durable event history. No indexer is bundled. Retry stale proofs. */
@@ -67,6 +71,7 @@ export interface KeepOptions {
   gasPrice: bigint;
   /** USDC base units; refunds bypass this minimum. */
   minPayout?: bigint;
+  oldestDeliverySeconds?: number;
   maxPages?: number;
   maxTransactions?: number;
   maxUnresolved?: number;
@@ -75,11 +80,12 @@ export interface KeepOptions {
   /** Minimum liquid yoctoNEAR before signing; requires max(this, submission cost). */
   balanceLowWater?: bigint;
   alert?: (alert: {
-    type: 'reserve_low' | 'in_flight' | 'uncertain' | 'breaker' | 'low_balance';
+    type: 'reserve_low' | 'in_flight' | 'uncertain' | 'breaker' | 'low_balance' | 'old_delivery';
     balance?: string;
     needed?: string;
     reserve?: string;
     deliveryId?: number;
+    seconds?: number;
   }) => void;
   refunds?: RefundSource;
   now?: () => number;
@@ -128,11 +134,20 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
   const scope = `${o.network}|${o.contractId}`;
   const out: KeepResult = { sent: [], errors: [], incidents: [] };
   const belowMinimum = async (d: DeliveryInfo): Promise<boolean> => {
-    if (d.purchase === null || BigInt(d.amount) >= (o.minPayout ?? 10000n)) return false;
-    const purchase = await getPurchase(o.nearRpc, o.contractId, d.purchase);
-    if (!purchase) return true;
-    const file = await getFile(o.nearRpc, o.contractId, purchase.file_id);
-    return !file || BigInt(d.amount) <= BigInt(file.terms.near.price);
+    const id = `${scope}|delivery:${d.id}|dust`;
+    const cached = await o.store.load(id);
+    if (cached?.belowMinimum !== undefined) return cached.belowMinimum;
+    let verdict = false;
+    if (d.purchase !== null && BigInt(d.amount) < (o.minPayout ?? 100000n)) {
+      const purchase = await getPurchase(o.nearRpc, o.contractId, d.purchase);
+      if (!purchase) throw new Error('purchase unavailable for dust decision');
+      const file = await getFile(o.nearRpc, o.contractId, purchase.file_id);
+      if (!file) throw new Error('file unavailable for dust decision');
+      verdict = BigInt(d.amount) <= BigInt(file.terms.near.price);
+    }
+    const next = { id, revision: (cached?.revision ?? -1) + 1, belowMinimum: verdict };
+    if (await o.store.compareAndSet(id, cached, next)) return verdict;
+    return (await o.store.load(id))?.belowMinimum ?? verdict;
   };
   const maxPages = o.maxPages ?? 20,
     maxTx = o.maxTransactions ?? 20;
@@ -348,6 +363,7 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
       id,
       revision: (old?.revision ?? -1) + 1,
       stage: 'preparing',
+      uncertainAlerted: false,
       ...(d ? { observed: observation(d) } : {}),
     };
     if (!(await o.store.compareAndSet(id, old, claimed))) {
@@ -406,6 +422,19 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
       )
         return;
       const result = await transport.send(tx.txHash, tx.signed);
+      if (result.uncertain) {
+        const current = await o.store.load(id);
+        if (
+          current &&
+          !current.uncertainAlerted &&
+          (await o.store.compareAndSet(id, current, {
+            ...current,
+            revision: current.revision + 1,
+            uncertainAlerted: true,
+          }))
+        )
+          o.alert?.({ type: 'uncertain', deliveryId });
+      }
       out.sent.push({ method, args, result });
       if (result.rejected) {
         const job = await o.store.load(id);
@@ -541,6 +570,17 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
         (reply.result as { final_execution_status?: string })?.final_execution_status !== 'FINAL'
       ) {
         out.incidents.push({ classification: 'uncertain', deliveryId });
+        const current = await o.store.load(id);
+        if (
+          current &&
+          !current.uncertainAlerted &&
+          (await o.store.compareAndSet(id, current, {
+            ...current,
+            revision: current.revision + 1,
+            uncertainAlerted: true,
+          }))
+        )
+          o.alert?.({ type: 'uncertain', deliveryId });
         return false;
       }
       const result = readOutcome(reply.result, o.contractId, {
@@ -690,8 +730,23 @@ export async function runKeeper(o: KeepOptions, transport: Transport): Promise<K
     try {
       const deliveries = await listOpenDeliveries(o.nearRpc, o.contractId, from, 50, cursor.block);
       for (const snapshot of deliveries) {
-        if (await belowMinimum(snapshot)) continue;
+        const ageId = `${scope}|delivery:${snapshot.id}|age`;
+        let age = await o.store.load(ageId);
+        if (age?.firstSeenAt === undefined) age = await update(ageId, { firstSeenAt: now() });
+        const seconds = Math.floor((now() - (age.firstSeenAt ?? now())) / 1000);
+        if (
+          seconds >= (o.oldestDeliverySeconds ?? 1800) &&
+          !age.oldDeliveryAlerted &&
+          (await o.store.compareAndSet(ageId, age, {
+            ...age,
+            revision: age.revision + 1,
+            oldDeliveryAlerted: true,
+          }))
+        )
+          o.alert?.({ type: 'old_delivery', deliveryId: snapshot.id, seconds });
+
         try {
+          if (await belowMinimum(snapshot)) continue;
           const id = `${scope}|delivery:${snapshot.id}|submission`;
           const job = await o.store.load(id);
           if (job?.tx || job?.stage === 'preparing') {

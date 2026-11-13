@@ -42,6 +42,20 @@ const cases = [
         args: { file_id, key: t.seller_key, deadline },
         text: `Annon: open a file again\nSigning this lets whoever holds the one-time key below open the file.\ncontract: ${contractId}\nfile: ${file_id}\nseller: ${text(seller)}\none-time key: ${t.seller_key}\nvalid until: ${utc(deadline)}`,
       },
+      {
+        id: `funding-${t.id}`,
+        contractId,
+        network: t.terms.network,
+        kind: 'fund_file_storage',
+        seller,
+        args: {
+          file_id,
+          amount: '41000000000000000000000',
+          nonce: `0x${'33'.repeat(32)}`,
+          deadline,
+        },
+        text: `Annon: request sponsored file storage\nnetwork: ${t.terms.network}\ncontract: ${contractId}\nseller: ${text(seller)}\nfile: ${file_id}\namount: 41000000000000000000000\nnonce: 0x${'33'.repeat(32)}\nexpires: ${deadline}`,
+      },
     ];
   }),
 ];
