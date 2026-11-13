@@ -18,6 +18,8 @@ import {
   view,
 } from './rpc.js';
 import {
+  type FileFundingArgs,
+  fileFundingText,
   type RegisterArgs,
   registerText,
   reopenSellerText,
@@ -260,6 +262,7 @@ describe('draft-3 authoritative texts', () => {
     readFileSync(new URL('../../../../specs/vectors/texts.json', import.meta.url), 'utf8'),
   ).cases as {
     kind: string;
+    network?: string;
     contractId: string;
     args: unknown;
     seller: Identity;
@@ -269,15 +272,22 @@ describe('draft-3 authoritative texts', () => {
   for (const v of cases)
     it(v.id, () => {
       const text =
-        v.kind === 'register'
-          ? registerText(v.contractId, v.args as RegisterArgs)
-          : v.kind === 'reopen'
-            ? reopenText(v.args as ReopenV2)
-            : v.kind === 'reopen_seller'
-              ? reopenSellerText(v.contractId, v.args as SellerArgs, v.seller)
-              : stopSalesText(v.contractId, v.args as SellerArgs, v.seller);
+        v.kind === 'fund_file_storage'
+          ? fileFundingText({
+              ...(v.args as FileFundingArgs),
+              network: v.network ?? '',
+              contract: v.contractId,
+              seller: v.seller,
+            })
+          : v.kind === 'register'
+            ? registerText(v.contractId, v.args as RegisterArgs)
+            : v.kind === 'reopen'
+              ? reopenText(v.args as ReopenV2)
+              : v.kind === 'reopen_seller'
+                ? reopenSellerText(v.contractId, v.args as SellerArgs, v.seller)
+                : stopSalesText(v.contractId, v.args as SellerArgs, v.seller);
       expect(text).toBe(v.text);
-      expect(text).not.toContain('\nnetwork:');
+      if (v.kind !== 'fund_file_storage') expect(text).not.toContain('\nnetwork:');
       expect(text.endsWith('\n')).toBe(false);
     });
 });
@@ -519,4 +529,70 @@ it('classifies absent access keys as refusal, never as a retryable transport fai
   await expect(
     isFullAccessKey('https://rpc', 'buyer.near', 'ed25519:missing'),
   ).rejects.toMatchObject({ code: 'refused' });
+});
+
+it('pins get_file to a requested cutover block and keeps validation', async () => {
+  const fetch = vi.fn(async (_url: unknown, init: RequestInit | undefined) => {
+    const q = JSON.parse(String(init?.body));
+    return Response.json({
+      id: q.id,
+      result: {
+        result: [
+          ...Buffer.from(
+            JSON.stringify({
+              terms,
+              terms_hash: termsHash(terms),
+              header_hash: null,
+              sales_stopped_at: null,
+              taken_down: null,
+            }),
+          ),
+        ],
+      },
+    });
+  });
+  vi.stubGlobal('fetch', fetch);
+  expect(
+    (await getFile('https://rpc.test', terms.contract, terms.file_id, 'cutover'))?.termsHash,
+  ).toBe(termsHash(terms));
+  expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body)).params).toMatchObject({
+    block_id: 'cutover',
+  });
+  expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body)).params.finality).toBeUndefined();
+});
+
+it('serializes a seller storage request with an exact domain and no trailing newline', async () => {
+  const { fileFundingText } = await import('./texts.js');
+  expect(
+    fileFundingText({
+      network: 'near:mainnet',
+      contract: 'market.synthetic.near',
+      seller: { kind: 'evm', id: `0x${'11'.repeat(20)}` },
+      file_id: `0x${'22'.repeat(32)}`,
+      amount: '41000000000000000000000',
+      nonce: `0x${'33'.repeat(32)}`,
+      deadline: 1794528600,
+    }),
+  ).toBe(
+    `Annon: request sponsored file storage\nnetwork: near:mainnet\ncontract: market.synthetic.near\nseller: EVM 0x${'11'.repeat(20)}\nfile: 0x${'22'.repeat(32)}\namount: 41000000000000000000000\nnonce: 0x${'33'.repeat(32)}\nexpires: 1794528600`,
+  );
+});
+
+it('binds sponsored funding to deployment, registered seller, amount, nonce and expiry', () => {
+  const request = {
+    network: terms.network,
+    contract: terms.contract,
+    seller: terms.seller,
+    file_id: terms.file_id,
+    amount: '41000000000000000000000',
+    nonce: `0x${'66'.repeat(32)}`,
+    deadline: 1800000600,
+  };
+  const text = fileFundingText(request);
+  expect(text).toContain('Annon: request sponsored file storage\nnetwork: near:mainnet\n');
+  expect(text).toContain('\namount: 41000000000000000000000\nnonce: 0x');
+  expect(text.endsWith('\n')).toBe(false);
+  expect(text).toContain('\nexpires: 1800000600');
+  for (const amount of ['0', '-1', '01', '1e3'])
+    expect(() => fileFundingText({ ...request, amount })).toThrow();
 });

@@ -3,6 +3,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { base58, base64 } from '@scure/base';
 import { Account, actions, encodeTransaction, JsonRpcProvider } from 'near-api-js';
 import {
+  type FileInfo,
   getFile,
   getGrant,
   getPurchase,
@@ -13,6 +14,8 @@ import {
   view,
 } from '../near/rpc.js';
 import {
+  type FileFundingArgs,
+  fileFundingText,
   type RegisterArgs,
   type ReopenArgs,
   registerText,
@@ -34,16 +37,21 @@ import {
 import { type SettlementAssets, termsHash } from '../settle-near/terms.js';
 import { checkProtocolFee, type ProtocolFee } from './fees.js';
 import { type KeepOptions, type KeepResult, runKeeper } from './keeper-runner.js';
+import type { RelayLedger, RelayLimits, SponsorshipDecision } from './ledger.js';
+import { requestHash } from './ledger.js';
+import { type HostingReservation, parseReservation, verifyReservation } from './reservation.js';
+import { admitTerms, checkedDecision, relayLimits, temporary } from './sponsorship.js';
 
 export type { KeeperRecord, KeepOptions, KeepResult, RefundSource } from './keeper-runner.js';
 
 export type RelayRequest =
-  | { method: 'fund_file_storage'; args: { file_id: string; amount: string } }
+  | { method: 'fund_file_storage'; args: FileFundingArgs; auth: Authorization }
   | {
       method: 'register';
       args: RegisterArgs;
       auth: Authorization;
       baseSplit?: { kind: 'push' | 'pull'; salt: string };
+      hostingReservation?: HostingReservation;
     }
   | { method: 'reopen'; args: ReopenArgs; auth: Authorization }
   | { method: 'stop_sales' | 'reopen_seller'; args: SellerArgs; auth: Authorization }
@@ -64,7 +72,8 @@ export type RelayErrorCode =
   | 'taken_down'
   | 'not_buyer'
   | 'payment_not_found'
-  | 'payment_not_safe'
+  | 'settlement_pending'
+  | 'relayer_unavailable'
   | 'payment_used'
   | 'bad_header'
   | 'transport';
@@ -85,6 +94,18 @@ const fail = (code: RelayErrorCode, message?: string): never => {
 export interface RelayPolicy {
   minPrice: bigint;
   baseSponsorship?: boolean;
+  openPoolEnabled?: boolean;
+  listedRegistrationsPerSeller?: number;
+  unlocksPerFile?: number;
+  unlocksPerSeller?: number;
+  listedUnlocksPerFile?: number;
+  listedUnlocksPerSeller?: number;
+  listedTopupPerFile?: bigint;
+  listedTopupPerFileDay?: bigint;
+  topupListedReserved?: bigint;
+  prepaidUnlockFloor?: bigint;
+  storagePerWrite?: bigint;
+  topupMaxDeadlineSeconds?: number;
   /** Listed sellers get a larger allocation; unlisted sellers remain eligible. */
   fileBudget?: bigint;
   listedFileBudget?: bigint;
@@ -112,6 +133,19 @@ export interface CheckOptions {
   nearUsdc?: string;
   policy: RelayPolicy;
   now?: number;
+  network?: string;
+  ledger?: RelayLedger;
+  admissionLimits?: Partial<RelayLimits>;
+  ip?: string;
+  acceptingNewBasePayments?: boolean;
+  historicalFile?: (fileId: string, blockHash: string) => Promise<FileInfo | null>;
+  reservation?: {
+    hostOrigin: string;
+    publicKey: string;
+    fetch?: typeof fetch;
+    maxFileBytes?: number;
+  };
+  alert?: (type: string) => void;
 }
 export function canonicalRequest(input: unknown, assets?: SettlementAssets): RelayRequest {
   try {
@@ -122,7 +156,12 @@ export function canonicalRequest(input: unknown, assets?: SettlementAssets): Rel
       'args',
       ...('auth' in r ? ['auth'] : []),
       ...('baseSplit' in r ? ['baseSplit'] : []),
+      ...('hostingReservation' in r ? ['hostingReservation'] : []),
     ]);
+    if ('hostingReservation' in r) {
+      if (r.method !== 'register') throw new Error('invalid hosting reservation');
+      r.hostingReservation = parseReservation(r.hostingReservation);
+    }
     if ('baseSplit' in r) {
       if (r.method !== 'register' || !r.baseSplit) throw new Error('invalid split provenance');
       exactKeys(r.baseSplit, ['kind', 'salt']);
@@ -130,6 +169,12 @@ export function canonicalRequest(input: unknown, assets?: SettlementAssets): Rel
       bytes(r.baseSplit.salt, 32);
     }
     if ('auth' in r) {
+      if (
+        !['register', 'reopen', 'reopen_seller', 'stop_sales', 'fund_file_storage'].includes(
+          r.method,
+        )
+      )
+        throw new Error('unexpected authorization');
       exactKeys(r.auth, ['kind', 'sig']);
       if (!['evm', 'solana'].includes(r.auth.kind)) throw new Error('invalid auth kind');
       bytes(r.auth.sig, r.auth.kind === 'evm' ? 65 : 64);
@@ -137,7 +182,8 @@ export function canonicalRequest(input: unknown, assets?: SettlementAssets): Rel
     const a = r.args;
     switch (r.method) {
       case 'fund_file_storage':
-        exactKeys(a, ['file_id', 'amount']);
+        exactKeys(a, ['file_id', 'amount', 'nonce', 'deadline']);
+        bytes(r.args.nonce, 32);
         bytes(r.args.file_id, 32);
         if (uint(r.args.amount, 128) <= 0n) throw new Error('positive topup required');
         break;
@@ -217,7 +263,12 @@ export function canonicalRequest(input: unknown, assets?: SettlementAssets): Rel
       if (!Number.isSafeInteger(a.deadline)) throw new Error('invalid deadline');
       uint(String(a.deadline), 64);
     }
-    if (['register', 'reopen', 'stop_sales', 'reopen_seller'].includes(r.method) && !('auth' in r))
+    if (
+      ['register', 'reopen', 'stop_sales', 'reopen_seller', 'fund_file_storage'].includes(
+        r.method,
+      ) &&
+      !('auth' in r)
+    )
       throw new Error('auth required; NEAR identities call directly');
     return r;
   } catch (e) {
@@ -226,7 +277,13 @@ export function canonicalRequest(input: unknown, assets?: SettlementAssets): Rel
 }
 /** Contract wire shape: unlock and identity calls wrap args; claim_key is flat. */
 export const contractArgs = (r: RelayRequest): object =>
-  'auth' in r ? { args: r.args, auth: r.auth } : r.method === 'unlock' ? { args: r.args } : r.args;
+  r.method === 'fund_file_storage'
+    ? { file_id: r.args.file_id, amount: r.args.amount }
+    : 'auth' in r
+      ? { args: r.args, auth: r.auth }
+      : r.method === 'unlock'
+        ? { args: r.args }
+        : r.args;
 const asRelayError = (e: unknown): never => {
   if (e instanceof RelayError) throw e;
   return fail(
@@ -238,7 +295,14 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
   try {
     if ('deadline' in r.args) {
       const now = o.now ?? Math.floor(Date.now() / 1000);
-      if (r.args.deadline < now || r.args.deadline > now + o.policy.maxDeadlineSeconds)
+      if (
+        (r.method === 'fund_file_storage' ? r.args.deadline <= now : r.args.deadline < now) ||
+        r.args.deadline >
+          now +
+            (r.method === 'fund_file_storage'
+              ? (o.policy.topupMaxDeadlineSeconds ?? 600)
+              : o.policy.maxDeadlineSeconds)
+      )
         fail('bad_deadline');
     }
     const fileId =
@@ -297,16 +361,44 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
           fail('not_sponsored', 'Base split does not match recipients');
         }
       }
+      if (o.ledger) {
+        const listed = await o.policy.sellerAllowed?.(identityJson(r.args.terms.seller));
+        if (!listed && o.policy.openPoolEnabled === false) temporary();
+        await admitTerms(r.args.terms, o, listed ? 'listed' : 'pool');
+        if (r.hostingReservation) {
+          if (!o.reservation) return fail('not_sponsored');
+          await verifyReservation(r.hostingReservation, r.args.terms, {
+            ...o.reservation,
+            now: o.now ?? Math.floor(Date.now() / 1000),
+          }).catch(() => fail('not_sponsored'));
+        } else if (!listed) fail('not_sponsored', 'A hosting reservation is required.');
+      }
       return;
     }
     if (!file) return fail('unknown_file');
     if (file.takenDown) fail('taken_down');
     if (r.method === 'fund_file_storage') {
-      if (!sponsoredFiles.has(`${o.nearRpc}|${o.contractId}|${r.args.file_id}`))
+      if (
+        !verifyAuthorization(
+          file.seller,
+          fileFundingText({
+            ...r.args,
+            network: file.terms.network,
+            contract: o.contractId,
+            seller: file.seller,
+          }),
+          r.auth,
+        )
+      )
+        fail('bad_signature');
+      if (file.salesStoppedAt !== null) fail('sales_stopped');
+      if (!o.ledger || !(await o.ledger.decision(r.args.file_id, file.termsHash)))
         fail('not_sponsored');
       return;
     }
     if (r.method === 'claim_key') {
+      const price = p?.route === 'base-usdc' ? file.terms.base?.price : file.terms.near.price;
+      if (price === undefined || BigInt(price) < o.policy.minPrice) fail('not_sponsored');
       if (!(await getGrant(o.nearRpc, o.contractId, r.args.purchase_id, r.args.grant)))
         fail('not_buyer');
       return;
@@ -338,10 +430,10 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
       return;
     }
     if (r.method !== 'unlock') return;
-    if (o.policy.baseSponsorship === false) fail('not_sponsored');
+    if (!o.ledger && o.policy.baseSponsorship === false) fail('not_sponsored');
     const a = r.args;
     const purchase = parsePurchaseMessage(a.purchase, { baseUsdc: o.usdc });
-    if (BigInt(purchase.price) < o.policy.minPrice) fail('not_sponsored');
+    if (!o.ledger && BigInt(purchase.price) < o.policy.minPrice) fail('not_sponsored');
     const id = purchaseId(purchase, { baseUsdc: o.usdc });
     if (
       purchase.route !== 'base-usdc' ||
@@ -352,40 +444,48 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
       purchase.asset !== o.usdc
     )
       return fail('bad_request');
-    try {
-      if (file.terms.near.recipients.some((r) => r.identity.kind !== 'evm'))
-        fail('not_sponsored', 'Base split recipients must be EVM identities');
-      if (o.policy.fee) checkProtocolFee(file.terms, o.policy.fee);
-    } catch {
-      fail('not_sponsored', 'required treasury share missing or invalid');
-    }
-    const verifiedKey = JSON.stringify([o.baseRpc, o.nearRpc, o.contractId, termsHash(file.terms)]);
-    const now = Date.now();
-    for (const [key, until] of refusedBaseTerms) {
-      if (until <= now) refusedBaseTerms.delete(key);
-    }
-    if (refusedBaseTerms.has(verifiedKey))
-      fail('not_sponsored', 'Base split code or state does not match registered recipients');
-    if (!verifiedBaseTerms.has(verifiedKey)) {
+    if (o.ledger) await checkedDecision(file, o, true);
+    else {
       try {
-        await readSplitState(o.baseRpc, file.terms.base.pay_to, {
-          recipients: file.terms.near.recipients.map((r) => r.identity.id),
-          allocations: file.terms.near.recipients.map((r) => BigInt(r.bps)),
-          totalAllocation: 10000n,
-          distributionIncentive: 0,
-        });
-      } catch (error) {
-        if (error instanceof PayError && error.code === 'transport')
-          fail('unavailable', 'Base split verification unavailable; retry later');
-        // Bound attacker-controlled refusals; transient RPC failures are never cached.
-        if (refusedBaseTerms.size >= 1024) {
-          const oldest = refusedBaseTerms.keys().next().value;
-          if (oldest !== undefined) refusedBaseTerms.delete(oldest);
-        }
-        refusedBaseTerms.set(verifiedKey, Date.now() + 60000);
-        fail('not_sponsored', 'Base split code or state does not match registered recipients');
+        if (file.terms.near.recipients.some((r) => r.identity.kind !== 'evm'))
+          fail('not_sponsored', 'Base split recipients must be EVM identities');
+        if (o.policy.fee) checkProtocolFee(file.terms, o.policy.fee);
+      } catch {
+        fail('not_sponsored', 'required treasury share missing or invalid');
       }
-      verifiedBaseTerms.add(verifiedKey);
+      const verifiedKey = JSON.stringify([
+        o.baseRpc,
+        o.nearRpc,
+        o.contractId,
+        termsHash(file.terms),
+      ]);
+      const now = Date.now();
+      for (const [key, until] of refusedBaseTerms) {
+        if (until <= now) refusedBaseTerms.delete(key);
+      }
+      if (refusedBaseTerms.has(verifiedKey))
+        fail('not_sponsored', 'Base split code or state does not match registered recipients');
+      if (!verifiedBaseTerms.has(verifiedKey)) {
+        try {
+          await readSplitState(o.baseRpc, file.terms.base.pay_to, {
+            recipients: file.terms.near.recipients.map((r) => r.identity.id),
+            allocations: file.terms.near.recipients.map((r) => BigInt(r.bps)),
+            totalAllocation: 10000n,
+            distributionIncentive: 0,
+          });
+        } catch (error) {
+          if (error instanceof PayError && error.code === 'transport')
+            fail('unavailable', 'Base split verification unavailable; retry later');
+          // Bound attacker-controlled refusals; transient RPC failures are never cached.
+          if (refusedBaseTerms.size >= 1024) {
+            const oldest = refusedBaseTerms.keys().next().value;
+            if (oldest !== undefined) refusedBaseTerms.delete(oldest);
+          }
+          refusedBaseTerms.set(verifiedKey, Date.now() + 60000);
+          fail('not_sponsored', 'Base split code or state does not match registered recipients');
+        }
+        verifiedBaseTerms.add(verifiedKey);
+      }
     }
     if (await getPurchase(o.nearRpc, o.contractId, id)) fail('payment_used');
     const auth = a.logs[0];
@@ -403,7 +503,7 @@ export async function checkRelay(r: RelayRequest, o: CheckOptions): Promise<void
       safe.number < auth.block_number ||
       (await block(o.baseRpc, auth.block_number)).hash !== `0x${auth.block_hash}`
     )
-      fail('payment_not_safe');
+      fail('settlement_pending');
     if (a.header !== null && (await blockHeader(o.baseRpc, `0x${auth.block_hash}`)) !== a.header)
       fail('bad_header');
     if (file.salesStoppedAt !== null) {
@@ -432,9 +532,6 @@ const GAS = 300_000_000_000_000n;
  * (an unlock reserves 0.005 NEAR, a reopen marker under 0.001).
  */
 const STORAGE_PER_WRITE = 10n ** 22n; // 0.01 NEAR
-/** How long a sent write is counted against the balance read; an estimate of when its storage shows there. */
-const WRITE_SETTLES = 2 * 60_000;
-const DAY = 86_400_000;
 /** An operation is held this long after it is sent, so a repeat doesn't burn gas on a refusal. */
 const HOLD = 15 * 60_000;
 /** How many more tries after the first send: the same bytes again, or after PENDING a lookup. */
@@ -444,43 +541,21 @@ const RETRY_WAIT = 1_000;
 /** Requests waiting for their turn; past this the relayer answers busy. */
 const MAX_WAITING = 32;
 
-// Note: state in memory, one process; a restart forgets limits and holds, bounded by the key's
-// allowance and the sender's prepaid balance. The contract refuses an operation done twice.
 const accounts = new Map<string, Account>();
-const held = new Map<string, number>();
-const submitted = new Map<string, RelayResult>();
-interface CachedClaim {
-  result: RelayResult;
-  signer: string;
-  nextAt: number;
-  refresh?: Promise<void>;
-}
-const claims = new Map<string, CachedClaim>();
-const counts = new Map<string, { n: number; until: number }>();
-/** When each recent write was sent, per payer and contract (see `enoughStorage`). */
-const writes = new Map<string, { at: number; amount: bigint }[]>();
-// Successful Base code/state checks last until restart; refused checks expire after 60 seconds.
 const verifiedBaseTerms = new Set<string>();
 const refusedBaseTerms = new Map<string, number>();
-// Allocations remain charged after ambiguous sends. Restart forgets eligibility, so topups fail closed.
-const sponsoredFiles = new Map<string, { allocated: bigint; day: number; today: bigint }>();
-const topupDays = new Map<string, { day: number; amount: bigint }>();
 const queues = new Map<string, Promise<unknown>>();
+let statusReads = new WeakMap<RelayLedger, Map<string, Promise<RelayResult | 'pending' | null>>>();
+const reconciliationCursor = new WeakMap<RelayLedger, number>();
 let waiting = 0;
 let checking = 0;
 
-/** Clears the in-memory limits; for tests. */
+/** Clears process-local nonce and split caches for tests. Durable state remains intact. */
 export function resetRelayState() {
-  held.clear();
-  submitted.clear();
-  claims.clear();
-  counts.clear();
   accounts.clear();
-  writes.clear();
-  sponsoredFiles.clear();
   verifiedBaseTerms.clear();
   refusedBaseTerms.clear();
-  topupDays.clear();
+  statusReads = new WeakMap();
 }
 
 /**
@@ -550,36 +625,11 @@ function describe(e: NonNullable<RpcReply['error']>) {
   return JSON.stringify(refused ?? { name, cause, data, message });
 }
 
-/** The transaction's status now (`wait_until: NONE` waits for nothing); a lost reply is no answer. */
+/** Ask for FINAL evidence by hash; a lost reply never proves rejection. */
 const lookUp = (url: string, tx: string, accountId: string) =>
-  rpcReply(url, 'tx', { tx_hash: tx, sender_account_id: accountId, wait_until: 'NONE' }).catch(
+  rpcReply(url, 'tx', { tx_hash: tx, sender_account_id: accountId, wait_until: 'FINAL' }).catch(
     () => null,
   );
-
-/**
- * An estimate, not a promise: the prepaid balance read now covers this write and the writes sent
- * in the last couple of minutes, which a balance read may not show yet. The contract decides; a
- * write it refuses for storage costs gas, within the key's allowance.
- */
-async function enoughStorage(
-  o: CheckOptions & { sender: Sender },
-  scope: string,
-  required = STORAGE_PER_WRITE,
-) {
-  const since = Date.now() - WRITE_SETTLES;
-  const recent = (writes.get(scope) ?? []).filter((t) => t.at > since);
-  writes.set(scope, recent);
-  const balance = await view(o.nearRpc, o.contractId, 'storage_balance_of', {
-    account_id: o.sender.accountId,
-  });
-  if (
-    typeof balance !== 'string' ||
-    !/^\d+$/.test(balance) ||
-    BigInt(balance) < required + recent.reduce((sum, item) => sum + item.amount, 0n)
-  ) {
-    fail('unavailable', "the relayer's prepaid storage is low; try later or send it yourself");
-  }
-}
 
 const senderKey = (o: { nearRpc: string; sender: Sender }) =>
   `${o.nearRpc}|${o.sender.accountId}|${o.sender.key}`;
@@ -607,7 +657,7 @@ const identity = (r: RelayRequest) => {
     return `reopen:${r.args.purchase_id}:${r.args.fresh_key}:${r.args.nonce}`;
   if (r.method === 'register') return `register:${r.args.terms.file_id}`;
   if (r.method === 'fund_file_storage')
-    return `fund_file_storage:${r.args.file_id}:${r.args.amount}`;
+    return `fund_file_storage:${r.args.file_id}:${r.args.nonce}`;
   return `${r.method}:${r.args.file_id}:${r.args.key ?? ''}`;
 };
 const signedByItsWallet = (r: RelayRequest, contract: string, assets?: SettlementAssets) => {
@@ -646,76 +696,17 @@ export async function relayStatus(
   o: CheckOptions,
 ): Promise<RelayResult | 'pending' | null> {
   try {
-    const assets = { baseUsdc: o.usdc, ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}) };
-    const r = canonicalRequest(input, assets);
-    const operation = `${o.nearRpc}|${o.contractId}|${identity(r)}`;
-    // Cheap miss first: this runs before the IP limiter, so unknown requests never reach a signature check.
-    if ((held.get(operation) ?? 0) <= Date.now()) return null;
-    signedByItsWallet(r, o.contractId, assets);
-    const cached = claims.get(operation);
-    if (
-      r.method === 'claim_key' &&
-      cached &&
-      cached.result === submitted.get(operation) &&
-      cached.nextAt <= Date.now()
-    ) {
-      // Coalesce polls; an old lookup must never retire a replacement admitted meanwhile.
-      cached.refresh ??= (async () => {
-        const reply = await lookUp(o.nearRpc, cached.result.txHash, cached.signer);
-        let retry = reply?.error?.cause?.name === 'UNKNOWN_TRANSACTION';
-        let succeeded = false;
-        if (
-          reply &&
-          !reply.error &&
-          (reply.result as { final_execution_status?: unknown })?.final_execution_status === 'FINAL'
-        ) {
-          try {
-            const outcome = readOutcome(reply.result, o.contractId, {
-              txHash: cached.result.txHash,
-              signer: cached.signer,
-              method: 'claim_key',
-              args: contractArgs(r),
-            });
-            retry = outcome.state !== 'released';
-            succeeded = !retry;
-          } catch {
-            /* Unbound or malformed outcomes cannot justify a new send. */
-          }
-        }
-        if (claims.get(operation) !== cached || submitted.get(operation) !== cached.result) return;
-        if (retry) {
-          claims.delete(operation);
-          submitted.delete(operation);
-          held.delete(operation);
-        } else
-          cached.nextAt = succeeded
-            ? Number.POSITIVE_INFINITY
-            : Date.now() + (o.policy.holdMs ?? HOLD);
-      })().finally(() => {
-        delete cached.refresh;
-      });
-      await cached.refresh;
-    }
-    if ((held.get(operation) ?? 0) <= Date.now()) return null;
-    return submitted.get(operation) ?? 'pending';
+    const r = canonicalRequest(input, {
+      baseUsdc: o.usdc,
+      ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
+    });
+    return o.ledger ? durableStatus(r, o) : null;
   } catch (e) {
     return asRelayError(e);
   }
 }
 
-/**
- * Checks the request and sends it with the sender's key, no deposit (storage comes from the
- * sender's prepaid balance on the contract). Chain checks run before the signing queue; deadline
- * freshness and shared prepaid storage are checked inside it. Holds and limits are taken after
- * validation and given back only
- * if the request fails before its transaction is sent. Returns the transaction hash once it is in
- * a block (or `uncertain`); the caller reads the outcome itself through its own NEAR RPC
- * (`txOutcome` with the method and args it asked for).
- *
- * The contract enforces one-time operations. Claims retain their hash through the quota window;
- * after the recent hold, a bound FINAL outcome other than released, or an unknown transaction,
- * permits a charged retry. Released, non-final and inconclusive lookups keep the cached hash.
- */
+/** Every sponsored send reserves durable admission before signing. */
 export async function relay(
   input: unknown,
   o: CheckOptions & { sender: Sender },
@@ -724,195 +715,517 @@ export async function relay(
     baseUsdc: o.usdc,
     ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
   });
-  // A forged request must not take another wallet's limit or hold its operation.
+  if (!o.ledger) return temporary(r.method === 'unlock');
+  try {
+    return await durableRelay(r, o, o.ledger);
+  } catch (e) {
+    if (
+      r.method === 'unlock' &&
+      e instanceof RelayError &&
+      ['settlement_pending', 'relayer_unavailable', 'transport', 'unavailable'].includes(e.code)
+    ) {
+      await deferPaidUnlock(r, o, e.retryAt ?? Date.now() + 30000);
+      if (e.code !== 'settlement_pending') return temporary(true, e.retryAt ?? Date.now() + 30000);
+    }
+    throw e;
+  }
+}
+
+/** Retain bounded paid work while admission or the service is temporarily paused. */
+export async function deferPaidUnlock(
+  input: unknown,
+  o: CheckOptions,
+  nextAt: number,
+): Promise<void> {
+  if (!o.ledger) return;
+  const r = canonicalRequest(input, {
+    baseUsdc: o.usdc,
+    ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
+  });
+  if (r.method !== 'unlock') return;
+  try {
+    await o.ledger.defer(
+      identity(r),
+      r,
+      requestHash(requestBinding(r)),
+      nextAt,
+      o.policy.maxWaiting ?? 32,
+    );
+  } catch (e) {
+    o.alert?.('paid_work_full');
+    throw e;
+  }
+  o.alert?.('paid_unlock_delayed');
+}
+
+/** Reconcile final evidence and resume only previously signed transaction bytes. */
+export async function reconcileRelayStorage(o: {
+  ledger?: RelayLedger;
+  nearRpc: string;
+  contractId: string;
+  sender?: Sender;
+  disabled?: boolean;
+  alert?: (type: string) => void;
+}): Promise<void> {
+  if (!o.ledger) return;
+  const all = Object.values((await o.ledger.read()).operations).filter(
+    (op) => op.stage === 'submitted' && op.tx && !op.storageFinalized,
+  );
+  const offset = (reconciliationCursor.get(o.ledger) ?? 0) % (all.length || 1);
+  const pending = [...all.slice(offset), ...all.slice(0, offset)].slice(0, 32);
+  reconciliationCursor.set(o.ledger, (offset + pending.length) % (all.length || 1));
+  for (const op of pending) {
+    const tx = op.tx;
+    if (!tx) continue;
+    const reply = await lookUp(o.nearRpc, tx.txHash, tx.signer);
+    if (
+      !o.disabled &&
+      reply?.error?.cause?.name === 'UNKNOWN_TRANSACTION' &&
+      o.sender?.accountId === tx.signer
+    ) {
+      const resumed = { ...o, sender: o.sender };
+      let expired = false;
+      if (tx.referenceHash) {
+        try {
+          const protocol = await rpcReply(o.nearRpc, 'EXPERIMENTAL_protocol_config', {
+            finality: 'final',
+          });
+          const head = await rpcReply(o.nearRpc, 'block', { finality: 'final' });
+          const reference = await rpcReply(o.nearRpc, 'block', { block_id: tx.referenceHash });
+          const period = (protocol.result as { transaction_validity_period?: number })
+            ?.transaction_validity_period;
+          const height = (head.result as { header?: { height?: number } })?.header?.height;
+          const from = (reference.result as { header?: { height?: number } })?.header?.height;
+          expired =
+            !protocol.error &&
+            !head.error &&
+            !reference.error &&
+            Number.isSafeInteger(period) &&
+            Number.isSafeInteger(height) &&
+            Number.isSafeInteger(from) &&
+            (period ?? 0) > 0 &&
+            (from ?? -1) >= 0 &&
+            (height ?? 0) - (from ?? 0) > (period ?? 0);
+        } catch {
+          /* Missing expiry evidence keeps the original hold. */
+        }
+      }
+      const result = expired
+        ? { txHash: tx.txHash, rejected: true as const, reason: 'Expired' }
+        : await enqueue(
+            () => send(resumed, senderKey(resumed), tx.txHash, tx.signed, false, true),
+            senderKey(resumed),
+          );
+      if (result.rejected && ['Expired', 'InvalidNonce'].includes(result.reason ?? '')) {
+        // Check again after the refusal: a landed transaction always wins over fresh signing.
+        const final = await lookUp(o.nearRpc, tx.txHash, tx.signer);
+        if (final?.error?.cause?.name === 'UNKNOWN_TRANSACTION') {
+          try {
+            if (op.method === 'unlock')
+              await o.ledger.defer(
+                op.id,
+                { method: 'unlock', args: (tx.args as { args: object }).args },
+                op.requestHash,
+                Date.now() + 30000,
+              );
+            await o.ledger.reject(op.id);
+            if (op.method === 'unlock') o.alert?.('paid_unlock_delayed');
+          } catch {
+            o.alert?.('paid_work_full');
+          }
+          continue;
+        }
+      }
+      await o.ledger.result(
+        op.id,
+        result.rejected ? { txHash: tx.txHash, uncertain: true } : result,
+      );
+      continue;
+    }
+    if ((reply?.result as { final_execution_status?: string })?.final_execution_status !== 'FINAL')
+      continue;
+    try {
+      const result = readOutcome(reply?.result, o.contractId, {
+        txHash: tx.txHash,
+        signer: tx.signer,
+        method: op.method,
+        args: tx.args,
+      });
+      if (result.state !== 'pending') {
+        if (op.method === 'register') {
+          const file = await getFile(o.nearRpc, o.contractId, op.fileId);
+          if (file?.termsHash === op.termsHash) await o.ledger.registered(op.fileId, op.termsHash);
+          else {
+            await o.ledger.reject(op.id, false);
+            continue;
+          }
+        }
+        await o.ledger.finalizeStorage(op.id, tx.txHash, result.state);
+      }
+    } catch {
+      /* Unbound evidence cannot release a prepaid hold. */
+    }
+  }
+}
+
+/** Durable status never re-signs an unresolved operation. */
+async function durableStatus(
+  r: RelayRequest,
+  o: CheckOptions,
+): Promise<RelayResult | 'pending' | null> {
+  const ledger = o.ledger;
+  if (!ledger) return null;
+  const op = await ledger.operation(identity(r));
+  if (!op || op.stage === 'rejected') return null;
+  if (op.requestHash !== requestHash(requestBinding(r))) return fail('bad_request');
   signedByItsWallet(r, o.contractId, {
     baseUsdc: o.usdc,
     ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
   });
-  const operation = `${o.nearRpc}|${o.contractId}|${identity(r)}`;
-  const previous = await relayStatus(r, o);
-  if (previous === 'pending')
-    return fail('in_flight', 'this operation is in flight; retry shortly');
+  if (!op.tx) return 'pending';
+  if (op.compact && op.stage === 'submitted') return op.result ?? { txHash: op.tx.txHash };
+  if (r.method === 'register') {
+    const file = await getFile(o.nearRpc, o.contractId, op.fileId).catch(() => null);
+    if (file?.termsHash === op.termsHash) await ledger.registered(op.fileId, op.termsHash);
+    else if (op.tx) {
+      const reply = await lookUp(o.nearRpc, op.tx.txHash, op.tx.signer);
+      if (
+        (reply?.result as { final_execution_status?: string })?.final_execution_status === 'FINAL'
+      ) {
+        try {
+          readOutcome(reply?.result, o.contractId, {
+            txHash: op.tx.txHash,
+            signer: op.tx.signer,
+            method: r.method,
+            args: op.tx.args,
+          });
+          // An unavailable file read does not prove rejection. Read final state again before releasing.
+          const final = await getFile(o.nearRpc, o.contractId, op.fileId);
+          if (final?.termsHash === op.termsHash) await ledger.registered(op.fileId, op.termsHash);
+          else if (!final) {
+            await ledger.reject(op.id, false);
+            return null;
+          }
+        } catch {
+          /* Preserve unresolved registration evidence. */
+        }
+      }
+    }
+  }
+  if (!op.tx) return 'pending';
+  if (
+    r.method === 'unlock' &&
+    op.storageFinalized &&
+    op.at + (o.policy.holdMs ?? HOLD) <= Date.now() &&
+    !(await getPurchase(o.nearRpc, o.contractId, identity(r).slice('unlock:'.length)))
+  ) {
+    await ledger.retire(op.id, op.tx.txHash);
+    return null;
+  }
+  if (r.method === 'claim_key' && op.at + (o.policy.holdMs ?? HOLD) <= Date.now()) {
+    const tx = op.tx;
+    if (op.finalState === 'released') return op.result ?? { txHash: tx.txHash };
+    let reads = statusReads.get(ledger);
+    if (!reads) {
+      reads = new Map();
+      statusReads.set(ledger, reads);
+    }
+    const key = `${op.id}|${tx.txHash}`;
+    const previous = reads.get(key);
+    if (previous) return previous;
+    const refresh = (async () => {
+      const reply = await lookUp(o.nearRpc, tx.txHash, tx.signer);
+      if (
+        (reply?.result as { final_execution_status?: string })?.final_execution_status === 'FINAL'
+      ) {
+        try {
+          const result = readOutcome(reply?.result, o.contractId, {
+            txHash: tx.txHash,
+            signer: tx.signer,
+            method: r.method,
+            args: tx.args,
+          });
+          if (result.state !== 'pending')
+            await ledger.finalizeStorage(op.id, tx.txHash, result.state);
+          if (result.state !== 'released' && result.state !== 'pending')
+            await ledger.retire(op.id, tx.txHash);
+        } catch {
+          /* An unbound outcome cannot authorize a fresh send. */
+        }
+      }
+      const current = await ledger.operation(op.id);
+      if (!current || current.stage === 'rejected') return null;
+      return (
+        current.result ??
+        (current.tx
+          ? { txHash: current.tx.txHash, uncertain: true as const }
+          : ('pending' as const))
+      );
+    })();
+    reads.set(key, refresh);
+    try {
+      return await refresh;
+    } finally {
+      reads.delete(key);
+    }
+  }
+  return op.result ?? { txHash: op.tx.txHash, uncertain: true };
+}
+const requestBinding = (r: RelayRequest) => {
+  if (r.method !== 'register') return r;
+  const { hostingReservation: _reservation, ...binding } = r;
+  return binding;
+};
+async function durableRelay(
+  r: RelayRequest,
+  o: CheckOptions & { sender: Sender },
+  ledger: RelayLedger,
+): Promise<RelayResult> {
+  if (!(await ledger.cutover())) {
+    o.alert?.('cutover_unsealed');
+    return temporary(true);
+  }
+  const previous = await durableStatus(r, o);
+  if (previous === 'pending') return fail('in_flight');
   if (previous) return previous;
-  // Reject cheap duplicates and overload before starting any chain reads.
-  if ((held.get(operation) ?? 0) > Date.now())
-    fail('in_flight', 'this operation is in flight; retry shortly');
+  const deferred = (await ledger.read()).work[identity(r)];
+  if (deferred && deferred.nextAt > Date.now()) {
+    if (deferred.requestHash !== requestHash(requestBinding(r))) return fail('bad_request');
+    const e = new RelayError('settlement_pending');
+    e.retryAt = deferred.nextAt;
+    throw e;
+  }
   if (
     waiting >= (o.policy.maxWaiting ?? MAX_WAITING) ||
     checking >= (o.policy.maxChecking ?? MAX_WAITING)
   )
-    fail('unavailable', 'the relayer is busy; try again shortly');
+    return temporary(r.method === 'unlock');
   checking++;
   try {
     await checkRelay(r, o);
+  } catch (e) {
+    if (
+      r.method === 'unlock' &&
+      e instanceof RelayError &&
+      ['unavailable', 'transport', 'relayer_unavailable'].includes(e.code)
+    )
+      return temporary(true);
+    throw e;
   } finally {
     checking--;
   }
-  const now = Date.now();
-  for (const [k, v] of held)
-    if (v <= now) {
-      held.delete(k);
-      submitted.delete(k);
-      claims.delete(k);
-    }
-  for (const [k, v] of counts) if (v.until <= now) counts.delete(k);
-  if ((held.get(operation) ?? 0) > now)
-    fail('in_flight', 'this operation is in flight; retry shortly');
-  if (waiting >= (o.policy.maxWaiting ?? MAX_WAITING))
-    fail('unavailable', 'the relayer is busy; try again shortly');
-  // Per contract: relayers for other contracts in the same process don't share operations.
-  const id = `${o.nearRpc}|${o.contractId}|${identity(r)}`;
-  if ((held.get(id) ?? 0) > now) fail('duplicate', 'this operation was just sent or is on its way');
-  const quotaOf = quota(r, o.policy);
-  const q: [string, number] | null = quotaOf && [`${o.contractId}|${quotaOf[0]}`, quotaOf[1]];
-  // The window this request was charged to: a refund made after midnight goes back to it, never
-  // to the new day's.
-  let charged: { n: number; until: number } | undefined;
-  if (q) {
-    // Charged now: concurrent requests can't all pass a check made before any of them is sent.
-    const c = counts.get(q[0]);
-    charged = c && c.until > now ? c : { n: 0, until: now + DAY };
-    if (charged.n >= q[1]) {
-      const error = new RelayError('limited', 'the daily limit for this is reached');
-      error.retryAt = charged.until;
-      throw error;
-    }
-    charged.n++;
-    counts.set(q[0], charged);
-  }
-  // Held without end while it waits and is sent; the hold period starts once it is sent.
-  held.set(id, Number.POSITIVE_INFINITY);
-  const refund = () => {
-    held.delete(id);
-    claims.delete(id);
-    if (q && charged && counts.get(q[0]) === charged) {
-      charged.n--;
-      if (charged.n <= 0) counts.delete(q[0]);
-    }
-  };
-  const holdUntil = () =>
-    r.method === 'claim_key' && charged ? charged.until : Date.now() + (o.policy.holdMs ?? HOLD);
-  let sent = false;
   waiting++;
   try {
-    const out = await enqueue(async () => {
-      // Chain-state validation is outside the nonce queue. The contract checks current state.
+    return await enqueue(async () => {
+      const previous = await durableStatus(r, o);
+      if (previous === 'pending') return fail('in_flight');
+      if (previous) return previous;
       if ('deadline' in r.args && r.args.deadline < (o.now ?? Math.floor(Date.now() / 1000)))
-        fail('bad_deadline');
-      const key = senderKey(o);
-      // Storage is the payer's balance on the contract, whichever of its keys signs.
-      const scope = `${o.nearRpc}|${o.contractId}|${o.sender.accountId}`;
-      const write = ['register', 'unlock', 'reopen', 'reopen_seller', 'fund_file_storage'].includes(
-        r.method,
-      );
-      let allocation = 0n;
+        return fail('bad_deadline');
+      if (
+        r.method === 'register' &&
+        r.hostingReservation &&
+        r.hostingReservation.expiresAt <= (o.now ?? Math.floor(Date.now() / 1000))
+      )
+        return fail('not_sponsored');
+      const purchase =
+        r.method === 'unlock'
+          ? parsePurchaseMessage(r.args.purchase, { baseUsdc: o.usdc })
+          : r.method === 'claim_key' || r.method === 'reopen'
+            ? await getPurchase(o.nearRpc, o.contractId, r.args.purchase_id)
+            : null;
       const fileId =
         r.method === 'register'
           ? r.args.terms.file_id
-          : r.method === 'fund_file_storage'
+          : 'file_id' in r.args
             ? r.args.file_id
-            : null;
-      const fileScope = `${o.nearRpc}|${o.contractId}|${fileId}`;
-      const day = Math.floor(Date.now() / DAY);
-      const previousFile = sponsoredFiles.get(fileScope);
-      if (r.method === 'register') {
-        const listed = await o.policy.sellerAllowed?.(identityJson(r.args.terms.seller));
-        allocation = listed
-          ? (o.policy.listedFileBudget ?? o.policy.fileBudget ?? 5n * 10n ** 22n)
-          : (o.policy.fileBudget ?? 5n * 10n ** 22n);
-        const n = counts.get(`${scope}|sponsored:${day}`)?.n ?? 0;
-        if (n >= (o.policy.sponsoredFilesPerDay ?? 100)) fail('limited');
-      } else if (r.method === 'fund_file_storage') {
-        allocation = BigInt(r.args.amount);
-        if (!previousFile) return fail('not_sponsored');
-        const daily = topupDays.get(scope);
-        if (
-          previousFile.allocated + allocation > (o.policy.topupPerFile ?? 15n * 10n ** 22n) ||
-          (previousFile.day === day ? previousFile.today : 0n) + allocation >
-            (o.policy.topupPerFileDay ?? 5n * 10n ** 22n) ||
-          (daily?.day === day ? daily.amount : 0n) + allocation >
-            (o.policy.topupPerDay ?? 5n * 10n ** 23n)
-        )
-          fail('limited');
-      }
-      const storage = (r.method === 'fund_file_storage' ? 0n : STORAGE_PER_WRITE) + allocation;
-      if (write) await enoughStorage(o, scope, storage).catch(asRelayError);
-      const args =
-        r.method === 'register'
-          ? {
-              args: {
-                ...r.args,
-                ...(allocation > 0n ? { file_budget: allocation.toString() } : {}),
-              },
-              auth: r.auth,
-            }
-          : contractArgs(r);
-      const { txHash, signed } = await sign(o, key, r.method, args, GAS);
-      sent = true;
-      submitted.set(id, { txHash, uncertain: true });
-      if (write)
-        writes.get(scope)?.push({ at: Date.now(), amount: storage }) ??
-          writes.set(scope, [{ at: Date.now(), amount: storage }]);
-      if (fileId) {
-        sponsoredFiles.set(fileScope, {
-          allocated: (previousFile?.allocated ?? 0n) + allocation,
-          day,
-          today:
-            r.method === 'fund_file_storage'
-              ? (previousFile?.day === day ? previousFile.today : 0n) + allocation
-              : 0n,
-        });
-        if (r.method === 'register') {
-          const counterKey = `${scope}|sponsored:${day}`;
-          counts.set(counterKey, {
-            n: (counts.get(counterKey)?.n ?? 0) + 1,
-            until: (day + 1) * DAY,
-          });
-        } else {
-          const old = topupDays.get(scope);
-          topupDays.set(scope, { day, amount: (old?.day === day ? old.amount : 0n) + allocation });
-        }
-      }
-      const result = await send(o, key, txHash, signed);
-      if (result.rejected) {
-        sent = false;
-        submitted.delete(id);
-        if (write) writes.get(scope)?.pop();
-        if (fileId) {
-          if (previousFile) sponsoredFiles.set(fileScope, previousFile);
-          else sponsoredFiles.delete(fileScope);
-          if (r.method === 'register') {
-            const counter = counts.get(`${scope}|sponsored:${day}`);
-            if (counter) counter.n--;
-          } else {
-            const counter = topupDays.get(scope);
-            if (counter) counter.amount -= allocation;
-          }
-        }
-        fail('unavailable', 'the transaction was refused before execution; try later');
-      }
-      return result;
-    }, senderKey(o));
-    held.set(id, holdUntil());
-    submitted.set(id, out);
-    if (r.method === 'claim_key')
-      claims.set(id, {
-        result: out,
-        signer: o.sender.accountId,
-        nextAt: Date.now() + (o.policy.holdMs ?? HOLD),
+            : purchase?.file_id;
+      if (!fileId) return fail('unknown_file');
+      const file = r.method === 'register' ? null : await getFile(o.nearRpc, o.contractId, fileId);
+      const terms = r.method === 'register' ? r.args.terms : file?.terms;
+      if (!terms) return fail('unknown_file');
+      const hash = termsHash(terms, {
+        baseUsdc: o.usdc,
+        ...(o.nearUsdc ? { nearUsdc: o.nearUsdc } : {}),
       });
-    return out;
-  } catch (e) {
-    // Given back only when nothing was sent; once a transaction may be on its way, the hold and
-    // limits stay, whatever its outcome.
-    if (sent) {
-      held.set(id, holdUntil());
-      throw e;
-    }
-    refund();
-    throw e;
+      let decision: SponsorshipDecision | null = await ledger.decision(fileId, hash);
+      if (r.method === 'register') {
+        const listed = await o.policy.sellerAllowed?.(identityJson(terms.seller));
+        decision = await admitTerms(terms, o, listed ? 'listed' : 'pool');
+      }
+      const listed = decision?.listed ?? false;
+      const allocation =
+        r.method === 'register'
+          ? listed
+            ? (o.policy.listedFileBudget ?? 5n * 10n ** 22n)
+            : (o.policy.fileBudget ?? 41n * 10n ** 21n)
+          : r.method === 'fund_file_storage'
+            ? BigInt(r.args.amount)
+            : 0n;
+      if (r.method === 'register') {
+        // Query the unchanged contract's current admission floor before making an offer usable.
+        const protocol = await rpcReply(o.nearRpc, 'EXPERIMENTAL_protocol_config', {
+          finality: 'final',
+        });
+        const byteCost = (
+          protocol.result as { runtime_config?: { storage_amount_per_byte?: unknown } }
+        )?.runtime_config?.storage_amount_per_byte;
+        if (
+          protocol.error ||
+          typeof byteCost !== 'string' ||
+          !/^[0-9]+$/.test(byteCost) ||
+          BigInt(byteCost) <= 0n ||
+          allocation < BigInt(byteCost) * 4096n
+        )
+          return temporary();
+      }
+      const write = ['register', 'unlock', 'reopen', 'reopen_seller', 'fund_file_storage'].includes(
+        r.method,
+      );
+      const storage = write
+        ? (r.method === 'fund_file_storage'
+            ? 0n
+            : (o.policy.storagePerWrite ?? STORAGE_PER_WRITE)) + allocation
+        : 0n;
+      if (write) {
+        const balance = await view(o.nearRpc, o.contractId, 'storage_balance_of', {
+          account_id: o.sender.accountId,
+        });
+        const floor = r.method === 'unlock' ? 0n : (o.policy.prepaidUnlockFloor ?? 10n ** 24n);
+        if (
+          typeof balance !== 'string' ||
+          !/^[0-9]+$/.test(balance) ||
+          BigInt(balance) < floor + storage + (await ledger.pendingStorage())
+        )
+          return temporary(r.method === 'unlock');
+      }
+      if (decision && r.method === 'register') decision.allocated = String(allocation);
+      const id = identity(r),
+        binding = requestHash(requestBinding(r));
+      const q = quota(r, o.policy);
+      try {
+        const prepared = await ledger.prepare({
+          id,
+          requestHash: binding,
+          method: r.method,
+          fileId,
+          termsHash: hash,
+          seller: identityJson(terms.seller),
+          listed,
+          ip: o.ip ?? 'unknown',
+          storage: String(storage),
+          allocation: String(allocation),
+          limits: relayLimits(o),
+          ...(decision && r.method === 'register' ? { decision } : {}),
+          ...(q && r.method !== 'register' ? { quota: { key: q[0], limit: q[1] } } : {}),
+          ...(r.method === 'register' && r.hostingReservation
+            ? {
+                reservation: {
+                  key: `${r.hostingReservation.hostOrigin}|${r.hostingReservation.uploadId}`,
+                  binding,
+                },
+              }
+            : {}),
+          ...(r.method === 'fund_file_storage'
+            ? {
+                nonce: `${identityJson(terms.seller)}|${r.args.nonce}`,
+                nonceDeadline: r.args.deadline,
+                topup: {
+                  lifetime: String(
+                    listed
+                      ? (o.policy.listedTopupPerFile ?? 15n * 10n ** 22n)
+                      : (o.policy.topupPerFile ?? 82n * 10n ** 21n),
+                  ),
+                  fileDay: String(
+                    listed
+                      ? (o.policy.listedTopupPerFileDay ?? 5n * 10n ** 22n)
+                      : (o.policy.topupPerFileDay ?? 41n * 10n ** 21n),
+                  ),
+                  totalDay: String(o.policy.topupPerDay ?? 5n * 10n ** 23n),
+                  listedReserved: String(o.policy.topupListedReserved ?? 25n * 10n ** 22n),
+                },
+              }
+            : {}),
+        });
+        if (prepared.capacityReached) o.alert?.('ledger_capacity');
+        if (!prepared.fresh)
+          return (
+            prepared.operation.result ??
+            (prepared.operation.tx
+              ? { txHash: prepared.operation.tx.txHash, uncertain: true }
+              : fail('in_flight'))
+          );
+      } catch (e) {
+        if (e instanceof RelayError && e.code === 'relayer_unavailable')
+          o.alert?.('ledger_capacity');
+        if (r.method === 'unlock' && e instanceof RelayError && e.code === 'limited') {
+          const pending = new RelayError('settlement_pending');
+          if (e.retryAt !== undefined) pending.retryAt = e.retryAt;
+          throw pending;
+        }
+        throw e;
+      }
+      let signed = false;
+      try {
+        const args =
+          r.method === 'register'
+            ? {
+                args: {
+                  ...r.args,
+                  ...(allocation > 0n ? { file_budget: String(allocation) } : {}),
+                },
+                auth: r.auth,
+              }
+            : contractArgs(r);
+        const tx = await sign(o, senderKey(o), r.method, args);
+        await ledger.signed(id, { ...tx, signer: o.sender.accountId, args });
+        signed = true;
+        const result = await send(o, senderKey(o), tx.txHash, tx.signed);
+        if (result.rejected) {
+          await ledger.reject(id);
+          return temporary(r.method === 'unlock');
+        }
+        await ledger.result(id, result);
+        if (r.method === 'register') {
+          const final = await getFile(o.nearRpc, o.contractId, fileId).catch(() => null);
+          if (final?.termsHash === hash) await ledger.registered(fileId, hash);
+        }
+        if (result.uncertain) o.alert?.('uncertain');
+        return result;
+      } catch (e) {
+        if (!signed && !(await ledger.operation(id))?.tx) await ledger.reject(id);
+        throw e;
+      }
+    }, senderKey(o));
   } finally {
     waiting--;
+  }
+}
+
+/** Resume due paid work without creating a second purchase or losing its frozen policy. */
+export async function retryPaidUnlocks(o: CheckOptions & { sender: Sender }): Promise<void> {
+  if (!o.ledger) return;
+  for (const [id, work] of Object.entries((await o.ledger.read()).work)) {
+    if (work.nextAt > Date.now()) continue;
+    try {
+      await relay(work.request, o);
+    } catch (e) {
+      if (
+        e instanceof RelayError &&
+        [
+          'taken_down',
+          'sales_stopped',
+          'payment_used',
+          'payment_not_found',
+          'bad_request',
+          'not_sponsored',
+          'unknown_file',
+          'file_mismatch',
+          'bad_signature',
+        ].includes(e.code)
+      )
+        await o.ledger.finishWork(id);
+    }
   }
 }
 
@@ -939,9 +1252,12 @@ async function sign(
       receiverId: o.contractId,
       actions: [actions.functionCall(method, args, gas, 0n)],
     })
-    .catch((e: Error) => fail('transport', `NEAR RPC: ${e.message}`));
+    .catch(() => fail('transport', 'NEAR signing is unavailable.'));
   return {
     txHash: base58.encode(sha256(tx.transaction.encode())),
+    ...(tx.transaction.blockHash?.length === 32
+      ? { referenceHash: base58.encode(Uint8Array.from(tx.transaction.blockHash)) }
+      : {}),
     signed: base64.encode(encodeTransaction(tx)),
   };
 }
@@ -969,6 +1285,7 @@ async function send(
   txHash: string,
   signed: string,
   keeper = false,
+  unknownFinal = false,
 ): Promise<RelayResult> {
   const unclear = (reason: string): RelayResult => ({ txHash, uncertain: true, reason });
   let reason = 'no clear answer from NEAR';
@@ -1010,6 +1327,7 @@ async function send(
         'ActionsValidation',
         'TransactionSizeExceeded',
       ]);
+      if (unknownFinal) definite.add('InvalidNonce');
       if (variant !== undefined && definite.has(variant)) {
         accounts.delete(key);
         if (ambiguous) {
@@ -1055,8 +1373,8 @@ async function send(
         await new Promise((r) => setTimeout(r, RETRY_WAIT * (attempt + 1)));
     }
     return unclear(reason);
-  } catch (e) {
-    return unclear(`unexpected: ${(e as Error).message}`);
+  } catch {
+    return unclear('NEAR submission is unresolved.');
   }
 }
 
