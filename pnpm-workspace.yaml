@@ -7,14 +7,14 @@ saveExact: true
 minimumReleaseAge: 20160
 
 overrides:
-  '@modelcontextprotocol/sdk@1.32.2>hono': '4.13.16'
-  '@modelcontextprotocol/sdk@1.32.2>@hono/node-server': '2.1.6'
+  '@modelcontextprotocol/sdk@1.32.2>hono': '4.13.18'
+  '@modelcontextprotocol/sdk@1.32.2>@hono/node-server': '2.1.7'
 
 # Security fixes; exact releases only.
-# Recheck 2026-11-16 and remove once both pass the 14-day cutoff.
+# Recheck after 2026-11-25; remove exceptions once both clear 14 days.
 minimumReleaseAgeExclude:
-  - 'hono@4.13.16'
-  - '@hono/node-server@2.1.6'
+  - 'hono@4.13.18'
+  - '@hono/node-server@2.1.7'
 
 # Wallet Selector uses secp256k1's JS fallback; esbuild uses its optional platform binary.
 # Neither dependency needs an install-time native build in this workspace.
