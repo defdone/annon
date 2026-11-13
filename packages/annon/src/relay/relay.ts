@@ -37,6 +37,7 @@ import {
   purchaseId,
 } from '../settle-near/purchase.js';
 import { type SettlementAssets, termsHash } from '../settle-near/terms.js';
+import { type AdmissionOptions, admissionBalance, checkAdmissionFloor } from './admission.js';
 import { checkProtocolFee, type ProtocolFee } from './fees.js';
 import { type KeepOptions, type KeepResult, runKeeper } from './keeper-runner.js';
 import type { RelayLedger, RelayLimits, SponsorshipDecision } from './ledger.js';
@@ -60,6 +61,7 @@ export type RelayRequest =
   | { method: 'claim_key'; args: { purchase_id: string; grant?: number } }
   | { method: 'unlock'; args: { purchase: string; logs: EvmLog[]; header: string | null } };
 export type RelayErrorCode =
+  | 'budget'
   | 'bad_request'
   | 'bad_signature'
   | 'bad_deadline'
@@ -127,7 +129,7 @@ export interface RelayPolicy {
   maxWaiting?: number;
   maxChecking?: number;
 }
-export interface CheckOptions {
+export interface CheckOptions extends AdmissionOptions {
   nearRpc: string;
   baseRpc: string;
   contractId: string;
@@ -1085,6 +1087,11 @@ async function durableRelay(
   checking++;
   try {
     await checkRelay(r, o);
+    await checkAdmissionFloor(r.method, {
+      ...o,
+      admissionBalance:
+        o.admissionBalance ?? (() => admissionBalance(o.nearRpc, o.sender.accountId)),
+    });
   } catch (e) {
     if (
       r.method === 'unlock' &&

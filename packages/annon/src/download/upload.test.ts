@@ -725,7 +725,7 @@ it('accepts checked base split status and sends the exact authenticated JSON req
   for (const baseSplit of [
     null,
     split,
-    { ...split, state: 'ready', txHash: 'synthetic-transaction' },
+    { ...split, state: 'ready', txHash: `0x${'11'.repeat(32)}` },
   ]) {
     response = {
       uploadId: id,
@@ -745,6 +745,9 @@ it('accepts checked base split status and sends the exact authenticated JSON req
     { salt: 'bad' },
     { state: 'broken' },
     { txHash: 1 },
+    { txHash: 'synthetic-transaction' },
+    { txHash: `0x${'AB'.repeat(32)}` },
+    { txHash: `0x${'11'.repeat(31)}` },
     { extra: true },
   ]) {
     response = {
@@ -788,3 +791,43 @@ it('checks split request fields and pending versus ready HTTP status', async () 
   status = 200;
   expect(await client.baseSplit(id, f.request, input)).toMatchObject({ ok: true });
 });
+
+it.each([200, 202])(
+  'rejects a successful split POST with null provenance at %s',
+  async (status) => {
+    const f = await fixture();
+    const client = new UploadClient(f.request.intent.hostOrigin, {
+      fetch: (async () => Response.json({ baseSplit: null }, { status })) as typeof fetch,
+    });
+    expect(
+      await client.baseSplit('ab'.repeat(32), f.request, {
+        kind: 'push',
+        salt: `0x${'00'.repeat(32)}`,
+      }),
+    ).toMatchObject({ ok: false });
+  },
+);
+
+it.each([200, 202])(
+  'preserves a typed failure and retry hint in a %s upload response',
+  async (status) => {
+    const f = await fixture();
+    const client = new UploadClient(f.request.intent.hostOrigin, {
+      fetch: (async () =>
+        Response.json(
+          {
+            error: 'settlement_pending',
+            message: 'private upstream text',
+            retryAfterSeconds: 37.2,
+          },
+          { status },
+        )) as typeof fetch,
+    });
+    expect(
+      await client.baseSplit('ab'.repeat(32), f.request, {
+        kind: 'push',
+        salt: `0x${'00'.repeat(32)}`,
+      }),
+    ).toMatchObject({ ok: false, error: { code: 'settlement_pending', retryAfterSeconds: 38 } });
+  },
+);

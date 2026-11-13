@@ -17,9 +17,9 @@ export const relayLimits = (o: CheckOptions): RelayLimits => ({
   unlocksPerSeller: o.policy.unlocksPerSeller ?? 20,
   listedUnlocksPerFile: o.policy.listedUnlocksPerFile ?? 100,
   listedUnlocksPerSeller: o.policy.listedUnlocksPerSeller ?? 250,
-  files: o.policy.sponsoredFilesPerDay ?? 100,
-  filesPerIp: 5,
-  registrationsPerSeller: o.policy.registrationsPerSeller ?? 5,
+  files: o.policy.sponsoredFilesPerDay ?? 60,
+  filesPerIp: 1,
+  registrationsPerSeller: o.policy.registrationsPerSeller ?? 1,
   listedRegistrationsPerSeller: o.policy.listedRegistrationsPerSeller ?? 20,
   ...o.admissionLimits,
 });

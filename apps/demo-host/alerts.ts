@@ -1,6 +1,7 @@
 import type { StartupReason } from './startup-errors.ts';
 
 export type HostAlertType =
+  | 'host_file_invalid'
   | 'host_startup_failed'
   | 'facilitator_dropped'
   | 'facilitator_low_eth'

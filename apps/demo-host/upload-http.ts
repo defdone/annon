@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { hasContentType } from '../../packages/annon/src/download/http.ts';
 import { decodeUploadAuthorization } from '../../packages/annon/src/download/upload.ts';
+import { AnnonError, toPublicError } from '../../packages/annon/src/errors.ts';
 import { CapacityError } from './capacity.ts';
 import { UploadFault, type uploadService } from './uploads.ts';
 
@@ -46,17 +47,22 @@ export async function uploadHttp(
     !path.startsWith('/v1/upload-reservations/')
   )
     return false;
-  const send = (status: number, value: unknown) =>
+  const send = (status: number, value: unknown, retry?: number) =>
     res
-      .writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      .writeHead(status, {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+        ...(retry === undefined ? {} : { 'Retry-After': String(retry) }),
+      })
       .end(JSON.stringify(value));
   if (!service) {
     send(503, { error: 'unavailable', message: 'Encrypted hosting is unavailable.' });
     return true;
   }
-  const match = /^\/v1\/(uploads|upload-reservations)\/([a-f0-9]{64})(?:\/(body|header))?$/.exec(
-    path,
-  );
+  const match =
+    /^\/v1\/(uploads|upload-reservations)\/([a-f0-9]{64})(?:\/(body|header|base-split))?$/.exec(
+      path,
+    );
   const binary = match?.[3] === 'body' || match?.[3] === 'header';
   const streaming = binary && req.method === 'PUT';
   const timer = streaming
@@ -97,7 +103,20 @@ export async function uploadHttp(
       }
       const id = match[2] as string;
       if (!match[3] && req.method === 'GET') result = await service.status(id, auth);
-      else if (match[3] === 'body' && req.method === 'PUT')
+      else if (match[3] === 'base-split' && req.method === 'POST') {
+        let input: unknown;
+        try {
+          input = JSON.parse(
+            new TextDecoder('utf-8', { fatal: true }).decode(
+              await readUploadControl(req, limits.maxJsonBytes ?? 131072),
+            ),
+          );
+        } catch (error) {
+          if (error instanceof UploadFault) throw error;
+          throw new UploadFault('bad_request');
+        }
+        result = await service.baseSplit(id, auth, input);
+      } else if (match[3] === 'body' && req.method === 'PUT')
         result = await service.body(id, auth, req, req.headers['content-length']);
       else if (match[3] === 'header' && req.method === 'PUT')
         result = await service.header(
@@ -115,23 +134,33 @@ export async function uploadHttp(
     }
     send(result.status, result.body);
   } catch (error) {
-    const code =
-      error instanceof UploadFault || error instanceof CapacityError
-        ? error.code
-        : 'operation_failed';
+    const code = error instanceof AnnonError ? error.code : 'operation_failed';
+    const retry = error instanceof AnnonError ? toPublicError(error).retryAfterSeconds : undefined;
     const status =
       error instanceof UploadFault
         ? error.status
-        : code === 'too_large'
-          ? 413
-          : code === 'host_capacity'
-            ? 503
-            : code === 'upload_conflict'
-              ? 409
-              : error instanceof CapacityError
-                ? 400
-                : 503;
-    send(status, { error: code, message: 'Encrypted hosting could not be completed.' });
+        : code === 'budget' || code === 'rate_limited'
+          ? 429
+          : code === 'settlement_pending'
+            ? 202
+            : code === 'too_large'
+              ? 413
+              : code === 'upload_conflict'
+                ? 409
+                : code === 'not_sponsored'
+                  ? 403
+                  : error instanceof CapacityError && code !== 'host_capacity'
+                    ? 400
+                    : 503;
+    send(
+      status,
+      {
+        error: code,
+        message: 'Encrypted hosting could not be completed.',
+        ...(retry === undefined ? {} : { retryAfterSeconds: retry }),
+      },
+      retry,
+    );
   } finally {
     clearTimeout(timer);
     if (streaming) req.setTimeout(120000);

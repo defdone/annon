@@ -33,8 +33,24 @@ export function hostSettings(e: Record<string, string | undefined>) {
     throw new Error('CANONICAL_DEMO_FILE_ID is required');
   if (e.CANONICAL_DEMO_SLUG !== undefined && e.CANONICAL_DEMO_SLUG !== 'what-we-are-building')
     throw new Error('invalid CANONICAL_DEMO_SLUG');
+  const splitFee = parsed.split.enabled
+    ? (() => {
+        const raw = e.TREASURY_EVM?.trim();
+        if (!raw) throw new Error('TREASURY_EVM is required');
+        const treasuryEvm = parseIdentity({
+          kind: 'evm',
+          id: raw.startsWith('evm:') ? raw.slice(4) : raw,
+        });
+        const fixed = e.FEE_FIXED ?? '30000';
+        const bps = parsed.int('FEE_BPS', 100, 100, 9999);
+        if (!/^\d{1,78}$/.test(fixed) || BigInt(fixed) < 30000n)
+          throw new Error('invalid FEE_FIXED');
+        return { fixed, bps, treasuryNear: null, treasuryEvm };
+      })()
+    : undefined;
   return {
     ...parsed,
+    splitFee,
     publicUrl: origin('PUBLIC_URL'),
     relayerOrigin: origin('RELAYER_ORIGIN'),
     sellers,

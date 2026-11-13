@@ -30,6 +30,7 @@ function fake() {
     receipt: vi.fn(async () => null),
     ethBalance: vi.fn(async () => 10n ** 18n),
     transaction: vi.fn(async () => true),
+    minedNonce: async () => 0,
     nonceClear: vi.fn(async () => true),
   };
   return chain;
@@ -311,4 +312,34 @@ it('seeds facilitator state without a key and refuses missing or malformed initi
     });
     expect(broken.compareAndSet).not.toHaveBeenCalled();
   }
+});
+it('refuses corrupted durable split reservations and counters instead of resetting their spend', async () => {
+  const { initFacilitatorState } = await import('./facilitator.ts');
+  const store = memoryStore<FacilitatorState>();
+  const valid = { id: 'facilitator', revision: 0, sends: {}, days: {}, times: [] };
+  for (const patch of [
+    { days: { '0': { cost: '0', reverts: 0, payers: {}, splitCost: '-1' } } },
+    { days: { '0': { cost: '0', reverts: 0, payers: {}, deployments: -1 } } },
+    {
+      sends: {
+        'split:test': {
+          operation: 'split',
+          hash: `0x${'11'.repeat(32)}`,
+          payer: `0x${'22'.repeat(20)}`,
+          at: 0,
+          until: 1000,
+          day: 0,
+          cost: '10',
+          done: false,
+        },
+      },
+    },
+  ]) {
+    const state = { ...valid, ...patch };
+    const broken = { load: async () => state, compareAndSet: vi.fn() };
+    await expect(initFacilitatorState(broken as never, true)).rejects.toMatchObject({
+      reason: 'state_invalid',
+    });
+  }
+  await initFacilitatorState(store);
 });

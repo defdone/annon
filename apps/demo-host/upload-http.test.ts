@@ -92,3 +92,70 @@ it.each(['POST', 'status', 'reservation'] as const)(
     expect(req.setTimeout).not.toHaveBeenCalled();
   },
 );
+it.each([200, 202])(
+  'serves the authenticated split POST response verbatim at %s',
+  async (status) => {
+    const request = parseUpload(vectors.cases[0]?.request);
+    const input = { kind: 'push', salt: `0x${'00'.repeat(32)}` };
+    const req = {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'annon-upload-authorization': encodeUploadAuthorization(request),
+      },
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from(JSON.stringify(input));
+      },
+    };
+    const body = {
+      baseSplit: {
+        state: status === 202 ? 'pending' : 'ready',
+        address: `0x${'11'.repeat(20)}`,
+        ...input,
+        txHash: null,
+      },
+    };
+    const baseSplit = vi.fn(async () => ({ status, body }));
+    const res = { writeHead: vi.fn(), end: vi.fn() };
+    res.writeHead.mockReturnValue(res);
+    await uploadHttp(
+      req as never,
+      res as never,
+      `/v1/uploads/${'ab'.repeat(32)}/base-split`,
+      'ip',
+      { baseSplit } as never,
+    );
+    expect(baseSplit).toHaveBeenCalledWith(
+      'ab'.repeat(32),
+      expect.objectContaining({ intent: request.intent }),
+      input,
+    );
+    expect(res.writeHead).toHaveBeenCalledWith(status, expect.any(Object));
+    expect(JSON.parse(res.end.mock.calls[0]?.[0])).toEqual(body);
+  },
+);
+it('returns 429 with the remaining quota wait in the header and body', async () => {
+  const { CapacityError } = await import('./capacity.ts');
+  const request = parseUpload(vectors.cases[0]?.request);
+  const req = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(JSON.stringify(request));
+    },
+  };
+  const error = new CapacityError('rate_limited');
+  error.retryAfterSeconds = 2;
+  const res = { writeHead: vi.fn(), end: vi.fn() };
+  res.writeHead.mockReturnValue(res);
+  await uploadHttp(req as never, res as never, '/v1/uploads', 'ip', {
+    create: async () => {
+      throw error;
+    },
+  } as never);
+  expect(res.writeHead).toHaveBeenCalledWith(429, expect.objectContaining({ 'Retry-After': '2' }));
+  expect(JSON.parse(res.end.mock.calls[0]?.[0])).toMatchObject({
+    error: 'rate_limited',
+    retryAfterSeconds: 2,
+  });
+});

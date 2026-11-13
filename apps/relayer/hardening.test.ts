@@ -49,7 +49,7 @@ it('uses frozen sponsorship, method, storage and keeper defaults and rejects mal
       listedFileBudget: 5n * 10n ** 22n,
       topupPerFile: 82n * 10n ** 21n,
       prepaidUnlockFloor: 10n ** 24n,
-      registrationsPerSeller: 5,
+      registrationsPerSeller: 1,
       listedRegistrationsPerSeller: 20,
       claimsPerGrant: 3,
       unlocksPerFile: 10,

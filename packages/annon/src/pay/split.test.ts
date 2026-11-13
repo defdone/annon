@@ -562,3 +562,23 @@ describe('readSplitState without creation provenance', () => {
     });
   });
 });
+it('predicts the same hosted split across files while binding ordered complete parameters', async () => {
+  const { hostedSplitSalt } = await import('./split.js');
+  const s = {
+    recipients: [`0x${'11'.repeat(20)}`, `0x${'22'.repeat(20)}`],
+    allocations: [6900n, 3100n],
+    totalAllocation: 10000n,
+    distributionIncentive: 0,
+  };
+  const first = createSplit('push', s, hostedSplitSalt());
+  expect(hostedSplitSalt()).toBe(`0x${'00'.repeat(32)}`);
+  expect(createSplit('push', structuredClone(s), hostedSplitSalt())).toEqual(first);
+  expect(
+    createSplit(
+      'push',
+      { ...s, recipients: [...s.recipients].reverse(), allocations: [...s.allocations].reverse() },
+      hostedSplitSalt(),
+    ).address,
+  ).not.toBe(first.address);
+  expect(createSplit('pull', s, hostedSplitSalt()).address).not.toBe(first.address);
+});

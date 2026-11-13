@@ -1,3 +1,4 @@
+import { createPrivateKey, sign } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,11 +11,20 @@ import {
   uploadText,
 } from '../../packages/annon/src/download/upload.ts';
 import { prepareSeal } from '../../packages/annon/src/envelope/replay.ts';
+import { nep413Hash } from '../../packages/annon/src/near/nep413.ts';
 import type { FileInfo } from '../../packages/annon/src/near/rpc.ts';
+import * as nearRpc from '../../packages/annon/src/near/rpc.ts';
+import { createSplit, hostedSplitSalt } from '../../packages/annon/src/pay/split.ts';
 import { verifyReservation } from '../../packages/annon/src/relay/reservation.ts';
 import { hex } from '../../packages/annon/src/settle-near/codec.ts';
-import { NEAR_USDC, termsHash } from '../../packages/annon/src/settle-near/terms.ts';
+import {
+  BASE_USDC,
+  NEAR_USDC,
+  type Terms,
+  termsHash,
+} from '../../packages/annon/src/settle-near/terms.ts';
 import { hostCapacity } from './capacity.ts';
+import { type Chain, facilitatorFor } from './facilitator.ts';
 import { uploadService } from './uploads.ts';
 
 const account = privateKeyToAccount(`0x${'01'.repeat(32)}`);
@@ -25,6 +35,8 @@ afterEach(async () => {
 });
 async function setup(
   options: {
+    base?: boolean;
+    sellerKind?: 'near' | 'solana';
     ingressPerDay?: number;
     idleSeconds?: number;
     stagingSeconds?: number;
@@ -45,7 +57,16 @@ async function setup(
   roots.push(root);
   let now = 1_000_000;
   const capacity = await hostCapacity(join(root, 'capacity'), { now: () => now, ...options });
-  const seller = { kind: 'evm' as const, id: account.address.toLowerCase() };
+  const evm = { kind: 'evm' as const, id: account.address.toLowerCase() };
+  const seller =
+    options.sellerKind === 'near'
+      ? { kind: 'near' as const, id: 'seller.synthetic.near' }
+      : options.sellerKind === 'solana'
+        ? {
+            kind: 'solana' as const,
+            id: hex(ed25519.getPublicKey(new Uint8Array(32).fill(8))).slice(2),
+          }
+        : evm;
   const seal = await prepareSeal(
     new Uint8Array(32).fill(3),
     new Uint8Array(options.size ?? 1024).fill(8),
@@ -59,7 +80,7 @@ async function setup(
       previewLen: options.previewLen ?? 0,
     },
   );
-  const terms = {
+  const terms: Terms = {
     network: 'near:mainnet',
     contract: 'market.synthetic.near',
     file_id: `0x${'02'.repeat(32)}`,
@@ -70,11 +91,26 @@ async function setup(
     near: {
       token: NEAR_USDC,
       price: '100000',
-      recipients: [{ identity: seller, bps: 10000 }],
+      recipients: [{ identity: evm, bps: 10000 }],
       remainder: 0,
     },
     base: null,
   };
+  if (options.base)
+    terms.base = {
+      usdc: BASE_USDC,
+      price: '100000',
+      pay_to: createSplit(
+        'push',
+        {
+          recipients: [evm.id],
+          allocations: [10000n],
+          totalAllocation: 10000n,
+          distributionIncentive: 0,
+        },
+        hostedSplitSalt(),
+      ).address,
+    };
   const metadata = {
     filename: 'x.txt',
     title: '<b>Title</b>',
@@ -104,6 +140,34 @@ async function setup(
     sig: await account.signMessage({ message: uploadText(intent) }),
   };
   const request: UploadRequest = { intent, terms, manifest: seal.manifest, metadata, auth };
+  if (options.sellerKind) {
+    const edKey = createPrivateKey({
+      key: Buffer.concat([
+        Buffer.from('302e020100300506032b657004220420', 'hex'),
+        Buffer.alloc(32, 8),
+      ]),
+      format: 'der',
+      type: 'pkcs8',
+    });
+    request.auth =
+      options.sellerKind === 'solana'
+        ? { kind: 'solana', sig: hex(sign(null, Buffer.from(uploadText(intent)), edKey)) }
+        : {
+            kind: 'near',
+            accountId: seller.id,
+            publicKey: (await import('../../specs/vectors/upload.json')).default.cases[2]?.request
+              .auth.publicKey as string,
+            signature: sign(
+              null,
+              nep413Hash({
+                message: uploadText(intent),
+                recipient: intent.hostOrigin,
+                nonce: new Uint8Array(32).fill(6),
+              }),
+              edKey,
+            ).toString('base64'),
+          };
+  }
   let info: FileInfo | null = null;
   let readFailed = false;
   const config = {
@@ -122,12 +186,14 @@ async function setup(
     },
   };
   const host = await uploadService(config);
-  const signed = await seal.finish({
-    seller,
-    contractId: terms.contract,
-    ckdSecret: new Uint8Array(48).fill(4),
-    sign: (message) => account.signMessage({ message }),
-  });
+  const signed = options.sellerKind
+    ? { header: new Uint8Array() }
+    : await seal.finish({
+        seller,
+        contractId: terms.contract,
+        ckdSecret: new Uint8Array(48).fill(4),
+        sign: (message) => account.signMessage({ message }),
+      });
   const body = new Uint8Array(await new Response(seal.body()).arrayBuffer());
   const source = async function* (data = body) {
     const step = 7919;
@@ -319,11 +385,11 @@ it('reserves simultaneous ingress, assembly space and open/listed quotas before 
   const f = await setup({ hostBytes: 3269 });
   await expect(f.host.create(f.request, 'ip')).rejects.toMatchObject({ code: 'host_capacity' });
   const g = await setup({ filesPerDay: 0 });
-  await expect(g.host.create(g.request, 'ip')).rejects.toMatchObject({ code: 'host_capacity' });
+  await expect(g.host.create(g.request, 'ip')).rejects.toMatchObject({ code: 'rate_limited' });
   const h = await setup({ filesPerDay: 0, listed: true });
   expect((await h.host.create(h.request, 'ip')).status).toBe(201);
   const k = await setup({ filesPerDay: 0, listed: true, listedPerSellerDay: 0 });
-  await expect(k.host.create(k.request, 'ip')).rejects.toMatchObject({ code: 'host_capacity' });
+  await expect(k.host.create(k.request, 'ip')).rejects.toMatchObject({ code: 'rate_limited' });
 });
 it('fails closed for missing staged bytes and corrupt upload state instead of recreating allowances', async () => {
   const f = await setup();
@@ -1046,11 +1112,11 @@ it('checks published body hashes lazily once before serving', async () => {
   await writeFile(join(f.config.dir, `${uploadId}.pay2`), bytes);
   const next = await uploadService(f.config);
   const [file] = await next.files();
-  await expect(file?.verify?.()).rejects.toMatchObject({ code: 'cipher_hash_mismatch' });
+  await expect(file?.verify?.()).rejects.toMatchObject({ code: 'unavailable' });
   await writeFile(join(f.config.dir, `${uploadId}.pay2`), Buffer.concat([f.header, f.body]));
-  await file?.verify?.();
+  await expect(file?.verify?.()).rejects.toMatchObject({ code: 'unavailable', status: 503 });
   await writeFile(join(f.config.dir, `${uploadId}.pay2`), bytes);
-  await expect(file?.verify?.()).resolves.toBeUndefined();
+  await expect(file?.verify?.()).rejects.toMatchObject({ code: 'unavailable', status: 503 });
 });
 it('loads capacity once and caches the header for a catalog request', async () => {
   const f = await setup();
@@ -1208,3 +1274,254 @@ it('returns a half publication from the capacity ledger to a resumable reservati
     body: { expiresAt: 605800 },
   });
 });
+
+it('caches corrupted hosted body failures and emits one fixed alert', async () => {
+  const f = await setup();
+  const alert = vi.fn();
+  const host = await uploadService({ ...f.config, alert });
+  const created = await host.create(f.request, 'ip');
+  const id = (created.body as { uploadId: string }).uploadId;
+  await host.body(id, f.request, f.source());
+  f.setInfo();
+  await host.header(id, f.request, f.header);
+  const file = (await host.files())[0];
+  if (!file) throw new Error('missing published file');
+  const bytes = await readFile(file.path);
+  bytes[bytes.length - 1] = (bytes[bytes.length - 1] ?? 0) ^ 1;
+  await writeFile(file.path, bytes);
+  await expect(file.verify?.()).rejects.toMatchObject({ code: 'unavailable', status: 503 });
+  await writeFile(file.path, new Uint8Array());
+  await expect(file.verify?.()).rejects.toMatchObject({ code: 'unavailable', status: 503 });
+  expect(alert).toHaveBeenCalledExactlyOnceWith({ type: 'host_file_invalid' });
+});
+it.each(['receiving', 'expired', 'authorization', 'fields', 'salt', 'no-base'])(
+  'refuses split %s before deployment',
+  async (guard) => {
+    const f = await setup({ base: guard !== 'no-base' });
+    const deploySplit = vi.fn();
+    const host = await uploadService({
+      ...f.config,
+      splits: { checkSplit: () => {}, deploySplit, splitStatus: async () => null },
+    });
+    const c = await host.create(f.request, 'ip');
+    const id = (c.body as { uploadId: string }).uploadId;
+    if (guard !== 'receiving') await host.body(id, f.request, f.source());
+    if (guard === 'expired') f.setNow(88_000_000);
+    const auth = structuredClone(f.request);
+    if (guard === 'authorization') auth.auth = { kind: 'evm', sig: `0x${'00'.repeat(65)}` };
+    const input = {
+      kind: 'push',
+      salt: `0x${'00'.repeat(32)}`,
+      ...(guard === 'fields' ? { to: 'arbitrary' } : {}),
+    };
+    if (guard === 'salt') input.salt = `0x${'01'.repeat(32)}`;
+    await expect(host.baseSplit(id, auth, input)).rejects.toMatchObject({
+      code:
+        guard === 'receiving'
+          ? 'upload_incomplete'
+          : guard === 'expired'
+            ? 'upload_expired'
+            : guard === 'authorization'
+              ? 'bad_signature'
+              : guard === 'no-base'
+                ? 'not_sponsored'
+                : 'bad_request',
+    });
+    expect(deploySplit).not.toHaveBeenCalled();
+  },
+);
+
+it('returns exact pending and verified split responses and reconciles an unsaved response through authenticated GET', async () => {
+  const f = await setup({ base: true });
+  let state: 'pending' | 'ready' = 'pending';
+  let known = false;
+  const provenance = () => ({
+    state,
+    address: f.request.terms.base?.pay_to as string,
+    kind: 'push' as const,
+    salt: hostedSplitSalt(),
+    txHash: `0x${'11'.repeat(32)}`,
+  });
+  const splits = {
+    checkSplit: () => {},
+    deploySplit: vi.fn(async () => {
+      known = true;
+      return provenance();
+    }),
+    splitStatus: vi.fn(async () => (known ? provenance() : null)),
+  };
+  const host = await uploadService({ ...f.config, splits });
+  const id = ((await host.create(f.request, 'ip')).body as { uploadId: string }).uploadId;
+  await host.body(id, f.request, f.source());
+  expect(await host.baseSplit(id, f.request, { kind: 'push', salt: hostedSplitSalt() })).toEqual({
+    status: 202,
+    body: { baseSplit: provenance() },
+  });
+  state = 'ready';
+  const restarted = await uploadService({ ...f.config, splits });
+  expect(await restarted.status(id, f.request)).toMatchObject({
+    body: { baseSplit: provenance() },
+  });
+  expect(
+    await restarted.baseSplit(id, f.request, { kind: 'push', salt: hostedSplitSalt() }),
+  ).toEqual({ status: 200, body: { baseSplit: provenance() } });
+});
+it('requires intact staged bytes and a live reservation before deploying a split', async () => {
+  const f = await setup({ base: true });
+  const splits = { checkSplit: () => {}, deploySplit: vi.fn(), splitStatus: async () => null };
+  const host = await uploadService({ ...f.config, splits });
+  const id = ((await host.create(f.request, 'ip')).body as { uploadId: string }).uploadId;
+  await host.body(id, f.request, f.source());
+  const input = { kind: 'push', salt: hostedSplitSalt() };
+  await writeFile(join(f.config.dir, `${id}.body`), new Uint8Array(f.body.length));
+  await expect(host.baseSplit(id, f.request, input)).rejects.toMatchObject({
+    code: 'cipher_hash_mismatch',
+  });
+  await writeFile(join(f.config.dir, `${id}.body`), f.body);
+  f.setNow(1_600_000);
+  const auth = structuredClone(f.request);
+  auth.intent.expiresAt = 2200;
+  auth.auth = { kind: 'evm', sig: await account.signMessage({ message: uploadText(auth.intent) }) };
+  await expect(host.baseSplit(id, auth, input)).rejects.toMatchObject({ code: 'upload_expired' });
+  expect(splits.deploySplit).not.toHaveBeenCalled();
+});
+
+it('rechecks reservation expiry after waiting for the shared wallet queue', async () => {
+  const f = await setup({ base: true });
+  const splits = {
+    checkSplit: () => {},
+    deploySplit: vi.fn(async (_terms: Terms, beforeSend?: () => Promise<void>) => {
+      f.setNow(1_600_000);
+      await beforeSend?.();
+      throw new Error('send should not be reached');
+    }),
+    splitStatus: async () => null,
+  };
+  const host = await uploadService({ ...f.config, splits });
+  const id = ((await host.create(f.request, 'ip')).body as { uploadId: string }).uploadId;
+  await host.body(id, f.request, f.source());
+  await expect(
+    host.baseSplit(id, f.request, { kind: 'push', salt: hostedSplitSalt() }),
+  ).rejects.toMatchObject({ code: 'upload_expired' });
+});
+
+function statusFacilitator(enabled: boolean) {
+  const chain: Chain = {
+    timestamp: async () => 1000,
+    used: async () => false,
+    balance: async () => 1n,
+    simulate: async () => true,
+    sign: vi.fn(async () => null),
+    send: vi.fn(async () => ''),
+    receipt: async () => null,
+    transaction: async () => false,
+    ethBalance: async () => 10n ** 18n,
+    nonceClear: async () => true,
+    minedNonce: async () => 0,
+    readSplit: vi.fn(async () => true),
+  };
+  const splits = facilitatorFor(chain, 10, () => 1000000, {
+    split: enabled
+      ? {
+          enabled: true,
+          deploymentsPerDay: 60,
+          sendsPerMinute: 2,
+          revertsPerDay: 1,
+          gasLimit: 1000000n,
+          maxFeeGwei: 1,
+          l1FeeAllowanceWei: 5n,
+          dailyBudgetWei: 100n,
+          walletDailyBudgetWei: 200n,
+        }
+      : { enabled: false },
+    splitFee: { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
+  });
+  return { chain, splits };
+}
+it.each(['near', 'solana'] as const)(
+  'refuses authenticated %s sellers before rehashing staged bytes',
+  async (sellerKind) => {
+    const rpc = vi.spyOn(nearRpc, 'isFullAccessKey').mockResolvedValue(true);
+    try {
+      const f = await setup({ base: true, sellerKind });
+      const { chain, splits } = statusFacilitator(true);
+      vi.spyOn(splits, 'checkSplit').mockImplementation(() => {});
+      const host = await uploadService({ ...f.config, splits });
+      const id = ((await host.create(f.request, 'ip')).body as { uploadId: string }).uploadId;
+      await host.body(id, f.request, f.source());
+      await writeFile(join(f.config.dir, `${id}.body`), new Uint8Array(f.body.length));
+      await expect(
+        host.baseSplit(id, f.request, { kind: 'push', salt: hostedSplitSalt() }),
+      ).rejects.toMatchObject({ code: 'not_sponsored' });
+      expect(chain.sign).not.toHaveBeenCalled();
+      expect(chain.send).not.toHaveBeenCalled();
+    } finally {
+      rpc.mockRestore();
+    }
+  },
+);
+it.each(['disabled', 'policy'] as const)(
+  'checks split %s before rehashing staged bytes',
+  async (guard) => {
+    const f = await setup({ base: true });
+    const { chain, splits } = statusFacilitator(guard !== 'disabled');
+    // No treasury fee configuration can authorize a deployment.
+    const service =
+      guard === 'policy'
+        ? facilitatorFor(chain, 10, () => 1000000, {
+            split: {
+              enabled: true,
+              deploymentsPerDay: 60,
+              sendsPerMinute: 2,
+              revertsPerDay: 1,
+              gasLimit: 1000000n,
+              maxFeeGwei: 1,
+              l1FeeAllowanceWei: 5n,
+              dailyBudgetWei: 100n,
+              walletDailyBudgetWei: 200n,
+            },
+          })
+        : splits;
+    const host = await uploadService({ ...f.config, splits: service });
+    const id = ((await host.create(f.request, 'ip')).body as { uploadId: string }).uploadId;
+    await host.body(id, f.request, f.source());
+    await writeFile(join(f.config.dir, `${id}.body`), new Uint8Array(f.body.length));
+    await expect(
+      host.baseSplit(id, f.request, { kind: 'push', salt: hostedSplitSalt() }),
+    ).rejects.toMatchObject({ code: guard === 'disabled' ? 'disabled' : 'not_sponsored' });
+    expect(chain.sign).not.toHaveBeenCalled();
+    expect(chain.send).not.toHaveBeenCalled();
+  },
+);
+it('returns authenticated upload status with the real facilitator when splits are disabled', async () => {
+  const f = await setup({ base: true });
+  const { splits } = statusFacilitator(false);
+  const host = await uploadService({ ...f.config, splits });
+  const id = ((await host.create(f.request, 'ip')).body as { uploadId: string }).uploadId;
+  await host.body(id, f.request, f.source());
+  await expect(host.status(id, f.request)).resolves.toMatchObject({
+    status: 200,
+    body: { state: 'reserved', baseSplit: null },
+  });
+});
+it.each(['unavailable', 'disabled'] as const)(
+  'keeps stored split provenance when its current status is %s',
+  async (mode) => {
+    const f = await setup({ base: true });
+    const { splits } = statusFacilitator(true);
+    const host = await uploadService({ ...f.config, splits });
+    const id = ((await host.create(f.request, 'ip')).body as { uploadId: string }).uploadId;
+    await host.body(id, f.request, f.source());
+    const result = await host.baseSplit(id, f.request, { kind: 'push', salt: hostedSplitSalt() });
+    if (mode === 'unavailable')
+      vi.spyOn(splits, 'splitStatus').mockRejectedValue(new Error('policy changed'));
+    const restarted =
+      mode === 'disabled'
+        ? await uploadService({ ...f.config, splits: statusFacilitator(false).splits })
+        : host;
+    await expect(restarted.status(id, f.request)).resolves.toMatchObject({
+      status: 200,
+      body: { baseSplit: result.body.baseSplit },
+    });
+  },
+);

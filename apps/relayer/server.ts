@@ -89,6 +89,7 @@ export interface Config extends Omit<CheckOptions, 'now'> {
 }
 
 const STATUS: Record<RelayErrorCode, number> = {
+  budget: 429,
   bad_request: 400,
   bad_signature: 400,
   bad_deadline: 400,
@@ -221,8 +222,8 @@ async function admission(
         baseSponsorship: c.policy.baseSponsorship !== false,
         fee: c.policy.fee ?? { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
         sponsorship: {
-          filesPerDay: c.policy.sponsoredFilesPerDay ?? 100,
-          filesPerIpDay: c.sponsoredFilesPerIpDay ?? 5,
+          filesPerDay: c.policy.sponsoredFilesPerDay ?? 60,
+          filesPerIpDay: c.sponsoredFilesPerIpDay ?? 1,
           fileBudget: String(c.policy.fileBudget ?? 41n * 10n ** 21n),
           listedFileBudget: String(c.policy.listedFileBudget ?? 5n * 10n ** 22n),
           topupPerFile: String(c.policy.topupPerFile ?? 82n * 10n ** 21n),
@@ -381,7 +382,7 @@ async function admission(
           unlock: c.perMethodDay?.unlock ?? 500,
           unlockReserved: c.unlockReserved ?? 500,
           unlockListedReserved: c.unlockListedReserved ?? 250,
-          filesPerIp: c.sponsoredFilesPerIpDay ?? 5,
+          filesPerIp: c.sponsoredFilesPerIpDay ?? 1,
           methods: c.perMethodDay ?? {},
         },
       });
@@ -455,8 +456,8 @@ async function admission(
   };
   if (pool === 'register') {
     for (const [key, limit] of [
-      ['day:files', c.policy.sponsoredFilesPerDay ?? 100],
-      [`day:files-ip:${ip}`, c.sponsoredFilesPerIpDay ?? 5],
+      ['day:files', c.policy.sponsoredFilesPerDay ?? 60],
+      [`day:files-ip:${ip}`, c.sponsoredFilesPerIpDay ?? 1],
     ] as const) {
       const counter = allow(key, limit, 86_400_000, now, c.hitsCap);
       if (!counter) {
@@ -640,7 +641,11 @@ export function serve(c: Config, port: number, keeperSeconds = 0) {
       );
       await c.monitor.boot();
       c.alert = (type) => {
-        void c.monitor?.failure(type).catch(() => {});
+        void (
+          type === 'admissions_paused' || type === 'admissions_resumed'
+            ? c.monitor?.admissions(type === 'admissions_paused')
+            : c.monitor?.failure(type)
+        )?.catch(() => {});
       };
       if (!(await c.ledger.cutover())) c.alert('cutover_unsealed');
       if (!c.archivalRpc) c.alert('historical_unavailable');
@@ -663,7 +668,7 @@ export function serve(c: Config, port: number, keeperSeconds = 0) {
       unlock: c.perMethodDay?.unlock ?? 500,
       unlockReserved: c.unlockReserved ?? 500,
       unlockListedReserved: c.unlockListedReserved ?? 250,
-      filesPerIp: c.sponsoredFilesPerIpDay ?? 5,
+      filesPerIp: c.sponsoredFilesPerIpDay ?? 1,
       methods: c.perMethodDay ?? {},
     };
     stopKeeper = keeperSeconds > 0 ? keeper(c, keeperSeconds) : async () => {};
@@ -906,6 +911,7 @@ export async function relayerAlerts(c: Config): Promise<RelayerAlert[]> {
   ]);
   if (typeof storage !== 'string' || !/^[0-9]+$/.test(storage))
     throw new Error('relayer storage balance unavailable');
+  if (c.admissionFloor !== undefined) await c.monitor?.admissions(funds.balance < c.admissionFloor);
   const needed =
     funds.cost > (c.balanceLowWater ?? 3n * 10n ** 24n)
       ? funds.cost
@@ -1083,9 +1089,9 @@ export function fromEnv(e: Record<string, string | undefined>): {
     MAX_FILE_BYTES: 50000000,
     MAX_DEADLINE_SECONDS: 600,
     TOPUP_MAX_DEADLINE_SECONDS: 600,
-    SPONSORED_FILES_PER_DAY: 100,
-    SPONSORED_FILES_PER_IP_DAY: 5,
-    REGISTRATIONS_PER_SELLER_DAY: 5,
+    SPONSORED_FILES_PER_DAY: 60,
+    SPONSORED_FILES_PER_IP_DAY: 1,
+    REGISTRATIONS_PER_SELLER_DAY: 1,
     LISTED_REGISTRATIONS_PER_SELLER_DAY: 20,
     CORS_MAX_AGE_SECONDS: 600,
   })) {
@@ -1148,6 +1154,10 @@ export function fromEnv(e: Record<string, string | undefined>): {
   }
   if (nearAmount('PREPAID_UNLOCK_FLOOR', '1') < 10n ** 24n)
     throw new Error('PREPAID_UNLOCK_FLOOR must protect at least 1 NEAR');
+  if (e.ADMISSION_FLOOR_NEAR !== undefined && !e.ADMISSION_FLOOR_NEAR.trim())
+    throw new Error('invalid ADMISSION_FLOOR_NEAR');
+  const admissionFloor = nearAmount('ADMISSION_FLOOR_NEAR', '3');
+  if (admissionFloor <= 0n) throw new Error('ADMISSION_FLOOR_NEAR must be positive');
   const treasury = (name: string) => {
     const value = e[name]?.trim();
     if (!value) return null;
@@ -1256,7 +1266,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
         topupMaxDeadlineSeconds: count('TOPUP_MAX_DEADLINE_SECONDS', '600'),
         fileBudget: nearAmount('FILE_BUDGET', '0.041'),
         listedFileBudget: nearAmount('LISTED_FILE_BUDGET', '0.05'),
-        sponsoredFilesPerDay: count('SPONSORED_FILES_PER_DAY', '100'),
+        sponsoredFilesPerDay: count('SPONSORED_FILES_PER_DAY', '60'),
         topupPerFile: nearAmount('TOPUP_PER_FILE', '0.082'),
         topupPerFileDay: nearAmount('TOPUP_PER_FILE_DAY', '0.041'),
         topupPerDay: nearAmount('TOPUP_PER_DAY', '0.5'),
@@ -1268,7 +1278,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
         },
         maxDeadlineSeconds: count('MAX_DEADLINE_SECONDS', '600'),
         claimsPerGrant: count('CLAIMS_PER_GRANT_DAY', '3'),
-        registrationsPerSeller: count('REGISTRATIONS_PER_SELLER_DAY', '5'),
+        registrationsPerSeller: count('REGISTRATIONS_PER_SELLER_DAY', '1'),
         reopensPerWalletFile: count('REOPENS_PER_PURCHASE_DAY', '10'),
         holdMs: count('HOLD_SECONDS', '900') * 1000,
         maxWaiting: count('MAX_WAITING', '32'),
@@ -1277,7 +1287,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
       },
       ...(keeperConfig ? { keeper: keeperConfig } : {}),
       disabled: flag('DISABLED', '0'),
-      sponsoredFilesPerIpDay: count('SPONSORED_FILES_PER_IP_DAY', '5'),
+      sponsoredFilesPerIpDay: count('SPONSORED_FILES_PER_IP_DAY', '1'),
       perIpHour: count('PER_IP_HOUR', '600'),
       perDay,
       unlockReserved,
@@ -1314,6 +1324,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
       hitsCap: Math.max(1, count('HITS_CAP', '100000')),
       requestMultiplier: count('REQUEST_MULTIPLIER', '10'),
       retrySeconds: count('RETRY_SECONDS', '5'),
+      admissionFloor,
       balanceLowWater: yocto('RELAYER_BALANCE_LOW_WATER', '3000000000000000000000000'),
       storageLowWater: yocto('RELAYER_STORAGE_LOW_WATER', '500000000000000000000000'),
       ...(e.RELAYER_ALERT_WEBHOOK?.trim()

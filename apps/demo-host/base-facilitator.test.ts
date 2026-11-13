@@ -12,7 +12,14 @@ const mocked = vi.hoisted(() => ({
   transport: vi.fn(),
   balance: vi.fn(async () => 10n ** 18n),
   receipt: vi.fn(async () => null),
-  prepare: vi.fn(async () => ({ maxFeePerGas: 1n, gas: 120000n })),
+  transaction: vi.fn(async () => {
+    const { TransactionNotFoundError } = await import('viem');
+    throw new TransactionNotFoundError({ hash: `0x${'55'.repeat(32)}` });
+  }),
+  nonce: vi.fn(async (_request: { blockTag: string }) => 0),
+  code: vi.fn(async () => undefined as `0x${string}` | undefined),
+  splitRead: vi.fn(async () => ({})),
+  prepare: vi.fn(async () => ({ maxFeePerGas: 1n, gas: 120000n, nonce: 7 })),
   read: vi.fn(async ({ functionName }: { functionName: string }) =>
     functionName === 'balanceOf' ? 100n : false,
   ),
@@ -21,12 +28,14 @@ vi.mock('viem', async (load) => ({
   ...(await load<typeof import('viem')>()),
   http: mocked.transport,
   createPublicClient: () => ({
+    getBytecode: mocked.code,
     getChainId: mocked.chainId,
     call: mocked.call,
     readContract: mocked.read,
     getBlock: async () => ({ timestamp: 1000n }),
     getBalance: mocked.balance,
-    getTransactionCount: async () => 0,
+    getTransactionCount: mocked.nonce,
+    getTransaction: mocked.transaction,
     getTransactionReceipt: mocked.receipt,
   }),
   createWalletClient: () => ({
@@ -36,6 +45,11 @@ vi.mock('viem', async (load) => ({
   }),
 }));
 vi.mock('viem/op-stack', () => ({ estimateL1Fee: vi.fn(async () => 10n) }));
+
+vi.mock('../../packages/annon/src/pay/split.ts', async (load) => ({
+  ...(await load<typeof import('../../packages/annon/src/pay/split.ts')>()),
+  readSplit: mocked.splitRead,
+}));
 
 import { baseFacilitator } from './facilitator.ts';
 
@@ -130,3 +144,136 @@ it('refuses a provider that accepts overrides but returns the unmodified block t
   mocked.call.mockResolvedValueOnce({ data: `0x${(1000).toString(16).padStart(64, '0')}` });
   expect(await f.selfCheck()).toBe(false);
 });
+
+it.each([
+  'fee',
+  'l1',
+  'gas',
+  'nonce',
+  'missing-gas',
+  'missing-fee',
+  'simulation',
+  'network',
+  'ready',
+])('checks split adapter %s before broadcast', async (guard) => {
+  const { createSplit, hostedSplitSalt } = await import('../../packages/annon/src/pay/split.ts');
+  const { BASE_USDC, NEAR_USDC } = await import('../../packages/annon/src/settle-near/terms.ts');
+  const { memoryStore } = await import('../../packages/annon/src/pay/store.ts');
+  const treasury = { kind: 'evm' as const, id: `0x${'11'.repeat(20)}` };
+  const split = {
+    recipients: [treasury.id],
+    allocations: [10000n],
+    totalAllocation: 10000n,
+    distributionIncentive: 0,
+  };
+  const terms = {
+    network: 'near:mainnet',
+    contract: 'market.test',
+    file_id: `0x${'22'.repeat(32)}`,
+    seller: treasury,
+    pay2_version: 2 as const,
+    cipher_hash: `0x${'33'.repeat(32)}`,
+    moderator: null,
+    near: {
+      price: '100000',
+      token: NEAR_USDC,
+      recipients: [{ identity: treasury, bps: 10000 }],
+      remainder: 0,
+    },
+    base: {
+      price: '100000',
+      usdc: BASE_USDC,
+      pay_to: createSplit('push', split, hostedSplitSalt()).address,
+    },
+  };
+  const limits = {
+    enabled: true as const,
+    deploymentsPerDay: 60,
+    sendsPerMinute: 2,
+    revertsPerDay: 1,
+    gasLimit: 120000n,
+    maxFeeGwei: 0.5,
+    l1FeeAllowanceWei: guard === 'l1' ? 9n : 10n,
+    dailyBudgetWei: 1000000000n,
+    walletDailyBudgetWei: 10000000000000000n,
+  };
+  const f = await baseFacilitator('42'.repeat(32), 'https://base.invalid', 0.5, 10, {
+    store: memoryStore(),
+    split: limits,
+    splitFee: { fixed: '30000', bps: 100, treasuryNear: null, treasuryEvm: treasury },
+  });
+  const before = mocked.send.mock.calls.length;
+  const beforeSign = mocked.sign.mock.calls.length;
+  if (guard === 'fee')
+    mocked.prepare.mockResolvedValueOnce({ maxFeePerGas: 500000001n, gas: 120000n, nonce: 7 });
+  if (guard === 'nonce')
+    mocked.prepare.mockResolvedValueOnce({ maxFeePerGas: 1n, gas: 120000n } as never);
+  if (guard === 'missing-gas')
+    mocked.prepare.mockResolvedValueOnce({ maxFeePerGas: 1n, nonce: 7 } as never);
+  if (guard === 'missing-fee')
+    mocked.prepare.mockResolvedValueOnce({ gas: 120000n, nonce: 7 } as never);
+  if (guard === 'gas')
+    mocked.prepare.mockResolvedValueOnce({ maxFeePerGas: 1n, gas: 120001n, nonce: 7 });
+  if (guard === 'simulation')
+    mocked.call.mockRejectedValueOnce(new Error('simulation unavailable'));
+  if (guard === 'network') mocked.chainId.mockResolvedValueOnce(1);
+  if (guard === 'ready') mocked.code.mockResolvedValueOnce('0x1234');
+  if (guard === 'ready') {
+    expect(await f.deploySplit(terms)).toMatchObject({ state: 'ready' });
+    expect(mocked.splitRead).toHaveBeenCalledWith(
+      'https://base.invalid',
+      terms.base.pay_to,
+      split,
+      { salt: hostedSplitSalt() },
+    );
+  } else await expect(f.deploySplit(terms)).rejects.toThrow();
+  expect(mocked.send.mock.calls).toHaveLength(before);
+  expect(mocked.sign.mock.calls).toHaveLength(beforeSign);
+});
+
+it.each([7, 8])(
+  'reconciles a saved split with mined nonce %s independently of pending nonces',
+  async (latest) => {
+    const { memoryStore } = await import('../../packages/annon/src/pay/store.ts');
+    const store = memoryStore<import('./facilitator.ts').FacilitatorState>();
+    const hash = `0x${'55'.repeat(32)}`;
+    await store.compareAndSet('facilitator', null, {
+      id: 'facilitator',
+      revision: 0,
+      times: [],
+      sends: {
+        split: {
+          operation: 'split',
+          serialized: '0x1234',
+          hash,
+          nonce: 7,
+          payer: `0x${'11'.repeat(20)}`,
+          at: Date.now(),
+          until: 0,
+          day: 0,
+          cost: '20',
+          done: false,
+        },
+      },
+      days: { 0: { cost: '0', reverts: 0, payers: {}, splitCost: '20' } },
+    });
+    mocked.nonce.mockImplementation(async ({ blockTag }) => (blockTag === 'latest' ? latest : 99));
+    const sends = mocked.send.mock.calls.length;
+    const f = await baseFacilitator('42'.repeat(32), 'https://base.invalid', 0.5, 10, { store });
+    try {
+      await f.sample();
+      expect(mocked.nonce).toHaveBeenLastCalledWith(
+        expect.objectContaining({ blockTag: 'latest' }),
+      );
+      expect((await store.load('facilitator'))?.sends.split).toMatchObject({
+        done: latest === 8,
+        cost: latest === 8 ? '0' : '20',
+      });
+      expect(mocked.send.mock.calls.length - sends).toBe(latest === 8 ? 0 : 1);
+      if (latest === 7)
+        expect(mocked.send).toHaveBeenLastCalledWith({ serializedTransaction: '0x1234' });
+    } finally {
+      mocked.nonce.mockImplementation(async () => 0);
+    }
+  },
+);

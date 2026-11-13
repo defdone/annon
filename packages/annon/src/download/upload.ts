@@ -429,7 +429,8 @@ function splitResponse(value: unknown): UploadBaseSplit | null {
     !/^0x[0-9a-fA-F]{40}$/.test(value.address) ||
     value.kind !== 'push' ||
     value.salt !== `0x${'00'.repeat(32)}` ||
-    (value.txHash !== null && (typeof value.txHash !== 'string' || !value.txHash))
+    (value.txHash !== null &&
+      (typeof value.txHash !== 'string' || !/^0x[0-9a-f]{64}$/.test(value.txHash)))
   )
     throw new AnnonError('bad_request');
   return value as unknown as UploadBaseSplit;
@@ -526,6 +527,7 @@ export class UploadClient {
       at += p.length;
     }
     const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    if (isAnnonErrorCode(value?.error)) return failure(value.error, value.retryAfterSeconds);
     if (response.ok) {
       try {
         if (!validate) throw new AnnonError('bad_request');
@@ -593,7 +595,7 @@ export class UploadClient {
       (value, status) => {
         exactKeys(value, ['baseSplit']);
         const baseSplit = splitResponse(value.baseSplit);
-        if (baseSplit && status !== (baseSplit.state === 'pending' ? 202 : 200))
+        if (!baseSplit || status !== (baseSplit.state === 'pending' ? 202 : 200))
           throw new AnnonError('bad_request');
         return { baseSplit };
       },

@@ -35,3 +35,51 @@ it('rejects every raised send, request, fee and gas budget ceiling', () => {
     0.1,
   );
 });
+
+const splitEnv = {
+  SPLIT_DEPLOY_ENABLED: '1',
+  SPLIT_DEPLOYMENTS_PER_DAY: '60',
+  SPLIT_SENDS_PER_MINUTE: '2',
+  SPLIT_REVERTS_PER_DAY: '1',
+  SPLIT_GAS_LIMIT: '1000000',
+  SPLIT_MAX_FEE_GWEI: '0.5',
+  SPLIT_L1_FEE_ALLOWANCE_WEI: '100',
+  SPLIT_DAILY_BUDGET_WEI: '1000',
+  BASE_WALLET_DAILY_BUDGET_WEI: '2000',
+  FACILITATOR_DAILY_GAS_BUDGET_WEI: '1000',
+};
+it('defaults split spending off and requires every explicit positive deployment limit', () => {
+  expect(settings({}).split).toEqual({ enabled: false });
+  expect(settings(splitEnv).split).toMatchObject({ enabled: true, deploymentsPerDay: 60 });
+  for (const key of Object.keys(splitEnv).filter(
+    (k) => !['SPLIT_DEPLOY_ENABLED', 'FACILITATOR_DAILY_GAS_BUDGET_WEI'].includes(k),
+  )) {
+    for (const value of [undefined, '', '0', '-1', 'NaN', 'Infinity'])
+      expect(() => settings({ ...splitEnv, [key]: value }), `${key}=${value}`).toThrow(key);
+  }
+  expect(() => settings({ SPLIT_DEPLOY_ENABLED: '2' })).toThrow('SPLIT_DEPLOY_ENABLED');
+});
+it('uses the final open-pool defaults and ceilings', () => {
+  expect(settings({}).capacity).toMatchObject({
+    filesPerDay: 60,
+    filesPerIpDay: 1,
+    filesPerSellerDay: 1,
+  });
+  expect(() => settings({ SPONSORED_FILES_PER_DAY: '60' })).not.toThrow();
+  for (const [name, value] of [
+    ['SPONSORED_FILES_PER_DAY', '61'],
+    ['SPONSORED_FILES_PER_IP_DAY', '2'],
+    ['REGISTRATIONS_PER_SELLER_DAY', '2'],
+  ] as const)
+    expect(() => settings({ [name]: value })).toThrow(name);
+});
+
+it('reserves the entire configured payment and split budgets at startup', () => {
+  expect(() => settings({ ...splitEnv, BASE_WALLET_DAILY_BUDGET_WEI: '1999' })).toThrow(
+    'BASE_WALLET_DAILY_BUDGET_WEI',
+  );
+  expect(() => settings(splitEnv)).not.toThrow();
+  expect(() => settings({ ...splitEnv, FACILITATOR_DAILY_GAS_BUDGET_WEI: undefined })).toThrow(
+    'BASE_WALLET_DAILY_BUDGET_WEI',
+  );
+});

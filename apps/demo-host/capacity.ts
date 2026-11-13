@@ -57,8 +57,9 @@ interface State extends Versioned {
   >;
 }
 export class CapacityError extends AnnonError<
-  'host_capacity' | 'too_large' | 'upload_incomplete' | 'upload_conflict'
+  'rate_limited' | 'host_capacity' | 'too_large' | 'upload_incomplete' | 'upload_conflict'
 > {
+  retryAfterSeconds?: number;
   constructor(code: CapacityError['code']) {
     super(code);
     this.name = 'CapacityError';
@@ -181,16 +182,22 @@ export async function hostCapacity(dir: string, o: CapacityLimits = {}) {
           capacity(s, false) + i.byteSize * 2 > (o.hostBytes ?? 80_000_000_000) ||
           (!i.listed && capacity(s, true) + i.byteSize * 2 > (o.poolBytes ?? 40_000_000_000)) ||
           counts.ingress + ingressHolds + i.bodyBytes > (o.ingressPerDay ?? 1_000_000_000) ||
-          (!i.listed &&
-            (counts.files >= (o.filesPerDay ?? 30) ||
-              (counts.ips[i.ip] ?? 0) >= (o.filesPerIpDay ?? 3))) ||
-          (counts.sellers[sellerKey] ?? 0) >=
-            (i.listed ? (o.listedPerSellerDay ?? 20) : (o.filesPerSellerDay ?? 3)) ||
           receiving.length >= (o.concurrency ?? 4) ||
           receiving.filter((r) => r.seller === i.seller).length >= (o.perSeller ?? 1) ||
           receiving.filter((r) => r.ip === i.ip).length >= (o.perIp ?? 1)
         )
           throw new CapacityError('host_capacity');
+        if (
+          (!i.listed &&
+            (counts.files >= (o.filesPerDay ?? 60) ||
+              (counts.ips[i.ip] ?? 0) >= (o.filesPerIpDay ?? 1))) ||
+          (counts.sellers[sellerKey] ?? 0) >=
+            (i.listed ? (o.listedPerSellerDay ?? 20) : (o.filesPerSellerDay ?? 1))
+        ) {
+          const error = new CapacityError('rate_limited');
+          error.retryAfterSeconds = Math.ceil((86_400_000 - (t % 86_400_000)) / 1000);
+          throw error;
+        }
         if (!i.listed) {
           counts.files++;
           counts.ips[i.ip] = (counts.ips[i.ip] ?? 0) + 1;

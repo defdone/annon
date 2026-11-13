@@ -72,6 +72,6 @@ it('parses upload defaults and disabling separately from the listed allowance', 
       idleSeconds: 600,
       requestSeconds: 1800,
     },
-    capacity: { listedPerSellerDay: 20, filesPerDay: 30, filesPerIpDay: 3, filesPerSellerDay: 3 },
+    capacity: { listedPerSellerDay: 20, filesPerDay: 60, filesPerIpDay: 1, filesPerSellerDay: 1 },
   });
 });

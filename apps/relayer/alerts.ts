@@ -3,6 +3,7 @@ import { statfs } from 'node:fs/promises';
 import type { Store, Versioned } from '@defdone/annon/pay/store';
 export interface MonitorRecord extends Versioned {
   running: boolean;
+  admissionsPaused?: boolean;
   alerts: Record<string, number>;
 }
 export interface ServiceAlert {
@@ -44,11 +45,20 @@ export class ServiceMonitor {
         id: 'monitor',
         revision: (old?.revision ?? -1) + 1,
         running: old?.running ?? false,
+        ...(old?.admissionsPaused === undefined ? {} : { admissionsPaused: old.admissionsPaused }),
         alerts: { ...old?.alerts },
       };
       fn(next);
       if (await this.store.compareAndSet('monitor', old, next)) return;
     }
+  }
+  async admissions(paused: boolean) {
+    let changed = false;
+    await this.update((r) => {
+      changed = r.admissionsPaused !== paused && (paused || r.admissionsPaused !== undefined);
+      r.admissionsPaused = paused;
+    });
+    if (changed) await this.deliver({ type: paused ? 'admissions_paused' : 'admissions_resumed' });
   }
   async boot(now = Date.now()) {
     const old = await this.store.load('monitor');

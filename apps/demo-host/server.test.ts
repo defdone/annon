@@ -52,7 +52,7 @@ async function start(c: Partial<HostConfig>, serve?: Parameters<typeof handler>[
         takenDown: null,
         salesStoppedAt: null,
         termsHash: `0x${'11'.repeat(32)}`,
-        terms: { network: 'near:mainnet' },
+        terms: { network: 'near:mainnet', base: { pay_to: `0x${'22'.repeat(20)}` } },
       }) as never,
     store: memoryStore(),
     facilitator: async () => {
@@ -110,6 +110,7 @@ function fakeChain(
     timestamp: async () => Math.floor(Date.now() / 1000),
     balance: async () => 100000n,
     ethBalance: async () => 10n ** 18n,
+    minedNonce: async () => 0,
     nonceClear: async () => true,
     receipt: async () => ({ reverted: false, costWei: 1n }),
     transaction: async () => true,
@@ -592,7 +593,7 @@ it('uses final terms for the catalog, omits stopped sales and fails closed on ch
       if (state === 'error') throw new Error('private');
       return {
         price: 100000n,
-        terms: { network: 'near:mainnet' },
+        terms: { network: 'near:mainnet', base: { pay_to: `0x${'22'.repeat(20)}` } },
         termsHash: 'final',
         takenDown: null,
         salesStoppedAt: state === 'stopped' ? 1 : null,
@@ -603,7 +604,7 @@ it('uses final terms for the catalog, omits stopped sales and fails closed on ch
   const catalog = await r.json();
   expect(catalog[0]).toMatchObject({
     termsHash: 'final',
-    terms: { network: 'near:mainnet' },
+    terms: { network: 'near:mainnet', base: { pay_to: `0x${'22'.repeat(20)}` } },
     byteSize: 110,
     plaintextSize: 10,
   });
@@ -771,5 +772,39 @@ it('verifies hosted bytes before serving a public header or invoking payment wor
   const url = await start({ files }, serve);
   expect((await fetch(`${url}/f/hello/header`)).status).toBe(500);
   expect((await fetch(`${url}/f/hello`)).status).toBe(500);
+  expect(serve).not.toHaveBeenCalled();
+});
+it.each([null, { pay_to: `0x${'22'.repeat(20)}` }])(
+  'advertises Base only from final terms (%j)',
+  async (base) => {
+    const files = await setup([{ name: 'file', fileId: FILE_ID, title: 'File' }], {
+      file: pay2(128, 50),
+    });
+    const url = await start({
+      files,
+      getFile: async () =>
+        ({ price: 100000n, takenDown: null, salesStoppedAt: null, terms: { base } }) as never,
+    });
+    const html = await (await fetch(url)).text();
+    expect(html.includes('--route base')).toBe(base !== null);
+    expect(html).toContain('--route near');
+    expect(html).toContain('--route 1click');
+  },
+);
+it('refuses a crafted Base payment before the settlement handler for a file without Base terms', async () => {
+  const files = await setup([{ name: 'file', fileId: FILE_ID, title: 'File' }], {
+    file: pay2(128, 50),
+  });
+  const serve = vi.fn();
+  const url = await start(
+    { files, getFile: async () => ({ takenDown: null, terms: { base: null } }) as never },
+    serve,
+  );
+  const response = await fetch(`${url}/f/file`, { headers: { 'Payment-Signature': 'crafted' } });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({
+    error: 'route_unavailable',
+    message: 'This file does not support the selected payment route.',
+  });
   expect(serve).not.toHaveBeenCalled();
 });

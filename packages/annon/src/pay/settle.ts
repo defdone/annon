@@ -167,6 +167,8 @@ export async function settle(header: string, o: SettleOptions): Promise<Settleme
   const file = await getFile(o.nearRpc, o.contractId, o.fileId);
   if (!file) return fail('unknown_file', 'the file is not registered on the Annon contract');
   if (file.takenDown) fail('taken_down', `the file was taken down (${file.takenDown})`);
+  if (!file.terms.base)
+    fail('route_unavailable', 'This file does not support the selected payment route.');
   const { usdc } = await getConfig(o.nearRpc, o.contractId);
   const c = checkTerms(header, {
     contractId: o.contractId,

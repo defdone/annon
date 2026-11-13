@@ -11,6 +11,9 @@ const base = {
   RELAYER_STATE_DIR: '/unused',
 };
 it.each([
+  ['SPONSORED_FILES_PER_DAY', '61'],
+  ['SPONSORED_FILES_PER_IP_DAY', '2'],
+  ['REGISTRATIONS_PER_SELLER_DAY', '2'],
   ['SPONSORED_FILES_PER_DAY', '101'],
   ['SPONSORED_FILES_PER_IP_DAY', '6'],
   ['REGISTRATIONS_PER_SELLER_DAY', '6'],
@@ -41,4 +44,16 @@ it('allows tighter open limits, zero capacity, and listed allowance independentl
 it('requires an explicit hosting origin and listed sellers when the demo pool is enabled', () => {
   expect(() => fromEnv({ ...base, DEMO_HOST_ORIGIN: undefined })).toThrow('DEMO_HOST_ORIGIN');
   expect(() => fromEnv({ ...base, SELLERS: undefined })).toThrow('SELLERS');
+});
+it('uses final pool defaults and a positive liquid admission floor in NEAR', () => {
+  const c = fromEnv(base).config;
+  expect(c.policy.sponsoredFilesPerDay).toBe(60);
+  expect(c.sponsoredFilesPerIpDay).toBe(1);
+  expect(c.policy.registrationsPerSeller).toBe(1);
+  expect(c.admissionFloor).toBe(3n * 10n ** 24n);
+  expect(
+    fromEnv({ ...base, SPONSORED_FILES_PER_DAY: '60' }).config.policy.sponsoredFilesPerDay,
+  ).toBe(60);
+  for (const value of ['0', '-1', 'NaN', ''])
+    expect(() => fromEnv({ ...base, ADMISSION_FLOOR_NEAR: value })).toThrow('ADMISSION_FLOOR_NEAR');
 });

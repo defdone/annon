@@ -48,7 +48,7 @@ import { StartupError, type StartupReason } from './startup-errors.ts';
 import { hostStorage } from './storage.ts';
 import { sendBody } from './stream.ts';
 import { uploadHttp } from './upload-http.ts';
-import { uploadService } from './uploads.ts';
+import { UploadFault, uploadService } from './uploads.ts';
 
 export { clientKey, limiter } from '../../packages/annon/src/net/ip.ts';
 export type { Chain } from './facilitator.ts';
@@ -62,6 +62,7 @@ export interface DemoFile {
   description?: string;
   /** Shown on the index only; the contract's registered price is what buyers pay. */
   priceUsdc?: string;
+  baseAvailable?: boolean;
 }
 export interface Loaded extends DemoFile {
   verify?: () => Promise<void>;
@@ -183,7 +184,8 @@ function page(c: HostConfig): string {
     .map((f) => {
       const url = esc(`${c.publicUrl}/f/${f.name}`);
       const cap = f.priceUsdc ? ` --max-price ${esc(f.priceUsdc)}` : '';
-      const routes = c.facilitator ? ['base', 'near'] : ['near'];
+      const routes =
+        c.facilitator && f.baseAvailable ? ['near', 'base', '1click'] : ['near', '1click'];
       return `<li><h2>${esc(f.title)}</h2>${f.description ? `<p>${esc(f.description)}</p>` : ''}
 <p>${f.priceUsdc ? `${esc(f.priceUsdc)} USDC. ` : ''}File ID <code>${f.fileId}</code></p>
 <pre>annon verify ${url}
@@ -193,7 +195,7 @@ ${routes.map((r) => `annon buy ${url} --route ${r}${cap}`).join('\n')}</pre></li
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Annon demo files</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 1rem}pre,code{background:#f3f3f3;padding:.2rem .4rem;border-radius:4px;overflow-x:auto}pre{padding:.8rem}li{list-style:none;margin:0 0 2rem}ul{padding:0}</style></head>
 <body><h1>Annon demo files</h1>
-<p>Each file is encrypted. NEAR releases its key only after it has verified your USDC payment${c.facilitator ? ', on NEAR or on Base' : ' on NEAR'}.
+<p>Each file is encrypted. NEAR releases its key only after it has verified your USDC payment on the file's supported payment route.
 Pay with the <code>annon</code> CLI or the Annon MCP server, then <code>annon open</code> the purchase.</p>
 <ul>${items}</ul><p><a href="/files.json">files.json</a></p></body></html>`;
 }
@@ -294,6 +296,7 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
               ...c,
               files: entries.map(({ f, info }) => ({
                 ...f,
+                baseAvailable: !!info.terms.base,
                 priceUsdc: `${info.price / 1_000_000n}.${String(info.price % 1_000_000n).padStart(6, '0')}`,
               })),
             }),
@@ -337,9 +340,28 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
           { 'Content-Type': 'application/json' },
           JSON.stringify({ error: 'file_expired', message: 'This hosted file has expired.' }),
         );
-      await f.verify?.();
+      try {
+        await f.verify?.();
+      } catch (error) {
+        if (!(error instanceof UploadFault) || error.status !== 503) throw error;
+        return send(
+          503,
+          { 'Content-Type': 'application/json', 'Retry-After': '30' },
+          JSON.stringify({ error: 'unavailable', message: 'This hosted file is unavailable.' }),
+        );
+      }
       if (m[2]) return send(200, { 'Content-Type': 'application/octet-stream' }, f.header);
       if (req.headers['payment-signature']) {
+        const info = await (c.getFile ?? ((id) => getFile(c.nearRpc, c.contractId, id)))(f.fileId);
+        if (info && !info.terms.base)
+          return send(
+            400,
+            { 'Content-Type': 'application/json' },
+            JSON.stringify({
+              error: 'route_unavailable',
+              message: 'This file does not support the selected payment route.',
+            }),
+          );
         if (!c.facilitator) return send(501, {});
         const paymentAdmission = paymentsPerClient(key);
         if (!paymentAdmission.allowed)
@@ -458,11 +480,29 @@ export async function main(e: Record<string, string | undefined> = process.env) 
     reason = 'config_invalid';
     const files = await loadFiles(need('FILES_DIR'), (id) => capacity.expired(id), settings);
     reason = 'state_invalid';
+    const key = e.FACILITATOR_KEY?.trim();
+    const baseRpc = need('BASE_RPC');
+    const facilitator = key
+      ? await baseFacilitator(key, baseRpc, settings.maxFeeGwei, settings.sendsPerMinute, {
+          ...settings.facilitator,
+          split: settings.split,
+          splitMinPrice: BigInt(settings.int('MIN_PRICE', 100000)),
+          ...(settings.splitFee ? { splitFee: settings.splitFee } : {}),
+          store: fileStore(join(dataDir, 'facilitator')),
+          alert,
+          requireState: true,
+          rpcTimeout: settings.rpcTimeout,
+          rpcRetries: settings.rpcRetries,
+          gasLimit: settings.gasLimit,
+        })
+      : undefined;
     const signingKey = e.DEMO_RESERVATION_SIGNING_KEY?.trim();
     const uploads = signingKey
       ? await uploadService({
           dir: join(dataDir, 'uploads'),
           capacity,
+          ...(facilitator ? { splits: facilitator } : {}),
+          alert,
           requireState: true,
           network: 'near:mainnet',
           contract: need('CONTRACT_ID'),
@@ -488,19 +528,6 @@ export async function main(e: Record<string, string | undefined> = process.env) 
         bodyBytes: f.size - f.header.length,
         plaintextSize: f.plaintextSize,
       });
-    const key = e.FACILITATOR_KEY?.trim();
-    const baseRpc = need('BASE_RPC');
-    const facilitator = key
-      ? await baseFacilitator(key, baseRpc, settings.maxFeeGwei, settings.sendsPerMinute, {
-          ...settings.facilitator,
-          store: fileStore(join(dataDir, 'facilitator')),
-          alert,
-          requireState: true,
-          rpcTimeout: settings.rpcTimeout,
-          rpcRetries: settings.rpcRetries,
-          gasLimit: settings.gasLimit,
-        })
-      : undefined;
     const c: HostConfig = {
       contractId: need('CONTRACT_ID'),
       nearRpc: need('NEAR_RPC'),

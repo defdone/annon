@@ -1,7 +1,7 @@
 import { privateKeyToAccount } from 'viem/accounts';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { terms as initial, must, purchase as sample } from '../../test/fixtures.js';
-import { getFile, getPurchase, NearError, rpcReply, view } from '../near/rpc.js';
+import { getFile, getGrant, getPurchase, NearError, rpcReply, view } from '../near/rpc.js';
 import { fileFundingText, registerText } from '../near/texts.js';
 import { block, getReceipt, paymentLogs } from '../pay/base.js';
 import { createSplit } from '../pay/split.js';
@@ -26,6 +26,7 @@ let {
 vi.mock('../near/rpc.js', async (original) => ({
   ...(await original<typeof import('../near/rpc.js')>()),
   getFile: vi.fn(),
+  getGrant: vi.fn(),
   getPurchase: vi.fn(),
   rpcReply: vi.fn(),
   view: vi.fn(),
@@ -968,3 +969,78 @@ it.each([1007n, 7n, 900n])(
     }
   },
 );
+it.each(['register', 'fund_file_storage'])(
+  'checks the liquid admission floor before a new %s reservation or signature',
+  async (method) => {
+    const { o, ledger } = await options();
+    o.admissionFloor = 3n * 10n ** 24n;
+    o.admissionBalance = async () => 0n;
+    const request = method === 'register' ? await registration() : await funding();
+    if (method !== 'register') {
+      vi.mocked(getFile).mockResolvedValue(file);
+      await ledger.remember({
+        network: terms.network,
+        contract: terms.contract,
+        fileId: terms.file_id,
+        termsHash: termsHash(terms),
+        terms,
+        eligible: true,
+        tier: 'listed',
+        listed: true,
+        policyVersion: 'v1',
+        minPrice: '100000',
+        fee: { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
+        decidedAt: 1000,
+        allocated: '50000000000000000000000',
+        outcome: 'registered',
+      });
+    }
+    await expect(relay(request, o)).rejects.toMatchObject({
+      code: 'budget',
+      retryAt: expect.any(Number),
+    });
+    expect(created).not.toHaveBeenCalled();
+    expect(Object.keys((await ledger.read()).operations)).toHaveLength(0);
+  },
+);
+
+it('keeps a slow seller balance read outside the queue used by buyer key claims', async () => {
+  const { o } = await options();
+  let release = (_balance: bigint) => {};
+  const read = vi
+    .fn(async () => 0n)
+    .mockImplementationOnce(
+      () =>
+        new Promise<bigint>((resolve) => {
+          release = resolve;
+        }),
+    );
+  o.admissionFloor = 1n;
+  o.admissionBalance = read;
+  const listing = relay(await registration(), o).catch((error: unknown) => error);
+  let claim: Promise<unknown> | undefined;
+  try {
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+    vi.mocked(getFile).mockResolvedValue(file);
+    vi.mocked(getPurchase).mockResolvedValue({
+      ...sample,
+      file_id: terms.file_id,
+      route: 'near-usdc',
+      grants: 1,
+    } as never);
+    vi.mocked(getGrant).mockResolvedValue({ buyer_key: sample.buyer_key } as never);
+    let completed = false;
+    claim = relay({ method: 'claim_key', args: { purchase_id: terms.file_id, grant: 0 } }, o)
+      .then((result) => {
+        completed = true;
+        return result;
+      })
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => expect(completed).toBe(true), { timeout: 500 });
+    expect(read).toHaveBeenCalledOnce();
+    expect(created).toHaveBeenCalledOnce();
+  } finally {
+    release(0n);
+    await Promise.allSettled([listing, claim]);
+  }
+});

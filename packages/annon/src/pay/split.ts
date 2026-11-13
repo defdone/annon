@@ -156,6 +156,11 @@ function checkTerms(s: Split) {
   }
 }
 
+/** Canonical hosted v1 salt. Complete ordered split parameters determine reuse. */
+export function hostedSplitSalt(): string {
+  return `0x${'00'.repeat(32)}`;
+}
+
 /** A transaction to send from any wallet on Base. */
 export interface SplitCall {
   to: string;

@@ -244,3 +244,11 @@ it('alerts when the archival reader is missing', async () => {
   );
   expect(o.alert).toHaveBeenCalledWith('historical_unavailable');
 });
+it('uses the final shared admission defaults for unlisted sellers', async () => {
+  const { relayLimits } = await import('./sponsorship.js');
+  expect(relayLimits({ policy: {} } as CheckOptions)).toMatchObject({
+    files: 60,
+    filesPerIp: 1,
+    registrationsPerSeller: 1,
+  });
+});

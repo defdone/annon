@@ -172,3 +172,21 @@ it.each(['reopen_seller', 'fund_file_storage'] as const)(
     }
   },
 );
+it('persists each admission floor transition across restart without duplicate alerts', async () => {
+  const { vi } = await import('vitest');
+  const store = memoryStore<MonitorRecord>();
+  const deliver = vi.fn();
+  const m = new ServiceMonitor(store, deliver);
+  await m.admissions(true);
+  await m.admissions(true);
+  const restart = new ServiceMonitor(store, deliver);
+  await restart.admissions(true);
+  await restart.admissions(false);
+  await restart.admissions(false);
+  await restart.admissions(true);
+  expect(deliver.mock.calls.map(([a]) => a.type)).toEqual([
+    'admissions_paused',
+    'admissions_resumed',
+    'admissions_paused',
+  ]);
+});

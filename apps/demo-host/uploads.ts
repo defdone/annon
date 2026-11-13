@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   parseUpload,
   type UploadAuthorization,
+  type UploadBaseSplit,
   type UploadCreated,
   type UploadErrorCode,
   type UploadPublished,
@@ -25,6 +26,7 @@ import {
 } from '../../packages/annon/src/envelope/pay2.ts';
 import { AnnonError, type AnnonErrorCode } from '../../packages/annon/src/errors.ts';
 import type { FileInfo } from '../../packages/annon/src/near/rpc.ts';
+import { hostedSplitSalt } from '../../packages/annon/src/pay/split.ts';
 import type { Versioned } from '../../packages/annon/src/pay/store.ts';
 import { fileStore } from '../../packages/annon/src/pay/store-node.ts';
 import {
@@ -34,13 +36,17 @@ import {
 import { hex } from '../../packages/annon/src/settle-near/codec.ts';
 import { identityJson } from '../../packages/annon/src/settle-near/identity.ts';
 import { type SettlementAssets, termsHash } from '../../packages/annon/src/settle-near/terms.ts';
+import { type Alert, emit } from './alerts.ts';
 import type { hostCapacity } from './capacity.ts';
+import type { facilitatorFor } from './facilitator.ts';
 import type { Loaded } from './server.ts';
 import { StartupError } from './startup-errors.ts';
 
-export class UploadFault extends AnnonError<Extract<UploadErrorCode, AnnonErrorCode>> {
+export class UploadFault extends AnnonError<
+  Extract<UploadErrorCode, AnnonErrorCode> | 'not_sponsored'
+> {
   readonly status: number;
-  constructor(code: Extract<UploadErrorCode, AnnonErrorCode>, status = 400) {
+  constructor(code: Extract<UploadErrorCode, AnnonErrorCode> | 'not_sponsored', status = 400) {
     super(code);
     this.name = 'UploadFault';
     this.status = status;
@@ -57,11 +63,14 @@ interface Record {
   reservation?: HostingReservation;
   result?: UploadPublished;
   finalHeader?: string;
+  baseSplit?: UploadBaseSplit;
 }
 interface State extends Versioned {
   uploads: { [id: string]: Record };
 }
 interface Options {
+  alert?: Alert;
+  splits?: Pick<ReturnType<typeof facilitatorFor>, 'deploySplit' | 'splitStatus' | 'checkSplit'>;
   dir: string;
   capacity: Awaited<ReturnType<typeof hostCapacity>>;
   network: string;
@@ -256,10 +265,20 @@ export async function uploadService(o: Options) {
   });
   const status = (r: Record): UploadStatus =>
     r.state === 'published'
-      ? { uploadId: r.id, state: 'published', result: r.result as UploadPublished, baseSplit: null }
+      ? {
+          uploadId: r.id,
+          state: 'published',
+          result: r.result as UploadPublished,
+          baseSplit: r.baseSplit ?? null,
+        }
       : r.reservation
-        ? { uploadId: r.id, state: 'reserved', reservation: r.reservation, baseSplit: null }
-        : { ...created(r), baseSplit: null };
+        ? {
+            uploadId: r.id,
+            state: 'reserved',
+            reservation: r.reservation,
+            baseSplit: r.baseSplit ?? null,
+          }
+        : { ...created(r), baseSplit: r.baseSplit ?? null };
   const busy = new Set<string>();
   const claim = (id: string) => {
     if (busy.has(id)) throw new UploadFault('upload_conflict', 409);
@@ -376,9 +395,9 @@ export async function uploadService(o: Options) {
         verification ??= verifyBody(
           r,
           createReadStream(path(r.id, 'pay2'), { start: header.length }),
-        ).catch((error) => {
-          verification = undefined;
-          throw error;
+        ).catch(() => {
+          emit(o.alert, { type: 'host_file_invalid' });
+          throw new UploadFault('unavailable', 503);
         });
         return verification;
       },
@@ -772,8 +791,52 @@ export async function uploadService(o: Options) {
         }
       }
     },
+    async baseSplit(id: string, auth: UploadAuthorization, input: unknown) {
+      return serial(async () => {
+        const r = await authorize(await get(id), auth);
+        if (
+          !input ||
+          typeof input !== 'object' ||
+          Array.isArray(input) ||
+          Object.keys(input).length !== 2 ||
+          !('kind' in input) ||
+          input.kind !== 'push' ||
+          !('salt' in input) ||
+          input.salt !== hostedSplitSalt()
+        )
+          throw new UploadFault('bad_request');
+        if (r.state !== 'reserved' || !r.reservation) throw new UploadFault('upload_incomplete');
+        if (r.reservation.expiresAt <= seconds()) throw new UploadFault('upload_expired', 410);
+        if (r.request.terms.seller.kind !== 'evm' || !r.request.terms.base)
+          throw new UploadFault('not_sponsored', 403);
+        if (!o.splits) throw new UploadFault('disabled', 503);
+        o.splits.checkSplit(r.request.terms);
+        // No sponsored gas is spent unless the staged ciphertext still verifies.
+        await verifyBody(r, createReadStream(path(r.id, 'body')));
+        r.baseSplit = await o.splits.deploySplit(r.request.terms, async () => {
+          const current = await get(id);
+          await live(current);
+          if (
+            current.state !== 'reserved' ||
+            !current.reservation ||
+            current.reservation.expiresAt <= seconds()
+          )
+            throw new UploadFault('upload_expired', 410);
+        });
+        await save(r);
+        return reply(r.baseSplit.state === 'ready' ? 200 : 202, { baseSplit: r.baseSplit });
+      });
+    },
     async status(id: string, auth: UploadAuthorization) {
       const r = await authorize(await get(id), auth);
+      if (r.request.terms.base && r.state !== 'receiving' && o.splits) {
+        try {
+          const checked = await o.splits.splitStatus(r.request.terms);
+          if (checked) r.baseSplit = checked;
+        } catch {
+          // Preserve saved deployment evidence when current policy or chain reads refuse it.
+        }
+      }
       return reply(200, status(r));
     },
     async reservation(id: string) {

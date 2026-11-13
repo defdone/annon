@@ -36,6 +36,7 @@ export type PayErrorCode =
   | 'untrusted_contract'
   /** The PAY2 header (or the public file) isn't the registered file signed by its seller. */
   | 'file_invalid'
+  | 'route_unavailable'
   | 'bad_requirements'
   | 'insufficient_balance'
   | 'smart_wallet_unsupported'

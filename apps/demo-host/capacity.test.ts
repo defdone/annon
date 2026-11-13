@@ -102,7 +102,7 @@ it('keeps open-pool and listed allowances separate and preserves tombstones on r
   await cap.verified('one');
   await cap.publish('one');
   await expect(cap.reserve({ ...input, id: 'two', fileId: 'other' })).rejects.toMatchObject({
-    code: 'host_capacity',
+    code: 'rate_limited',
   });
   await cap.reserve({
     ...input,
@@ -175,7 +175,11 @@ it.each([
       bodyBytes: 500,
       plaintextSize: 100,
     }),
-  ).rejects.toMatchObject({ code: 'host_capacity' });
+  ).rejects.toMatchObject({
+    code: ['filesPerDay', 'filesPerIpDay', 'filesPerSellerDay', 'listedPerSellerDay'].includes(name)
+      ? 'rate_limited'
+      : 'host_capacity',
+  });
 });
 it('preserves reservation identity, charges rejected ingress and sweeps abandoned stages without releasing issued quotas', async () => {
   dir = await mkdtemp(join(tmpdir(), 'host-stage-'));
@@ -220,7 +224,7 @@ it('preserves reservation identity, charges rejected ingress and sweeps abandone
   now += 1000;
   expect(await cap.sweep()).toContain('four');
   await expect(cap.reserve({ ...input, id: 'five' })).rejects.toMatchObject({
-    code: 'host_capacity',
+    code: 'rate_limited',
   });
 });
 it.each([
@@ -280,6 +284,8 @@ it('keeps assembly and expired staging bytes charged until their physical remova
   let now = 0;
   const cap = await hostCapacity(dir, {
     now: () => now,
+    filesPerIpDay: 60,
+    filesPerSellerDay: 60,
     hostBytes: 2100,
     poolBytes: 2100,
     stagingSeconds: 1,
@@ -318,7 +324,11 @@ it.each(['concurrency', 'perSeller', 'perIp', 'ingressPerDay'] as const)(
   'applies %s again to a retry or assembly stream',
   async (name) => {
     dir = await mkdtemp(join(tmpdir(), 'host-retry-limit-'));
-    const cap = await hostCapacity(dir, { [name]: name === 'ingressPerDay' ? 1000 : 1 });
+    const cap = await hostCapacity(dir, {
+      filesPerIpDay: 60,
+      filesPerSellerDay: 60,
+      [name]: name === 'ingressPerDay' ? 1000 : 1,
+    });
     const input = {
       id: 'one',
       fileId: 'file',
@@ -395,7 +405,7 @@ it.each(['filesPerDay', 'filesPerIpDay', 'filesPerSellerDay', 'listedPerSellerDa
         ...(guard === 'filesPerIpDay' ? { seller: 'other' } : {}),
         ...(guard.endsWith('SellerDay') ? { ip: 'other' } : {}),
       }),
-    ).rejects.toMatchObject({ code: 'host_capacity' });
+    ).rejects.toMatchObject({ code: 'rate_limited' });
   },
 );
 
@@ -609,7 +619,7 @@ it.each(['files', 'ip', 'seller'] as const)(
       plaintextSize: 10,
     };
     const cap = await hostCapacity(dir);
-    const limit = guard === 'files' ? 30 : 3;
+    const limit = guard === 'files' ? 60 : 1;
     for (let i = 0; i < limit; i++) {
       await cap.reserve({
         ...input,
@@ -629,6 +639,35 @@ it.each(['files', 'ip', 'seller'] as const)(
         seller: guard === 'seller' ? 'seller' : 'extra',
         ip: guard === 'ip' ? 'ip' : 'extra',
       }),
-    ).rejects.toMatchObject({ code: 'host_capacity' });
+    ).rejects.toMatchObject({ code: 'rate_limited' });
+  },
+);
+it.each(['total', 'ip', 'seller'])(
+  'reports the UTC quota reset for exhausted %s admission',
+  async (kind) => {
+    const dir = await mkdtemp(join(tmpdir(), 'quota-reset-'));
+    try {
+      const capacity = await hostCapacity(dir, {
+        now: () => 86_398_001,
+        filesPerDay: kind === 'total' ? 0 : 60,
+        filesPerIpDay: kind === 'ip' ? 0 : 1,
+        filesPerSellerDay: kind === 'seller' ? 0 : 1,
+      });
+      await expect(
+        capacity.reserve({
+          id: 'quota',
+          fileId: 'file',
+          slug: 'file',
+          seller: 'seller',
+          ip: 'ip',
+          listed: false,
+          byteSize: 2,
+          bodyBytes: 1,
+          plaintextSize: 1,
+        }),
+      ).rejects.toMatchObject({ code: 'rate_limited', retryAfterSeconds: 2 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   },
 );

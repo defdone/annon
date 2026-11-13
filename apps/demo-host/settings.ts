@@ -1,4 +1,5 @@
 import { corsPolicy } from '../../packages/annon/src/download/http.ts';
+import type { SplitSettings } from './split-policy.ts';
 
 /** Strict environment parsing; product ceilings may be tightened, never raised. */
 export function settings(env: Record<string, string | undefined>) {
@@ -42,8 +43,38 @@ export function settings(env: Record<string, string | undefined>) {
   const [whole = '0', fraction = ''] = low.split('.');
   const fee = Number(env.MAX_FEE_GWEI ?? '0.5');
   if (!Number.isFinite(fee) || fee <= 0 || fee > 0.5) throw new Error('invalid MAX_FEE_GWEI');
+  const positiveWei = (name: string) => {
+    const raw = env[name];
+    if (!raw || !/^[0-9]{1,80}$/.test(raw) || BigInt(raw) <= 0n) throw new Error(`invalid ${name}`);
+    return BigInt(raw);
+  };
+  const requiredInt = (name: string) => {
+    if (env[name] === undefined) throw new Error(`invalid ${name}`);
+    return int(name, 0);
+  };
+  let split: SplitSettings = { enabled: false };
+  if (int('SPLIT_DEPLOY_ENABLED', 0, 0, 1) === 1) {
+    const raw = env.SPLIT_MAX_FEE_GWEI;
+    if (!raw || !/^\d+(\.\d{1,9})?$/.test(raw) || !Number.isFinite(Number(raw)) || Number(raw) <= 0)
+      throw new Error('invalid SPLIT_MAX_FEE_GWEI');
+    split = {
+      enabled: true,
+      deploymentsPerDay: requiredInt('SPLIT_DEPLOYMENTS_PER_DAY'),
+      sendsPerMinute: requiredInt('SPLIT_SENDS_PER_MINUTE'),
+      revertsPerDay: requiredInt('SPLIT_REVERTS_PER_DAY'),
+      gasLimit: positiveWei('SPLIT_GAS_LIMIT'),
+      maxFeeGwei: Number(raw),
+      l1FeeAllowanceWei: positiveWei('SPLIT_L1_FEE_ALLOWANCE_WEI'),
+      dailyBudgetWei: positiveWei('SPLIT_DAILY_BUDGET_WEI'),
+      walletDailyBudgetWei: positiveWei('BASE_WALLET_DAILY_BUDGET_WEI'),
+    };
+    const paymentBudget = wei('FACILITATOR_DAILY_GAS_BUDGET_WEI', '1000000000000000');
+    if (split.walletDailyBudgetWei < paymentBudget + split.dailyBudgetWei)
+      throw new Error('invalid BASE_WALLET_DAILY_BUDGET_WEI');
+  }
   return {
     int,
+    split,
     uploads: {
       idleSeconds: int('UPLOAD_IDLE_SECONDS', 600, 1, 600),
       stagingSeconds: int('UPLOAD_STAGING_SECONDS', 86400, 1, 86400),
@@ -91,9 +122,9 @@ export function settings(env: Record<string, string | undefined>) {
       hostBytes,
       poolBytes: int('POOL_STORAGE_BYTES', 40_000_000_000, 0, Math.min(hostBytes, 40_000_000_000)),
       ingressPerDay: int('UPLOAD_BYTES_PER_DAY', 1_000_000_000, 0, 1_000_000_000),
-      filesPerDay: int('SPONSORED_FILES_PER_DAY', 30, 0, 30),
-      filesPerIpDay: int('SPONSORED_FILES_PER_IP_DAY', 3, 0, 3),
-      filesPerSellerDay: int('REGISTRATIONS_PER_SELLER_DAY', 3, 0, 3),
+      filesPerDay: int('SPONSORED_FILES_PER_DAY', 60, 0, 60),
+      filesPerIpDay: int('SPONSORED_FILES_PER_IP_DAY', 1, 0, 1),
+      filesPerSellerDay: int('REGISTRATIONS_PER_SELLER_DAY', 1, 0, 1),
       listedPerSellerDay: int('LISTED_REGISTRATIONS_PER_SELLER_DAY', 20, 0, 20),
       ttlSeconds: int('UPLOAD_TTL_SECONDS', 604800, 1, 604800),
       stagingSeconds: int('UPLOAD_STAGING_SECONDS', 86400, 1, 86400),

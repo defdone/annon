@@ -95,13 +95,15 @@ export async function serveFile(req: HostRequest, o: FileHostOptions): Promise<H
                 ? 409
                 : 400;
       const message =
-        code === 'settlement_pending'
-          ? 'Settlement is pending. Try again later.'
-          : code === 'not_sponsored'
-            ? 'This file is not sponsored.'
-            : code === 'relayer_unavailable'
-              ? 'Relayer is temporarily unavailable.'
-              : 'Payment could not be completed.';
+        code === 'route_unavailable'
+          ? 'This file does not support the selected payment route.'
+          : code === 'settlement_pending'
+            ? 'Settlement is pending. Try again later.'
+            : code === 'not_sponsored'
+              ? 'This file is not sponsored.'
+              : code === 'relayer_unavailable'
+                ? 'Relayer is temporarily unavailable.'
+                : 'Payment could not be completed.';
       return {
         status,
         headers: {

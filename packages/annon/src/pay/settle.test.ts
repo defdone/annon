@@ -28,6 +28,7 @@ it.each(['balance', 'nonce', 'verify'])(
   async (failure) => {
     vi.mocked(getFile).mockResolvedValue({
       takenDown: null,
+      terms: { base: { pay_to: 'payee' } },
       price: 1n,
       payTo: 'payee',
       termsHash: 'terms',
@@ -68,6 +69,7 @@ it.each(['balance', 'nonce', 'verify'])(
 it('runs host eligibility before recording or facilitating a new payment', async () => {
   vi.mocked(getFile).mockResolvedValue({
     takenDown: null,
+    terms: { base: { pay_to: 'payee' } },
     price: 1n,
     payTo: 'payee',
     termsHash: 'terms',
@@ -108,6 +110,7 @@ it('marks a definite facilitator refusal as never submitted for later cleanup', 
   const { readPayload } = await import('./seller.js');
   vi.mocked(getFile).mockResolvedValue({
     takenDown: null,
+    terms: { base: { pay_to: 'payee' } },
     price: 1n,
     payTo: 'payee',
     termsHash: 'terms',
@@ -156,6 +159,7 @@ it.each([
   const { readPayload } = await import('./seller.js');
   vi.mocked(getFile).mockResolvedValue({
     takenDown: null,
+    terms: { base: { pay_to: 'payee' } },
     price: 1n,
     payTo: 'payee',
     termsHash: 'terms',
@@ -192,4 +196,29 @@ it.each([
   expect(await store.load('annon/seller/purchase/eip155:8453/usdc/payer/nonce')).toMatchObject({
     submissionAttempted: false,
   });
+});
+it('refuses a crafted Base submission without Base terms before configuration, simulation or writes', async () => {
+  vi.mocked(getFile).mockResolvedValue({ takenDown: null, terms: { base: null } } as never);
+  const facilitator = vi.fn();
+  const store = memoryStore();
+  const write = vi.spyOn(store, 'compareAndSet');
+  await expect(
+    settle('crafted', {
+      nearRpc: '',
+      baseRpc: '',
+      fileId: '',
+      contractId: '',
+      url: '',
+      header: '',
+      store,
+      facilitator,
+    } as never),
+  ).rejects.toMatchObject({
+    code: 'route_unavailable',
+    message: 'This file does not support the selected payment route.',
+  });
+  expect(getConfig).not.toHaveBeenCalled();
+  expect(paymentStatus).not.toHaveBeenCalled();
+  expect(write).not.toHaveBeenCalled();
+  expect(facilitator).not.toHaveBeenCalled();
 });

@@ -13,6 +13,7 @@ it.each([
   ['base_rpc_rate_limited', 502, {}],
   ['payment_id_conflict', 409, {}],
   ['bad_requirements', 400, {}],
+  ['route_unavailable', 400, {}],
   ['settlement_pending', 503, { 'Retry-After': '10' }],
 ] as const)('reports %s only to the host callback', async (code, status, headers) => {
   vi.mocked(getFile).mockResolvedValue({ takenDown: null } as never);
@@ -29,6 +30,9 @@ it.each([
   expect(result).toMatchObject(expected);
   expect(await new Response(result.body).json()).toMatchObject({
     error: code,
+    ...(code === 'route_unavailable'
+      ? { message: 'This file does not support the selected payment route.' }
+      : {}),
   });
   expect(onPaymentError).toHaveBeenCalledExactlyOnceWith(error);
   expect(await serveFile(req, {} as FileHostOptions)).toMatchObject(expected);

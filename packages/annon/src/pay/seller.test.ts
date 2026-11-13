@@ -89,3 +89,29 @@ it('uses Base time to refuse a short authorization before accepting a payment', 
       });
   }
 });
+it.each([false, true])(
+  'offers direct Base only when final terms have a Base payee (%s)',
+  (enabled) => {
+    const file = {
+      terms: { ...terms, base: enabled ? terms.base : null },
+      price: 100000n,
+      payTo: enabled ? terms.base?.pay_to : '',
+      termsHash: termsHash({ ...terms, base: enabled ? terms.base : null }),
+      salesStoppedAt: null,
+      takenDown: null,
+    };
+    const response = paymentRequired(
+      {
+        nearRpc: '',
+        contractId: terms.contract,
+        fileId: terms.file_id,
+        url: 'https://host.test/file',
+        header: 'https://host.test/header',
+      },
+      file as never,
+      sample.asset,
+    );
+    expect(response.accepts.some((offer) => offer.network === 'eip155:8453')).toBe(enabled);
+    expect(response.accepts.some((offer) => offer.network === 'near:mainnet')).toBe(true);
+  },
+);
