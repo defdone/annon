@@ -28,7 +28,7 @@ function validOrigin(value: string, preview = false): boolean {
   }
 }
 export function corsPolicy(
-  allowed: readonly string[] = DEFAULT_ORIGINS,
+  allowed: readonly string[] = [],
   previews: readonly string[] = [],
   service: 'host' | 'relayer' = 'host',
   maxAge = 600,
@@ -45,7 +45,7 @@ export function corsPolicy(
 }
 export function corsHeaders(
   origin: string | null | undefined,
-  allowed: readonly string[] = DEFAULT_ORIGINS,
+  allowed: readonly string[] = [],
   expose = HOST_EXPOSE,
 ): Record<string, string> {
   if (!origin || !validOrigin(origin) || !allowed.includes(origin)) return { Vary: 'Origin' };

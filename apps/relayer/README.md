@@ -175,20 +175,19 @@ prepaid storage allocations.
 A zero `FILE_BUDGET` explicitly disables the allocation, leaving the listing unfunded.
 
 Request an additional allocation through `POST /v1/relay` with
-`{method:"fund_file_storage",args:{file_id:"<file-id>",amount:"<yoctoNEAR>"}}`.
-Only files sponsored by this running relayer qualify. The amount is explicit, positive,
-and subject to all three top-up caps, existing IP/day/method pools and prepaid-balance
-checks. No automatic top-ups run. Ambiguous sends retain allocations and quotas.
-Duplicate operations retain their transaction hash during the hold window.
+`{method:"fund_file_storage",args:{file_id:"<file-id>",amount:"<yoctoNEAR>",nonce:"<0x-32-byte-nonce>",deadline:1794528600},auth:{kind:"evm",sig:"<seller-signature>"}}`.
+The registered EVM or Solana seller signs `fileFundingText` from the SDK with the file
+network, contract, seller, file ID, amount, nonce and deadline. The deadline is Unix seconds,
+at most 600 seconds ahead. Reuse the same envelope for retries. Only `{file_id,amount}`
+reaches the contract. NEAR sellers fund directly with their wallet.
+Only persistently sponsored files qualify. The explicit positive amount is subject to
+lifetime, daily, tier and global caps, IP/method pools and prepaid-balance checks.
+No automatic top-ups run. Ambiguous sends retain allocations and quotas.
+The same nonce and request return the saved result without a second allocation.
 
-Registration counters use bounded daily windows; SDK registration and top-up accounting
-also enforce UTC days. Admission, sponsored-file eligibility and allocation totals live in
-memory. Restart resets IP, daily, operation, allocation and top-up counters and holds. It
-forgets top-up eligibility, so old-file top-ups fail closed. Base unlock eligibility is
-verified on chain and survives restarts. Repeated same-amount top-ups are permitted after the hold and consume
-the allocation caps again. An uncertain send retains its hold until expiry; inspect its
-transaction before a new top-up. Run one instance, use finite key allowances and prepaid balances, and do not use
-restarts to replenish quotas. Keeper gas state remains durable.
+Registration decisions, allocations, quotas and pending operations persist in
+`RELAYER_STATE_DIR`. Keep this directory on durable storage and run one service instance.
+Restart retains frozen eligibility and unresolved storage holds.
 
 A sponsored registration must include at least
 `ceil((FEE_FIXED * 10000 + price * FEE_BPS) / price)` basis points for the route treasury.
@@ -213,7 +212,7 @@ zero, and `paused()` is false. It also requires the current treasury share polic
 registered terms. No salt or registration history is needed. Successful code and state
 checks are cached in memory by RPC and exact terms; a restart only causes another check.
 Refused split checks are cached for 60 seconds (up to 1024 entries); RPC transport failures
-remain retryable immediately. Current fee policy and the sponsorship switch apply on every attempt.
+remain retryable immediately. New eligibility uses current policy; paid unlocks use their persisted decision.
 EOAs, unknown implementations, different splits, owned or paused splits, and missing or
 insufficient treasury shares are refused. RPC failures fail closed with HTTP 503
 `unavailable` and `Retry-After`, so the buyer can retry without spending relay gas.
@@ -225,6 +224,12 @@ If the original first recipient is the treasury, another recipient receives roun
 Required fee bps round up, so the actual share can exceed the nominal fee by less than one bp. Interactive sell reviews this split before registration or Base split creation;
 JSON and agent results include the resulting public terms. Direct self-funded registration
 has no compulsory treasury share.
+
+The relayer exposes `GET /v1/capabilities` and `POST /v1/base-eligibility` for Base purchase checks. Send `{fileId, termsHash}` to eligibility before signing or submitting a new payment, and check the returned network, contract, assets and file binding.
+
+`acceptingNewBasePayments` is the service gate for new purchases. It is false when the service is disabled, `BASE_SPONSORSHIP=0`, or sponsorship initialization is incomplete. Clients must require it before starting a new Base payment. `baseSponsorship` describes the current registration policy and does not revoke a saved eligibility decision.
+
+An eligible response freezes its `minPrice`, `fee`, `tier`, `policyVersion` and `decidedAt`. `checkedAt` is refreshed for each response and must be checked for freshness. A paid purchase continues using its frozen decision after configuration changes, including a paused new-payment gate. Resume that purchase and respect `settlement_pending` and `retryAfterSeconds` while waiting for its unlock.
 
 The keeper skips purchase deliveries below `KEEPER_MIN_PAYOUT` and always considers refund
 only deliveries within its existing gas and transaction budgets. Sellers and other callers

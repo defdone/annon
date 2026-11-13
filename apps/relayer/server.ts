@@ -11,10 +11,13 @@
  *
  * The caller reads the transaction's outcome through its own NEAR RPC: a relayer can't fake one.
  */
+
 import { mkdir } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
+import { corsHeaders, preflight } from '../../packages/annon/src/download/http.ts';
 import { getConfig, getFile, rpcReply, view } from '../../packages/annon/src/near/rpc.ts';
+import { clientKey } from '../../packages/annon/src/net/ip.ts';
 import type { BudgetRecord } from '../../packages/annon/src/node/budget.ts';
 import { fileStore, ownDirectory } from '../../packages/annon/src/pay/store-node.ts';
 import { keeperBalance } from '../../packages/annon/src/relay/keeper-balance.ts';
@@ -46,7 +49,7 @@ import {
   ServiceMonitor,
   volumeUsage,
 } from './alerts.ts';
-import { type CorsSettings, clientAddress, clientBucket, cors } from './http.ts';
+import { type CorsSettings, relayerCorsPolicy } from './http.ts';
 
 export interface Config extends Omit<CheckOptions, 'now'> {
   sender: Sender;
@@ -142,8 +145,7 @@ function allow(key: string, limit: number, windowMs: number, now: number, cap = 
   return h;
 }
 
-/** Canonical proxy address; the shared network helper replaces this adapter at integration. */
-export const ipBucket = (ip: string) => clientBucket(ip, '');
+export const ipBucket = (ip: string) => clientKey(ip, undefined);
 
 type RelayLookup = (
   ...args: Parameters<typeof relayStatus>
@@ -154,15 +156,22 @@ export async function handle(
   c: Config,
   method: string,
   path: string,
-  ip: string,
+  ip: string | string[] | undefined,
   body: string,
   send: typeof relay = relay,
   lookup: RelayLookup = relayStatus,
+  socket?: string,
 ): Promise<{ status: number; body: unknown; headers?: Record<string, string> }> {
-  const result = await admission(c, method, path, ipBucket(ip), body, send, lookup);
+  const result = await admission(c, method, path, clientKey(ip, socket), body, send, lookup);
   if (result.status === 429) c.monitor?.refused();
   if (result.status >= 500)
     void c.monitor?.failure(result.status === 503 ? 'admission_unavailable' : 'service_error');
+  if (
+    method === 'GET' &&
+    path === '/v1/capabilities' &&
+    !(result.body as { acceptingNewBasePayments: boolean }).acceptingNewBasePayments
+  )
+    return { ...result, headers: { 'Retry-After': String(c.retrySeconds ?? 5) } };
   return [429, 503, 425].includes(result.status)
     ? {
         ...result,
@@ -574,7 +583,12 @@ export function serve(c: Config, port: number, keeperSeconds = 0) {
     void respond(c, req, res).catch(() => {
       // An aborted upload or a socket gone: nothing to answer.
       if (!res.headersSent && res.writable)
-        res.writeHead(400, cors(req.headers.origin, c.cors).headers).end();
+        res
+          .writeHead(
+            400,
+            corsHeaders(req.headers.origin, relayerCorsPolicy(c.cors).origins, 'Retry-After'),
+          )
+          .end();
     });
   });
 
@@ -786,20 +800,20 @@ export function keeper(c: Config, seconds: number) {
 }
 
 async function respond(c: Config, req: IncomingMessage, res: ServerResponse) {
-  const cross = cors(
-    req.headers.origin,
-    c.cors,
-    req.method === 'OPTIONS'
-      ? {
-          method: String(req.headers['access-control-request-method'] ?? ''),
-          headers: String(req.headers['access-control-request-headers'] ?? ''),
-        }
-      : undefined,
-  );
-  if (req.method === 'OPTIONS')
-    return void res
-      .writeHead(cross.status ?? 204, { ...cross.headers, 'Cache-Control': 'no-store' })
-      .end();
+  const policy = relayerCorsPolicy(c.cors);
+  const cross = { headers: corsHeaders(req.headers.origin, policy.origins, policy.expose) };
+  if (req.method === 'OPTIONS') {
+    const result = preflight(
+      {
+        get: (name) => {
+          const value = req.headers[name.toLowerCase()];
+          return typeof value === 'string' ? value : null;
+        },
+      },
+      policy,
+    );
+    return void res.writeHead(result.status, result.headers).end();
+  }
   if (
     req.method === 'POST' &&
     req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json'
@@ -813,14 +827,22 @@ async function respond(c: Config, req: IncomingMessage, res: ServerResponse) {
       .end(JSON.stringify({ error: 'bad_request', message: 'Use application/json.' }));
   // A client can send any header: only the one a trusted proxy sets (and overwrites) counts.
   const forwarded = c.ipHeader ? req.headers[c.ipHeader] : undefined;
-  const address = clientAddress(forwarded, req.socket.remoteAddress ?? '');
-  const ip = clientBucket(address, '');
+  const ip = clientKey(forwarded, req.socket.remoteAddress);
   const body = req.method === 'POST' ? await read(req) : '';
   const path = (req.url ?? '/').split('?')[0] as string;
   const out =
     body === null
       ? { status: 413, body: { error: 'too_large' } }
-      : await handle(c, req.method ?? 'GET', path, address, body);
+      : await handle(
+          c,
+          req.method ?? 'GET',
+          path,
+          forwarded,
+          body,
+          relay,
+          relayStatus,
+          req.socket.remoteAddress,
+        );
   if (path === '/v1/relay') {
     let what: unknown = null;
     try {
@@ -1046,7 +1068,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
       .split(',')
       .map((x) => x.trim())
       .filter(Boolean);
-  cors(undefined, {
+  relayerCorsPolicy({
     allow: list('CORS_ALLOW_ORIGINS', 'https://annon.dev,https://www.annon.dev'),
     previews: list('CORS_PREVIEW_ORIGINS', ''),
   });

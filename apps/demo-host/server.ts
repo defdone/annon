@@ -25,6 +25,7 @@ import type { CorsPolicy } from '../../packages/annon/src/download/http.ts';
 import {
   corsHeaders,
   corsPolicy,
+  DEFAULT_ORIGINS,
   hasContentType,
   preflight,
 } from '../../packages/annon/src/download/http.ts';
@@ -190,7 +191,7 @@ Pay with the <code>annon</code> CLI or the Annon MCP server, then <code>annon op
 
 export function handler(c: HostConfig, serve: Serve = serveFile) {
   const perIp = fixedWindowLimiter(c.perIpMinute);
-  const cors = c.cors ?? corsPolicy();
+  const cors = c.cors ?? corsPolicy(DEFAULT_ORIGINS);
   const active = c.active ?? new Map<string, number>();
   const checked = async () =>
     Promise.all(

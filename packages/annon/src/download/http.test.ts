@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { SellerRecord } from '../pay/settle.js';
 import { memoryStore } from '../pay/store.js';
-import { corsHeaders, type HttpHostOptions, handle } from './http.js';
+import {
+  corsHeaders,
+  corsPolicy,
+  DEFAULT_ORIGINS,
+  type HttpHostOptions,
+  handle,
+  preflight,
+} from './http.js';
 
 describe('one-model HTTP transport without sockets', () => {
   const options: HttpHostOptions = {
@@ -56,7 +63,7 @@ describe('one-model HTTP transport without sockets', () => {
 
 it('validates exact origins, configured previews and requested preflight headers', async () => {
   const { corsPolicy, preflight } = await import('./http.js');
-  const policy = corsPolicy(undefined, ['https://verified-build.vercel.app']);
+  const policy = corsPolicy(DEFAULT_ORIGINS, ['https://verified-build.vercel.app']);
   for (const origin of [
     'https://annon.dev',
     'https://www.annon.dev',
@@ -117,4 +124,16 @@ it('requires JSON content type on POST and PUT before reading any request', asyn
     );
     expect(r.status).toBe(415);
   }
+});
+
+it('defaults the shared policy and preflight to no allowed origins', () => {
+  expect(corsPolicy().origins).toEqual([]);
+  expect(corsHeaders('https://annon.dev')).toEqual({ Vary: 'Origin' });
+  expect(corsHeaders('https://annon.dev', DEFAULT_ORIGINS)).toMatchObject({
+    'Access-Control-Allow-Origin': 'https://annon.dev',
+  });
+  expect(
+    preflight(new Headers({ Origin: 'https://annon.dev', 'Access-Control-Request-Method': 'POST' }))
+      .status,
+  ).toBe(403);
 });

@@ -31,7 +31,13 @@ import {
   readOutcome,
   view,
 } from '../near/rpc.js';
-import { registerText, reopenSellerText, reopenText, stopSalesText } from '../near/texts.js';
+import {
+  fileFundingText,
+  registerText,
+  reopenSellerText,
+  reopenText,
+  stopSalesText,
+} from '../near/texts.js';
 import {
   type Deposit,
   OneClick,
@@ -288,9 +294,14 @@ export class Annon {
         signer: transaction.signer_id,
         method,
         args:
-          method === 'register'
-            ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'baseSplit'))
-            : args,
+          method === 'fund_file_storage'
+            ? {
+                file_id: (args as { args: { file_id: string } }).args.file_id,
+                amount: (args as { args: { amount: string } }).args.amount,
+              }
+            : method === 'register'
+              ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'baseSplit'))
+              : args,
       });
       if (outcome.state === 'released') return outcome.answer;
       if (outcome.state === 'done') return outcome.value;
@@ -303,6 +314,43 @@ export class Annon {
       throw new Error(`contract ${method}: ${outcome.state}`);
     }
     return result;
+  }
+  /** Allocate file storage directly with NEAR, or request a seller-signed sponsored top-up. */
+  async fund(
+    fileId: string,
+    amount: bigint,
+    seller: IdentityWallet,
+    options: { nonce?: string; deadline?: number } = {},
+  ): Promise<unknown> {
+    bytes(fileId, 32);
+    if (amount <= 0n || amount >= 2n ** 128n) throw new PayError('bad_requirements');
+    const file = await getFile(this.o.nearRpc, this.o.contractId, fileId);
+    if (!file) throw new PayError('unknown_file');
+    if (file.terms.network !== this.o.network || file.terms.contract !== this.o.contractId)
+      throw new PayError('network_mismatch');
+    if (identityJson(parseIdentity(seller.identity)) !== identityJson(file.seller))
+      throw new PayError('wrong_identity');
+    if (file.takenDown !== null) throw new PayError('taken_down');
+    if (file.salesStoppedAt !== null) throw new PayError('sales_stopped');
+    if (seller.identity.kind === 'near')
+      return fundFileStorage(asNear(seller), this.o.contractId, fileId, amount);
+    const deadline = options.deadline ?? this.now() + 600;
+    if (!Number.isSafeInteger(deadline) || deadline <= this.now() || deadline > this.now() + 600)
+      throw new PayError('bad_requirements');
+    const args = {
+      file_id: fileId,
+      amount: String(amount),
+      nonce: options.nonce ?? `0x${randomHex(32)}`,
+      deadline,
+    };
+    const text = fileFundingText({
+      ...args,
+      network: this.o.network,
+      contract: this.o.contractId,
+      seller: file.seller,
+    });
+    const auth = await this.auth(seller, text);
+    return this.call('fund_file_storage', { args, auth }, seller);
   }
   private async answer(value: unknown, secret: Uint8Array, fileId: string): Promise<Uint8Array> {
     const answer = value && typeof value === 'object' && 'answer' in value ? value.answer : value;

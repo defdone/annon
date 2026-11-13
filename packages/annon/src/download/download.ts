@@ -1,6 +1,7 @@
 /** Download a final purchase grant with Range retries and checked chunks. */
 import { type Bytes, copy, equal, parseHeader, sha256, TAG } from '../envelope/pay2.js';
 import { HTTP_RETRY_MAX_WAIT_SECONDS, MAX_PAY2_BYTES } from '../limits.js';
+import { parseRetryAfterMs, sleep } from '../net/retry.js';
 import { BUYER_PROOF_HEADER, purchaseProof, sameResource } from './proof.js';
 export type DownloadErrorCode =
   /** The host answered something this protocol does not allow. */
@@ -18,7 +19,9 @@ export type DownloadErrorCode =
   | 'download_limited'
   | 'download_in_progress'
   | 'rate_limited'
-  | 'unavailable';
+  | 'unavailable'
+  | 'not_sponsored'
+  | 'relayer_unavailable';
 
 export class DownloadError extends Error {
   readonly code: DownloadErrorCode;
@@ -127,18 +130,7 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
     }
   }
   async function wait(ms: number): Promise<void> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await untilAbort(
-        o.wait
-          ? o.wait(ms)
-          : new Promise<void>((resolve) => {
-              timer = setTimeout(resolve, ms);
-            }),
-      );
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
+    await untilAbort(o.wait ? o.wait(ms) : sleep(ms, abort.signal));
   }
   let waitedMs = 0;
   let chunk = 0; // next chunk to check
@@ -163,7 +155,7 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   let pos = 0;
   let end: number | undefined;
 
-  const get = (headers: Record<string, string>) => {
+  const get = (headers: Record<string, string>, start: number) => {
     live();
     // No redirects: one could move the request to plain HTTP or another host.
     // No cookies either: the grant proof travels in `Annon-Buyer-Proof` (profile section 9).
@@ -172,7 +164,7 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
         redirect: 'error',
         credentials: 'omit',
         signal: abort.signal,
-        headers: { ...headers, range: `bytes=${offset}-` },
+        headers: { ...headers, range: `bytes=${start}-` },
       }).then(async (response) => {
         if (abort.signal.aborted) await response.body?.cancel().catch(() => {});
         return response;
@@ -182,23 +174,32 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
   const body = (r: Response) => r.body && (r.status === 200 || r.status === 206);
 
   /** Every retry proves the same purchase grant to this URL. */
-  async function authorized(): Promise<Response> {
+  async function authorized(): Promise<{ response: Response; start: number }> {
+    let start = offset;
     const proof = purchaseProof(o.proof.secret, named || o.url, o.proof.purchase_id, o.proof.grant);
     for (let i = 0; ; i++) {
-      const r = await get({
-        [BUYER_PROOF_HEADER]: proof,
-        ...(payment ? { 'PAYMENT-SIGNATURE': payment.header } : {}),
-      });
+      const r = await get(
+        {
+          [BUYER_PROOF_HEADER]: proof,
+          ...(payment ? { 'PAYMENT-SIGNATURE': payment.header } : {}),
+        },
+        start,
+      );
       if (abort.signal.aborted) {
         await r.body?.cancel().catch(() => {});
         live();
       }
-      if (body(r)) return r;
+      if (body(r)) return { response: r, start };
+      if (r.status === 416 && start > header.length) {
+        await r.body?.cancel().catch(() => {});
+        start = header.length;
+        continue;
+      }
       const pending = r.status === 503 || r.status === 402 || r.status === 429;
       let code: DownloadErrorCode =
         r.status === 429 ? 'rate_limited' : r.status === 503 ? 'unavailable' : 'settling';
       let seconds: number | undefined;
-      if (r.status === 429) {
+      if ([429, 403, 503].includes(r.status)) {
         // Read only a bounded control response, never an unbounded error document.
         const reader = r.body?.getReader();
         try {
@@ -220,7 +221,12 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
               at += part.length;
             }
             const value = JSON.parse(new TextDecoder().decode(all)) as Record<string, unknown>;
-            if (value.error === 'download_limited' || value.error === 'download_in_progress')
+            if (
+              (r.status === 429 &&
+                (value.error === 'download_limited' || value.error === 'download_in_progress')) ||
+              (r.status === 403 && value.error === 'not_sponsored') ||
+              (r.status === 503 && value.error === 'relayer_unavailable')
+            )
               code = value.error;
             if (
               typeof value.retryAfterSeconds === 'number' &&
@@ -236,22 +242,19 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
           await reader?.cancel().catch(() => {});
         }
       } else await r.body?.cancel().catch(() => {});
-      if (!pending) return fail('not_authorized', `the host answered ${r.status}`);
-      const hint = r.headers.get('Retry-After');
-      const after =
-        hint && /^\d+$/.test(hint)
-          ? Number(hint)
-          : hint
-            ? Math.ceil((Date.parse(hint) - (o.now?.() ?? Date.now() / 1000) * 1000) / 1000)
-            : NaN;
-      if (Number.isSafeInteger(after) && after >= 0) seconds = Math.max(seconds ?? 0, after);
+      const after = parseRetryAfterMs(
+        r.headers.get('Retry-After'),
+        (o.now?.() ?? Date.now() / 1000) * 1000,
+      );
+      if (after !== undefined) seconds = Math.max(seconds ?? 0, Math.ceil(after / 1000));
       const delayed = () =>
         Object.assign(new DownloadError(code), {
           fileId: o.fileId,
           purchaseId: o.proof.purchase_id,
           ...(seconds === undefined ? {} : { retryAfterSeconds: seconds }),
         });
-      if (code === 'download_limited') throw delayed();
+      if (code === 'download_limited' || code === 'not_sponsored') throw delayed();
+      if (!pending) return fail('not_authorized', `the host answered ${r.status}`);
       const delay = Math.max(1, seconds ?? (r.status === 402 ? 3 : 5)) * 1000;
       if (
         i + 1 >= (o.settleTries ?? 40) ||
@@ -268,18 +271,18 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
     reader: BodyReader;
     rest: Uint8Array;
   }> {
-    const r = await authorized();
+    const { response: r, start } = await authorized();
     const length = Number(r.headers.get('content-length') ?? Number.NaN);
     const total = Number((/\/(\d+)$/.exec(r.headers.get('content-range') ?? '') ?? [])[1]);
     try {
-      sizeCheck(r.status === 200 ? length : offset + length);
+      sizeCheck(r.status === 200 ? length : start + length);
       if (r.status === 206) sizeCheck(total);
     } catch (error) {
       await r.body?.cancel().catch(() => {});
       throw error;
     }
     const source = (r.body as ReadableStream<Uint8Array>).getReader();
-    let received = r.status === 200 ? 0 : offset;
+    let received = r.status === 200 ? 0 : start;
     const reader = {
       cancel: () => source.cancel(),
       async read() {
@@ -310,8 +313,8 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
     // RFC 9110 section 14.4: first <= last < complete length, or the range is invalid.
     if (
       !range ||
-      Number(range[1]) !== offset ||
-      Number(range[2]) < offset ||
+      Number(range[1]) !== start ||
+      Number(range[2]) < start ||
       (range[3] !== '*' && Number(range[2]) >= Number(range[3]))
     ) {
       await reader.cancel().catch(() => {});
@@ -320,7 +323,11 @@ export function download(o: DownloadOptions): ReadableStream<Uint8Array> {
     end = Number(range[2]) + 1;
     sizeCheck(end);
     pos = offset;
-    return { reader, rest: new Uint8Array(0) };
+    return {
+      reader,
+      rest:
+        start < offset ? await skip(reader, offset - start, new Uint8Array(0)) : new Uint8Array(0),
+    };
   }
 
   let reader: BodyReader | undefined;

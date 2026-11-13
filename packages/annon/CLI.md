@@ -281,6 +281,7 @@ refused. Sponsored registrations use the relayer allocation instead.
 
 `annon fund <file-id> <NEAR>` allocates nonwithdrawable NEAR using a NEAR wallet.
 `annon budget <file-id>` reads available yoctoNEAR and the admission requirement.
+After an uncertain funding result, check the file's storage balance with `annon budget <file-id>` before funding again; a new run is a new allocation.
 Funding is human-only: agent mode refuses `fund` with `human_only`, and MCP exposes
 no funding tool. `--storage-budget` requires a self-registered NEAR sale; other routes
 refuse the flag. Self-registered sales without an allocation return a warning.

@@ -1,4 +1,5 @@
 import type { FileInfo } from '../near/rpc.js';
+import { parseRetryAfterMs } from '../net/retry.js';
 import { PayError } from '../pay/base.js';
 import { readSplitState } from '../pay/split.js';
 import { parseIdentity } from '../settle-near/identity.js';
@@ -167,14 +168,8 @@ export async function checkBaseSponsorship(o: BaseSponsorshipOptions): Promise<B
             }
           : {}),
       });
-      const hint = r.headers.get('Retry-After');
-      const seconds =
-        hint && /^\d+$/.test(hint)
-          ? Number(hint)
-          : hint
-            ? Math.ceil((Date.parse(hint) - nowOf(o) * 1000) / 1000)
-            : NaN;
-      if (Number.isSafeInteger(seconds) && seconds >= 0) retryAfterSeconds = Math.max(1, seconds);
+      const delay = parseRetryAfterMs(r.headers.get('Retry-After'), nowOf(o) * 1000);
+      if (delay !== undefined) retryAfterSeconds = Math.max(1, Math.ceil(delay / 1000));
       if (!r.ok) {
         await r.body?.cancel();
         throw error('relayer_unavailable', retryAfterSeconds);

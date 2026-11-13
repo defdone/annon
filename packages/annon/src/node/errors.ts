@@ -26,6 +26,7 @@ const actions: Record<string, string> = {
   relayer_unavailable: 'Base sponsorship checks are unavailable. Retry before paying.',
   not_sponsored:
     'This listing does not qualify for Base sponsorship. Do not pay through this route.',
+  wrong_identity: 'The wallet does not control the required identity.',
   settlement_pending: 'The purchase is still settling. Wait before retrying the saved purchase.',
   protocol_fee_above_max:
     'The advertised protocol fee exceeds maxProtocolFee. Review the fee in human configuration.',

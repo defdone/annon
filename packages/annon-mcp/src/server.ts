@@ -1,7 +1,5 @@
 import { createRequire } from 'node:module';
-import { createAdapter } from '@defdone/annon/node/adapter';
-import type { Input } from '@defdone/annon/node/cli';
-import { publicError } from '@defdone/annon/node/errors';
+import { createAdapter, type Input, publicError } from '@defdone/annon/node';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod/v4';
 

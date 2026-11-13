@@ -595,6 +595,10 @@ it.each(['Expired', 'InvalidNonce', 'old', 'outage', 'race', 'capacity', 'live c
     await reconcileRelayStorage(o);
     if (reason === 'race') {
       expect((await ledger.operation(op.id))?.stage).toBe('submitted');
+      expect((await ledger.operation(op.id))?.result).toEqual({
+        txHash: op.tx.txHash,
+        uncertain: true,
+      });
       expect(Object.keys((await ledger.read()).work)).toHaveLength(0);
       await relay(paid, o);
       expect(created).toHaveBeenCalledTimes(1);
@@ -796,3 +800,99 @@ it.each([true, false])(
     expect(created).toHaveBeenCalledTimes(1);
   },
 );
+
+it.each(['register', 'unlock', 'stop_sales'] as const)(
+  'preserves landed %s when transaction history has been forgotten',
+  async (method) => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    const { o, ledger } = await options();
+    await relay(await registration(), o);
+    const registered = Object.values((await ledger.read()).operations)[0];
+    if (!registered?.tx) throw new Error('missing operation');
+    if (method !== 'register') {
+      vi.mocked(getFile).mockResolvedValue(file);
+      await ledger.registered(terms.file_id, file.termsHash);
+      await ledger.finalizeStorage(registered.id, registered.tx.txHash, 'done');
+      const { decision: _decision, ...admission } = registered;
+      await ledger.prepare({ ...admission, id: 'landed', method });
+      await ledger.signed('landed', {
+        ...registered.tx,
+        args: {
+          args: { purchase: buildPurchaseMessage({ ...sample, terms_hash: file.termsHash }) },
+        },
+      });
+    }
+    const id = method === 'register' ? registered.id : 'landed';
+    vi.mocked(getFile).mockResolvedValue(
+      method === 'stop_sales' ? { ...file, salesStoppedAt: 1001 } : file,
+    );
+    vi.mocked(getPurchase).mockResolvedValue({} as never);
+    vi.mocked(rpcReply).mockImplementation(async (_rpc, name) =>
+      name === 'tx'
+        ? { error: { cause: { name: 'UNKNOWN_TRANSACTION' } } }
+        : { error: { cause: { info: { InvalidTxError: 'Expired' } } } },
+    );
+    clock.mockReturnValue(1000 + 4 * 86400000);
+    await reconcileRelayStorage(o);
+    expect(await ledger.decision(terms.file_id, file.termsHash)).toMatchObject({
+      outcome: 'registered',
+      allocated: '50000000000000000000000',
+    });
+    expect(await ledger.operation(id)).toMatchObject({
+      stage: 'submitted',
+      storageFinalized: true,
+      finalState: 'done',
+    });
+    expect(await ledger.pendingStorage()).toBe(0n);
+    expect((await ledger.read()).work).toEqual({});
+    expect(created).toHaveBeenCalledTimes(1);
+  },
+);
+it('retires a deferred unlock whose purchase already exists without signing', async () => {
+  const { o, ledger } = await options();
+  vi.mocked(getFile).mockResolvedValue(file);
+  await ledger.remember({
+    network: terms.network,
+    contract: terms.contract,
+    fileId: terms.file_id,
+    termsHash: file.termsHash,
+    terms,
+    eligible: true,
+    tier: 'external',
+    listed: false,
+    policyVersion: 'v1',
+    minPrice: '100000',
+    fee: { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
+    decidedAt: 1000,
+    allocated: null,
+    outcome: 'registered',
+  });
+  const { deferPaidUnlock } = await import('./relay.js');
+  const request = {
+    method: 'unlock',
+    args: {
+      purchase: buildPurchaseMessage({ ...sample, terms_hash: file.termsHash }),
+      logs: [
+        {
+          address: sample.asset.slice(2),
+          block_hash: 'aa'.repeat(32),
+          block_number: 42,
+          data: '0x',
+          log_index: 0,
+          removed: false,
+          topics: ['bb'.repeat(32), 'cc'.repeat(32), 'dd'.repeat(32)],
+          transaction_hash: 'ee'.repeat(32),
+          transaction_index: 0,
+        },
+      ],
+      header: null,
+    },
+  };
+  request.args.logs.push({ ...must(request.args.logs[0]), log_index: 1 });
+  await deferPaidUnlock(request, o, 0);
+  expect(Object.keys((await ledger.read()).work)).toHaveLength(1);
+  vi.mocked(getPurchase).mockResolvedValue({} as never);
+  await retryPaidUnlocks(o);
+  expect((await ledger.read()).work).toEqual({});
+  expect(created).not.toHaveBeenCalled();
+});

@@ -83,3 +83,11 @@ it('reports a split RPC network mismatch as a configuration error', () => {
     exitCode: 2,
   });
 });
+
+it('preserves the funding wallet identity error in public output', () => {
+  expect(publicError(new PayError('wrong_identity'))).toEqual({
+    code: 'wrong_identity',
+    message: 'The wallet does not control the required identity.',
+    exitCode: 1,
+  });
+});

@@ -1,5 +1,35 @@
 import { expect, it } from 'vitest';
-import { clientBucket, cors } from './http.ts';
+import { corsHeaders, DEFAULT_ORIGINS, preflight } from '../../packages/annon/src/download/http.ts';
+import { clientKey as clientBucket } from '../../packages/annon/src/net/ip.ts';
+import { relayerCorsPolicy } from './http.ts';
+
+const cors = (
+  origin: string | undefined,
+  settings?: Parameters<typeof relayerCorsPolicy>[0],
+  request?: { method: string; headers: string },
+) => {
+  const policy = relayerCorsPolicy(settings);
+  return request
+    ? preflight(
+        new Headers({
+          ...(origin ? { Origin: origin } : {}),
+          'Access-Control-Request-Method': request.method,
+          'Access-Control-Request-Headers': request.headers,
+        }),
+        policy,
+      )
+    : { status: 200, headers: corsHeaders(origin, policy.origins, policy.expose) };
+};
+
+it('uses exactly the production relayer CORS policy', () => {
+  expect(relayerCorsPolicy()).toEqual({
+    origins: [...DEFAULT_ORIGINS],
+    methods: 'GET, POST, OPTIONS',
+    headers: 'Content-Type',
+    expose: 'Retry-After',
+    maxAge: 600,
+  });
+});
 
 it('uses only a single validated IP and groups IPv6 by /48', () => {
   for (const invalid of ['garbage', '1.1.1.1, 2.2.2.2', 'fe80::1%lo0', 'a'.repeat(1000)])

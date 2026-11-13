@@ -50,6 +50,7 @@ export type PayErrorCode =
   | 'settlement_processing'
   | 'settlement_pending'
   | 'not_sponsored'
+  | 'wrong_identity'
   | 'relayer_unavailable'
   | 'facilitator_busy'
   | 'unavailable'

@@ -69,6 +69,8 @@ The configuration file, written by a human:
 | `storageBudget` | Decimal NEAR for self-funded NEAR listings. |
 | `maxProtocolFee` | Highest relayer fee a sell accepts. Default `{ "fixed": "30000", "bps": 100 }` (USDC base units plus basis points). |
 
+`allowedResources` restricts both `open --url` and URLs saved with purchases. Without it, agent mode can open any URL allowed by the HTTPS and localhost transport rules.
+
 Deployment IDs, RPCs, the relayer, wallet and key-file selection, state and backup locations,
 moderator trust and contract trust come only from this configuration, the server environment, or
 trust a human already gave in the CLI. Passed as tool arguments, they are rejected.

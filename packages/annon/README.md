@@ -33,11 +33,11 @@ npm i -g @defdone/annon@beta     # the annon CLI
 
 | Entry point | Use |
 | --- | --- |
-| `@defdone/annon` | SDK core: `Annon`, wallets, identities, terms, 1Click, encrypted stores and backups, storage funding, error classes |
-| `@defdone/annon/browser` | Browser purchase controller, downloads, wallet adapters, error classes |
+| `@defdone/annon` | SDK core: `Annon`, wallets, identities, terms, 1Click, encrypted stores and backups, storage funding, sponsorship checks and types, size/retry limits, error classes |
+| `@defdone/annon/browser` | Browser purchase controller, downloads, wallet adapters, sponsorship checks and types, size/retry limits, error classes |
 | `@defdone/annon/browser/purchase-bundle.js` | The same browser entry as one standalone ESM bundle |
 | `@defdone/annon/node` | Node only: `createAdapter` (the engine behind the CLI and the MCP server), `publicError`, `AdapterError`, `BudgetError` |
-| `@defdone/annon/relay` | Durable settlement keeper: `keep` and its types |
+| `@defdone/annon/relay` | Relayer admission, durable sponsorship and settlement: `relay`, `RelayLedger`, `keep` and their types |
 | `@defdone/annon/pay/store-node` | `fileStore`, a durable file-backed record store for Node |
 | `@defdone/annon/node/signer-mock` | `signerMock`, the reference signing handler for tests |
 | `@defdone/annon/pay/seller`, `pay/settle`, `pay/store`, `pay/split`, `download/host`, `download/http`, `envelope/pay2`, `near/rpc` | Building blocks for a server that sells files: x402 offers and payment checks, settlement, record stores, revenue splits, grant downloads, the PAY2 format and NEAR RPC reads |

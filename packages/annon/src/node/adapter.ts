@@ -65,7 +65,16 @@ export interface Dependencies {
     options: AnnonOptions,
   ) => Pick<
     Annon,
-    'sell' | 'buy' | 'open' | 'openTo' | 'recover' | 'stop' | 'store' | 'accept' | 'resumeSell'
+    | 'fund'
+    | 'sell'
+    | 'buy'
+    | 'open'
+    | 'openTo'
+    | 'recover'
+    | 'stop'
+    | 'store'
+    | 'accept'
+    | 'resumeSell'
   >;
   wallet?: typeof loadWallet;
   file?: typeof getFile;
@@ -392,16 +401,20 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       if (!o.backupSecretFile && !env.ANNON_BACKUP_SECRET_FILE && !env.ANNON_BACKUP_SECRET)
         return pendingSetup(o.target);
     }
+    let selected: LocalWallet | undefined;
     if (o.command === 'fund') {
       if (d.agent) return fail('human_only', 'File funding requires a human CLI session.', 2);
       if (!o.target || !isId(o.target)) throw usage();
       const text = o.fundAmount;
       if (!text) return fail('storage_required', 'Provide the NEAR amount to allocate.', 2);
       const owner = await (d.wallet ?? loadWallet)({ ...o, network: c.network }, env, c.nearRpc);
-      if (owner.identity.kind !== 'near' || !('call' in owner))
-        return fail('near_wallet_required', 'File funding requires a NEAR wallet.', 2);
-      await fundFileStorage(owner as NearWallet, c.contractId, o.target, nearAmount(text));
-      return { fileId: o.target, fundedNear: text };
+      selected = owner;
+      if (owner.identity.kind === 'near') {
+        if (!('call' in owner))
+          return fail('near_wallet_required', 'File funding requires a NEAR wallet.', 2);
+        await fundFileStorage(owner as NearWallet, c.contractId, o.target, nearAmount(text));
+        return { fileId: o.target, fundedNear: text };
+      }
     }
     let secret: Uint8Array;
     try {
@@ -417,7 +430,6 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         await mkdir(dir, { recursive: true, mode: 0o700 });
     const rawStore = fileStore<EncryptedRecord>(storeDir);
     const resources = fileStore<Resource>(resourceDir);
-    let selected: LocalWallet | undefined;
     const wallet = async () => {
       selected ??= await (d.wallet ?? loadWallet)({ ...o, network: c.network }, env, c.nearRpc);
       return selected;
@@ -425,7 +437,12 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     const send: NonNullable<AnnonOptions['send']> = async (method, args, owner) => {
       if (method === 'unlock' && !c.baseRpc)
         return fail('base_rpc_required', 'Configure baseRpc before resuming a Base purchase.', 2);
-      const { baseSplit: _baseSplit, ...wireArgs } = args as Record<string, unknown>;
+      const { baseSplit: _baseSplit, ...envelope } = args as Record<string, unknown>;
+      const funding = envelope.args as { file_id: string; amount: string };
+      const wireArgs =
+        method === 'fund_file_storage'
+          ? { file_id: funding.file_id, amount: funding.amount }
+          : envelope;
       const signer =
         owner ?? (selected?.identity.kind === 'near' ? (selected as NearWallet) : undefined);
       let submitted: { txHash: string; signer: string } | undefined;
@@ -577,6 +594,11 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         : {}),
       writeBackup: (id, encrypted) => writeBackup(backupPath(c, id), encrypted),
     });
+    if (o.command === 'fund') {
+      if (!o.target || !o.fundAmount) throw usage();
+      await sdk.fund(o.target, nearAmount(o.fundAmount), await wallet());
+      return { fileId: o.target, fundedNear: o.fundAmount };
+    }
     if (o.command === 'status') {
       if (!o.target) throw usage();
       let record: PurchaseRecord | null;

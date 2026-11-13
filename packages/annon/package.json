@@ -115,7 +115,8 @@
   ],
   "scripts": {
     "build": "rm -rf dist && tsc --noEmit && tsc -p tsconfig.build.json && node scripts/build-browser.ts",
-    "test": "vitest run"
+    "test": "vitest run && pnpm validate:package",
+    "validate:package": "node scripts/check-package.mjs"
   },
   "devDependencies": {
     "@near-wallet-selector/core": "10.1.4",

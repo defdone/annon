@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { rpcReply } from '../near/rpc.js';
+import { getFile, getGrant, getPurchase, rpcReply } from '../near/rpc.js';
 import { memoryStore } from '../pay/store.js';
 import { RelayLedger, type RelayState } from './ledger.js';
 import { type CheckOptions, reconcileRelayStorage } from './relay.js';
@@ -8,8 +8,16 @@ import { relayLimits } from './sponsorship.js';
 vi.mock('../near/rpc.js', async (original) => ({
   ...(await original<typeof import('../near/rpc.js')>()),
   rpcReply: vi.fn(),
+  getFile: vi.fn(async () => null),
+  getGrant: vi.fn(async () => null),
+  getPurchase: vi.fn(async () => null),
 }));
-beforeEach(() => vi.spyOn(Date, 'now').mockReturnValue(1000));
+beforeEach(() => {
+  vi.mocked(getFile).mockResolvedValue(null);
+  vi.mocked(getPurchase).mockResolvedValue(null);
+  vi.mocked(getGrant).mockReset().mockResolvedValue(null);
+  vi.spyOn(Date, 'now').mockReturnValue(1000);
+});
 afterEach(() => vi.restoreAllMocks());
 it.each([
   'protocol error',
@@ -120,7 +128,7 @@ it.each(['register', 'claim_key', 'reopen', 'reopen_seller', 'stop_sales', 'fund
       txHash: 'T',
       signed: 'original-bytes',
       signer: 'relay.test',
-      args: {},
+      args: { args: { purchase_id: `0x${'22'.repeat(32)}`, fresh_key: 'fresh' } },
     });
     vi.mocked(rpcReply).mockImplementation(async (_url, name) =>
       name === 'tx'
@@ -139,3 +147,86 @@ it.each(['register', 'claim_key', 'reopen', 'reopen_seller', 'stop_sales', 'fund
     expect((await ledger.read()).work).toEqual({});
   },
 );
+
+it.each([
+  'original key',
+  'later grant',
+  'large grant set',
+  'newest grant',
+  'last grant in window',
+  'file unavailable',
+  'different terms',
+  'not stopped',
+])('checks visible state before rejection: %s', async (mode) => {
+  const method =
+    mode.includes('key') || mode.includes('grant')
+      ? 'reopen'
+      : mode === 'not stopped'
+        ? 'stop_sales'
+        : 'register';
+  const ledger = new RelayLedger(memoryStore<RelayState>(), 'visible');
+  await ledger.prepare({
+    id: 'op',
+    requestHash: 'h',
+    method,
+    fileId: `0x${'22'.repeat(32)}`,
+    termsHash: `0x${'33'.repeat(32)}`,
+    seller: 'seller',
+    listed: false,
+    ip: '192.0.2.1',
+    storage: '100',
+    allocation: '0',
+    limits: relayLimits({ policy: { minPrice: 1n, maxDeadlineSeconds: 600 } } as CheckOptions),
+  });
+  await ledger.signed('op', {
+    txHash: 'T',
+    signed: 'same',
+    signer: 'relay.test',
+    args: { args: { purchase_id: `0x${'44'.repeat(32)}`, fresh_key: 'fresh' } },
+  });
+  vi.mocked(getFile).mockResolvedValue({ termsHash: 'different', salesStoppedAt: null } as never);
+  if (mode === 'file unavailable') vi.mocked(getFile).mockRejectedValue(new Error('unavailable'));
+  vi.mocked(getPurchase).mockResolvedValue({
+    buyer_key: mode === 'original key' ? 'fresh' : 'other',
+    grants: ['large grant set', 'newest grant', 'last grant in window'].includes(mode) ? 100 : 2,
+  } as never);
+  vi.mocked(getGrant).mockImplementation(
+    async (_rpc, _contract, _id, grant) =>
+      ({
+        buyer_key:
+          mode === 'later grant' ||
+          (mode === 'newest grant' && grant === 99) ||
+          (mode === 'last grant in window' && grant === 68)
+            ? 'fresh'
+            : 'other',
+      }) as never,
+  );
+  vi.mocked(rpcReply).mockImplementation(async (_rpc, name) =>
+    name === 'tx'
+      ? { error: { cause: { name: 'UNKNOWN_TRANSACTION' } } }
+      : { error: { cause: { info: { InvalidTxError: 'Expired' } } } },
+  );
+  await reconcileRelayStorage({
+    ledger,
+    nearRpc: 'https://rpc.test',
+    contractId: 'market.test',
+    sender: { accountId: 'relay.test', key: 'test-double' },
+  });
+  const operation = await ledger.operation('op');
+  const grants = vi.mocked(getGrant).mock.calls.map((call) => call[3]);
+  if (mode === 'newest grant') expect(grants).toEqual([99]);
+  if (mode === 'large grant set' || mode === 'last grant in window')
+    expect(grants).toEqual(Array.from({ length: 32 }, (_, i) => 99 - i));
+  if (mode === 'different terms' || mode === 'not stopped')
+    expect(operation?.stage).toBe('rejected');
+  else if (mode === 'large grant set' || mode === 'file unavailable') {
+    expect(operation?.stage).toBe('submitted');
+    expect(operation?.storageFinalized).toBeUndefined();
+    expect(await ledger.pendingStorage()).toBe(100n);
+  } else
+    expect(operation).toMatchObject({
+      stage: 'submitted',
+      storageFinalized: true,
+      finalState: 'done',
+    });
+});

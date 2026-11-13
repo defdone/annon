@@ -11,7 +11,9 @@ export { DownloadError, type DownloadErrorCode } from '../download/download.js';
 export { Pay2Error, type Pay2ErrorCode } from '../envelope/pay2.js';
 export { SourceChangedError } from '../envelope/stream.js';
 export { CkdError, type CkdErrorCode } from '../keys/near-ckd.js';
+export { HTTP_RETRY_MAX_WAIT_SECONDS, MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES } from '../limits.js';
 export { NearError, type NearErrorCode, NearRpcRateLimited } from '../near/rpc.js';
+export { type FileFundingArgs, fileFundingText } from '../near/texts.js';
 export {
   type Deposit,
   OneClick,
@@ -29,6 +31,13 @@ export {
 } from '../oneclick/oneclick.js';
 export { newBackupSecret } from '../pay/backup.js';
 export { BaseRpcRateLimited, PayError, type PayErrorCode } from '../pay/base.js';
+export {
+  BASE_ELIGIBILITY_MAX_AGE_SECONDS,
+  type BaseSponsorship,
+  type BaseSponsorshipOptions,
+  checkBaseSponsorship,
+  validBaseSponsorship,
+} from '../relay/capabilities.js';
 export { TransactionUncertain } from '../wallet/uncertain.js';
 export {
   type EvmWallet,

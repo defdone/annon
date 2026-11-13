@@ -3,5 +3,5 @@ Copyright 2026 defdone
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 
-specs/vectors/ckd-near-mpc.json contains test vectors copied from github.com/near/mpc (commit
-d0fc87b), Copyright (c) 2025 NEAR One Limited, under the MIT License (specs/vectors/LICENSE-near-mpc).
+https://github.com/defdone/annon/blob/master/specs/vectors/ckd-near-mpc.json contains test vectors copied from github.com/near/mpc (commit
+d0fc87b), Copyright (c) 2025 NEAR One Limited, under the MIT License (https://github.com/defdone/annon/blob/master/specs/vectors/LICENSE-near-mpc).

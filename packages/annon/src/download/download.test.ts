@@ -215,6 +215,54 @@ describe('download (buyer)', () => {
     // The resume carries the same purchase grant proof.
   });
 
+  it('refuses a 416 on the initial header range without restarting', async () => {
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
+      if (fetcher.mock.calls.length > 1) throw new Error('fetch count exceeded');
+      expect(new Headers(init?.headers).get('range')).toBe(`bytes=${HEADER.length}-`);
+      return new Response(null, { status: 416 });
+    });
+    const result = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        proof: { secret: SECRET, purchase_id: FILE, grant: 0 },
+        fetch: fetcher,
+        retries: 0,
+      }),
+    );
+    expect(result.error).toBe('not_authorized');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('restarts an expired resume at the header and emits every chunk exactly once', async () => {
+    const original = host({ file: PAY2, breakAfter: 70000 });
+    const requested: string[] = [];
+    const fetcher = (async (url, init) => {
+      requested.push(new Headers(init?.headers).get('range') ?? '');
+      if (requested.length === 2) return new Response(null, { status: 416 });
+      return original(url, init);
+    }) as typeof fetch;
+    const result = await drain(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        proof: { secret: SECRET, purchase_id: FILE, grant: 0 },
+        fetch: fetcher,
+      }),
+    );
+    expect(result.error).toBeUndefined();
+    expect(joined(result.got).equals(Buffer.from(PAY2))).toBe(true);
+    expect(requested).toEqual([
+      `bytes=${HEADER.length}-`,
+      `bytes=${HEADER.length + 272 + 65552}-`,
+      `bytes=${HEADER.length}-`,
+    ]);
+  });
+
   it('resumes from a host without Range by skipping what it has, even mid-read', async () => {
     const r = await get({
       file: PAY2,
@@ -588,4 +636,34 @@ it('enforces the common encrypted cap even when a caller omits maxBytes', async 
       }),
     ).arrayBuffer(),
   ).rejects.toMatchObject({ code: 'too_large' });
+});
+
+it.each([
+  { status: 403, code: 'not_sponsored', seconds: undefined },
+  { status: 503, code: 'relayer_unavailable', seconds: 91 },
+])('preserves host $status $code and its retry evidence', async ({ status, code, seconds }) => {
+  const wait = vi.fn(async () => {});
+  const fetcher = vi.fn<typeof fetch>(async () =>
+    Response.json({ error: code, retryAfterSeconds: seconds }, { status }),
+  );
+  await expect(
+    new Response(
+      download({
+        url: URL_,
+        contractId: CONTRACT,
+        fileId: FILE,
+        header: HEADER,
+        proof: { secret: new Uint8Array(32).fill(7), purchase_id: FILE, grant: 0 },
+        fetch: fetcher,
+        wait,
+      }),
+    ).arrayBuffer(),
+  ).rejects.toMatchObject({
+    code,
+    fileId: FILE,
+    purchaseId: FILE,
+    ...(seconds === undefined ? {} : { retryAfterSeconds: seconds }),
+  });
+  expect(wait).not.toHaveBeenCalled();
+  expect(fetcher).toHaveBeenCalledTimes(1);
 });

@@ -12,6 +12,7 @@ export { Pay2Error, type Pay2ErrorCode } from './envelope/pay2.js';
 export { blobSource, type ReplayableSource, type Spool } from './envelope/replay.js';
 export { SourceChangedError } from './envelope/stream.js';
 export { CkdError, type CkdErrorCode } from './keys/near-ckd.js';
+export { HTTP_RETRY_MAX_WAIT_SECONDS, MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES } from './limits.js';
 export {
   type FileStorageBalance,
   fileStorageBalance,
@@ -19,6 +20,7 @@ export {
   type NearErrorCode,
   NearRpcRateLimited,
 } from './near/rpc.js';
+export { type FileFundingArgs, fileFundingText } from './near/texts.js';
 export {
   type Deposit,
   OneClick,
@@ -50,6 +52,13 @@ export {
 } from './pay/backup.js';
 export { BaseRpcRateLimited, PayError, type PayErrorCode } from './pay/base.js';
 export type { PurchaseRecord } from './pay/purchase.js';
+export {
+  BASE_ELIGIBILITY_MAX_AGE_SECONDS,
+  type BaseSponsorship,
+  type BaseSponsorshipOptions,
+  checkBaseSponsorship,
+  validBaseSponsorship,
+} from './relay/capabilities.js';
 export { DEFAULT_MAX_PROTOCOL_FEE, type ProtocolFee } from './relay/fees.js';
 export {
   type Authorization,

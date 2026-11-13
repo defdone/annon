@@ -821,6 +821,33 @@ export async function reconcileRelayStorage(o: {
         const final = await lookUp(o.nearRpc, tx.txHash, tx.signer);
         if (final?.error?.cause?.name === 'UNKNOWN_TRANSACTION') {
           try {
+            let landed = false;
+            if (op.method === 'register' || op.method === 'stop_sales') {
+              const file = await getFile(o.nearRpc, o.contractId, op.fileId);
+              if (op.method === 'register' && file?.termsHash === op.termsHash) {
+                await o.ledger.registered(op.fileId, op.termsHash);
+                landed = true;
+              } else if (op.method === 'stop_sales') landed = file?.salesStoppedAt != null;
+            } else if (op.method === 'unlock') {
+              const args = (tx.args as { args: { purchase: string } }).args;
+              const id = purchaseId(parsePurchaseMessage(args.purchase));
+              landed = !!(await getPurchase(o.nearRpc, o.contractId, id));
+            } else if (op.method === 'reopen') {
+              const args = (tx.args as { args: ReopenArgs }).args;
+              const purchase = await getPurchase(o.nearRpc, o.contractId, args.purchase_id);
+              landed = purchase?.buyer_key === args.fresh_key;
+              const grants = purchase?.grants ?? 0;
+              for (let grant = grants - 1; !landed && grant >= Math.max(1, grants - 32); grant--)
+                landed =
+                  (await getGrant(o.nearRpc, o.contractId, args.purchase_id, grant))?.buyer_key ===
+                  args.fresh_key;
+              // A bounded pass cannot disprove an older grant outside this window.
+              if (!landed && (purchase?.grants ?? 0) > 32) continue;
+            }
+            if (landed) {
+              await o.ledger.finalizeStorage(op.id, tx.txHash, 'done');
+              continue;
+            }
             if (op.method === 'unlock')
               await o.ledger.defer(
                 op.id,

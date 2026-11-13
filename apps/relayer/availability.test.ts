@@ -108,6 +108,60 @@ it('keeps different IPv6 /48 clients separate through the HTTP adapter', async (
   }
 });
 
+it('ignores forwarding headers without ipHeader for requests on the same socket', async () => {
+  const { once } = await import('node:events');
+  const { Agent, request } = await import('node:http');
+  const { serve } = await import('./server.ts');
+  const config: Config = {
+    nearRpc: 'https://rpc.test',
+    baseRpc: 'https://base.test',
+    contractId: 'market.test',
+    usdc: `0x${'11'.repeat(20)}`,
+    sender: { accountId: 'relay.test', key: 'test-double' },
+    policy: { minPrice: 100000n, maxDeadlineSeconds: 600 },
+    disabled: false,
+    perIpHour: 1,
+    requestMultiplier: 1,
+    perDay: 1000,
+  };
+  const server = serve(config, 0);
+  const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+  let connections = 0;
+  server.on('connection', () => connections++);
+  try {
+    await once(server, 'listening');
+    const port = (server.address() as import('node:net').AddressInfo).port;
+    const post = (ip: string) =>
+      new Promise<number | undefined>((resolve, reject) => {
+        const req = request(
+          `http://127.0.0.1:${port}/v1/relay`,
+          {
+            agent,
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'x-forwarded-for': ip,
+              'fly-client-ip': ip,
+            },
+          },
+          (res) => {
+            res.on('error', reject);
+            res.on('end', () => resolve(res.statusCode));
+            res.resume();
+          },
+        );
+        req.on('error', reject);
+        req.end('{');
+      });
+    expect(await post('192.0.2.10')).toBe(400);
+    expect(await post('192.0.2.11')).toBe(429);
+    expect(connections).toBe(1);
+  } finally {
+    agent.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 it('keeps a precise quota reset hint from eligibility admission', async () => {
   const { vi } = await import('vitest');
   const sponsorship = await import('../../packages/annon/src/relay/sponsorship.ts');
@@ -320,3 +374,104 @@ it('refuses an unsealed pre-sign check before invoking chain admission', async (
     check.mockRestore();
   }
 });
+
+it.each(['disabled', 'policy', 'unsealed'] as const)(
+  'blocks a new SDK Base payment through the real capabilities handler: %s',
+  async (mode) => {
+    const { vi } = await import('vitest');
+    const { terms, must } = await import('../../packages/annon/test/fixtures.ts');
+    const rpc = await import('../../packages/annon/src/near/rpc.ts');
+    const pay2 = await import('../../packages/annon/src/envelope/pay2.ts');
+    const { Annon } = await import('../../packages/annon/src/api/annon.ts');
+    const { termsHash } = await import('../../packages/annon/src/settle-near/terms.ts');
+    const { memoryStore } = await import('../../packages/annon/src/pay/store.ts');
+    const { RelayLedger } = await import('../../packages/annon/src/relay/ledger.ts');
+    const ledger = new RelayLedger(memoryStore(), 'gate');
+    if (mode !== 'unsealed')
+      await ledger.seal(
+        {
+          policyVersion: 'legacy-v0',
+          blockHash: 'cutover',
+          blockHeight: 1,
+          scannedThrough: 1,
+          minPrice: '100000',
+          fee: { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
+          inventory: [],
+        },
+        [],
+      );
+    const c: Config = {
+      nearRpc: 'https://near.test',
+      baseRpc: 'https://base.test',
+      contractId: terms.contract,
+      network: terms.network,
+      nearUsdc: terms.near.token,
+      usdc: must(terms.base).usdc,
+      sender: { accountId: 'relay.test', key: 'test-double' },
+      ledger,
+      policy: { minPrice: 1n, maxDeadlineSeconds: 600, baseSponsorship: mode !== 'policy' },
+      disabled: mode === 'disabled',
+      perIpHour: 600,
+      perDay: 1000,
+    };
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      const result = await handle(
+        c,
+        init?.method ?? 'GET',
+        new URL(String(url)).pathname,
+        '192.0.2.1',
+        String(init?.body ?? ''),
+      );
+      return Response.json(result.body, { status: result.status, headers: result.headers ?? {} });
+    });
+    vi.spyOn(rpc, 'getFile').mockResolvedValue({
+      terms,
+      seller: terms.seller,
+      termsHash: termsHash(terms),
+      takenDown: null,
+      salesStoppedAt: null,
+      moderator: null,
+    } as import('../../packages/annon/src/near/rpc.ts').FileInfo);
+    vi.spyOn(rpc, 'getConfig').mockResolvedValue({
+      network: terms.network,
+      nearUsdc: terms.near.token,
+      usdc: c.usdc,
+    } as import('../../packages/annon/src/near/rpc.ts').Config);
+    vi.spyOn(pay2, 'inspectHeader').mockResolvedValue({ usable: true } as never);
+    const authorize = vi.fn(),
+      signTypedData = vi.fn(),
+      beforePayment = vi.fn();
+    const wallet = { identity: terms.seller, authorize, signTypedData };
+    const sdk = new Annon({
+      ...c,
+      network: terms.network,
+      relayer: 'https://relay.test',
+      fetch: fetcher,
+      rawStore: memoryStore(),
+      backupSecret: new Uint8Array(32).fill(1),
+      writeBackup: async () => {},
+    });
+    try {
+      await expect(
+        sdk.buy({
+          fileId: terms.file_id,
+          header: new Uint8Array(),
+          route: 'base-usdc',
+          maxPrice: 1000000n,
+          payer: wallet,
+          recovery: wallet,
+          refund: terms.seller,
+          beforePayment,
+        }),
+      ).rejects.toMatchObject({ code: 'relayer_unavailable', retryAfterSeconds: 5 });
+      expect(authorize).not.toHaveBeenCalled();
+      expect(signTypedData).not.toHaveBeenCalled();
+      expect(beforePayment).not.toHaveBeenCalled();
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      const cap = await handle(c, 'GET', '/v1/capabilities', '192.0.2.1', '');
+      expect(cap.headers).toEqual({ 'Retry-After': '5' });
+    } finally {
+      vi.restoreAllMocks();
+    }
+  },
+);
