@@ -215,7 +215,8 @@ What a verified preview proves: these bytes are part of the body registered for 
 the same key the buyer will derive. What it doesn't prove: that the rest of the file is as good.
 
 The SDK never builds a preview unless the seller asks for one, and never with `previewLen` above the
-limit in section 3.
+limit in section 3. The reference SDK builds previews for sellers but does not verify preview
+packages for buyers in this release.
 
 ## 8. Security notes
 

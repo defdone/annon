@@ -5,6 +5,11 @@
 A NEAR account can buy directly on NEAR, sell files and recover its purchases. Selling and recovery
 require NEAR for gas and contract storage. Direct Base payments require a separate EVM wallet.
 
+Under the release rule, a file sold from a NEAR account will list without Base terms. Buyers will
+pay on NEAR or through 1Click, including 1Click with Base as the source chain. This listing rule is
+pending release. A separate EVM payout address for Base proceeds is on the
+[roadmap](../ROADMAP.md#base-payouts-for-near-and-solana-sellers).
+
 This page explains why NEAR accounts pay storage, what it costs, and what we plan to change.
 
 ## Why
@@ -27,11 +32,14 @@ The contract recognises identities in two ways.
 | Recovering a purchase on a new device | Gas and contract storage for the new key grant | Nothing |
 
 Self-funded listings have no compulsory protocol fee. The registered split determines each
-recipient's share.
+recipient's share. We charge only for infrastructure that defdone runs, such as sponsorship and the
+relayer, at cost plus a small margin. Using the protocol, the SDK or the CLI on your own
+infrastructure has no fee, and there is no shop commission.
 
 Direct NEAR buying requires a NEAR wallet, USDC on NEAR and NEAR for gas. Sponsored Base buying
-requires an EVM wallet and USDC on Base. A 1Click purchase requires a supported source asset and
-enough funds for the quoted deposit and source-chain transaction costs.
+requires an EVM wallet and USDC on Base, and works only for files whose terms include Base. A 1Click
+purchase requires a supported source asset and enough funds for the quoted deposit and source-chain
+transaction costs.
 
 ## Selling from a NEAR account
 

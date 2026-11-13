@@ -20,15 +20,17 @@ reference: [CLI.md](CLI.md). Security model and known limits: [SECURITY.md](http
 - [Durable keeper](#durable-keeper)
 - [RPC configuration](#rpc-configuration)
 - [Base splits](#base-splits)
+- [Previews](#previews)
 - [Security notes](#security-notes)
 
 ## Install
 
-Node.js 22 or newer.
+Node.js 22 or newer. The alpha package is pending publication. Use these commands once it is
+published.
 
 ```sh
-npm i @defdone/annon@beta        # the SDK
-npm i -g @defdone/annon@beta     # the annon CLI
+npm i @defdone/annon@alpha        # the SDK
+npm i -g @defdone/annon@alpha     # the annon CLI
 ```
 
 | Entry point | Use |
@@ -133,7 +135,7 @@ const controller = await BrowserPurchaseController.create({ storage, sdk }, {
   fileId,
   header: checkedHeader,
   resourceUrl,
-  route: 'oneclick',
+  route: '1click',
   maxPrice: approvedUsdcCap,
 });
 controller.subscribe(renderProgress);
@@ -147,6 +149,10 @@ const { meta, data } = await controller.open({ onProgress: renderDownload });
 ### Checkouts, reloads and tabs
 
 - Use a stable, caller-owned checkout ID for each terms review. Creation refuses an existing ID.
+- `route` is `'near'`, `'base'` or `'1click'`, the same names as in CLI and MCP results. Under the
+  release rule, offer `'base'` only when the file's final on-chain terms include a Base payee. For a
+  file without Base terms, a buyer holding USDC on Base uses `'1click'` with Base as the source
+  chain. The remaining route checks are pending release.
 - After a reload, construct `new BrowserPurchaseController({ storage, sdk, id })` and call
   `resume()`. Never call `buy()` or create another checkout to resume an uncertain payment.
 - `storage.list()` supplies the purchases list.
@@ -203,9 +209,10 @@ const { meta, data } = await controller.open({ onProgress: renderDownload });
   `open(bytes)` opens a PAY2 file the page already has.
 - The result is `{ meta, data }`. Plaintext and file keys are never written to storage; the record
   only moves to `file_ready`.
-- Browser decryption is capped at `BROWSER_DOWNLOAD_LIMIT`, 50 MiB of PAY2 bytes including the
-  header. A known larger size is refused before downloading, and a stream that passes the cap is
-  aborted. Both raise `DownloadError` with code `too_large`; use the CLI for larger files.
+- Every path caps a file at 50 MB of plaintext (`MAX_PLAINTEXT_BYTES`, 50,000,000 bytes). The
+  download cap `BROWSER_DOWNLOAD_LIMIT` equals `MAX_PAY2_BYTES`: those 50 MB plus the largest PAY2
+  header, metadata and tags. A known larger size is refused before downloading, and a stream that
+  passes the cap is aborted. Both raise `DownloadError` with code `too_large`.
 - Pass `signal` to cancel and `onProgress` to follow the `downloading`, `decrypting` and `ready`
   phases. A failed or cancelled download leaves the purchase accepted, so `open` can be retried
   without paying again.
@@ -529,8 +536,9 @@ unlocking. Keep API keys out of public files.
 
 ## Base splits
 
-Base `sell` results include `baseSplit: { address, kind, salt }` beside `terms`. Encrypted sell
-records keep it through resume and publication; older sell records do not have it. This metadata is
+When a file has Base terms, `sell` results include `baseSplit: { address, kind, salt }` beside
+`terms`. Public results omit `baseSplit` for a file without Base terms; its encrypted sell record
+stores `null`. This metadata stays with the sell record through resume and publication and is
 outside the on-chain terms and their hash.
 
 To call `readSplit` later, pass `address` and `{ salt }`, and rebuild the split from
@@ -542,6 +550,13 @@ To call `readSplit` later, pass `address` and `{ salt }`, and rebuild the split 
 | `allocations` | Each recipient's `bps` |
 | `totalAllocation` | `10000n` |
 | `distributionIncentive` | `0` |
+
+## Previews
+
+A seller can build a PAY2 file with a preview by passing `previewLen` to `sell` (format:
+[specs/pay2.md](https://github.com/defdone/annon/blob/master/specs/pay2.md) section 7). The SDK does
+not verify preview packages for buyers in this release, so a page must not present a preview as
+checked.
 
 ## Security notes
 
@@ -557,5 +572,5 @@ To call `readSplit` later, pass `address` and `{ salt }`, and rebuild the split 
   applications and always stub the login opener; no real wallet, RPC, transaction or Keychain is
   used.
 
-The trust model, the upgrade key during the beta and the known protocol limits are in
+The trust model, the upgrade key during the alpha and the known protocol limits are in
 [SECURITY.md](https://github.com/defdone/annon/blob/master/SECURITY.md).

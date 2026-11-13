@@ -27,6 +27,10 @@ the client; no deployment is implicitly pinned by this draft. `accepts` is deriv
 | payTo | contract | terms.base.pay_to |
 | extra | contract, file_id, terms_hash | name: USD Coin, version: 2, paymentFlow: upfront, nonceVersion: 2 |
 
+A host MUST omit the Base offer when the file's final terms have `terms.base: null`. Hosts and
+clients MUST refuse direct Base payments for that file. A buyer holding USDC on Base uses the NEAR
+offer through 1Click. Full enforcement in the reference host and clients is pending release.
+
 `maxTimeoutSeconds` is positive; Base authorizations are capped at 180 seconds, with 60 seconds
 clock tolerance. `assetTransferMethod` is absent or `eip3009`; nonempty payment `splits` are refused.
 There are no offers after stop. Takedown answers 410. Previous buyers retain grants after stop.

@@ -36,6 +36,12 @@ needed, 4 pending.
 Do not use a local deadline or an uncertain response as evidence that payment failed. Check the saved
 purchase before starting another one.
 
+### The file has no Base route
+
+Before choosing `base`, check that the file's final on-chain terms include a Base payee. If they do
+not, use `near`, or `1click` with Base as the source chain. The release will report
+`route_unavailable` (exit code 2) for this case; that error is pending release.
+
 ### 1Click refuses the quote
 
 1Click can refuse a quote because of its route minimum or available liquidity. When supplied,
@@ -218,7 +224,8 @@ annon open 0xPURCHASE_ID --url https://demo.annon.dev/f/FILE --output file.pdf
 
 Demo-host uploads expire seven days after first publication, except the configured canonical demo
 file. After expiry, new offers and downloads are refused with `file_expired` (HTTP 410); an already
-active download may finish. Keep your own copy.
+active download may finish. Keep your own copy. The demo itself runs until 18 November 2026, at the
+latest 19 November.
 
 Your accepted purchase remains on chain. If another host serves the same checked encrypted file, use
 `annon open 0xPURCHASE_ID --url https://OTHER_HOST/FILE --output file.pdf`. For a local encrypted

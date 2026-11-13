@@ -108,7 +108,10 @@ pool limits still apply across every grant. The SDK setting `claimsPerPurchase` 
 setting `CLAIMS_PER_PURCHASE_DAY` retain their names with this per-pair meaning.
 All admission counters remain process-local. A restart resets them.
 
-HTTP 429, 503 and 425 responses include `Retry-After` in seconds. Chain-state checks, payment
+HTTP 429, 503 and 425 responses include `Retry-After` in seconds. Refusals answer
+`{error, message}` with a public error code; the SDK maps it to the same error the CLI and the MCP
+server report. A Base payment that is not yet safe answers 425 `settlement_pending`: retry the same
+request after `Retry-After`. Chain-state checks, payment
 safety and authorization run before the nonce queue. The queue checks deadline freshness and
 serializes prepaid storage estimates, signing and submission. The contract enforces current
 file state, purchase uniqueness, signatures and payment evidence when executing.
@@ -140,6 +143,12 @@ Embedded callers must await `relayStatus`, which can refresh stale claim outcome
 admission. The HTTP server awaits this lookup before charging admission or daily counters.
 
 ## Open file sponsorship and fees
+
+On defdone's relayer the fee pays for the infrastructure it provides: sponsored registration and
+storage, relayed transactions and the settlement keeper. We set it at cost plus a small margin.
+`FEE_FIXED` and `FEE_BPS` configure the relayer's sponsorship share, with minimum values of `30000`
+USDC base units and `100` basis points. Direct self-funded registration has no compulsory protocol
+fee.
 
 `SELLERS` is optional. `DEV_ALLOW_ANY_SELLER` has no effect. All valid EVM/Solana
 sellers can register within these limits, including sellers absent from `SELLERS`.

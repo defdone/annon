@@ -12,7 +12,7 @@ Files only the buyer can open. The file is encrypted before it leaves the seller
 the key after it has checked the payment itself.</p>
 
 <p align="center">
-  <a href="https://demo.annon.dev">Demo</a> ·
+  <a href="https://annon.dev/demo">Demo</a> ·
   <a href="specs/">Specification</a> ·
   <a href="packages/annon">SDK and CLI</a> ·
   <a href="packages/annon-mcp">MCP server</a> ·
@@ -34,7 +34,7 @@ Annon is an open protocol and SDK that removes that middle role:
   price, who is paid and in what shares. The encrypted file can be hosted anywhere. The host cannot
   read it.
 - The buyer pays in USDC on NEAR, on Base through [x402](https://x402.org), or from another chain
-  through NEAR Intents. The contract checks the payment on chain, Base included.
+  through NEAR Intents (1Click). The contract checks the payment on chain, Base included.
 - NEAR's MPC network then derives the file key for a one-time key that only the buyer holds. No
   host, relayer or platform ever sees the key.
 - The money follows the registered split. USDC paid on NEAR waits in the contract until anyone calls
@@ -44,24 +44,58 @@ Annon is an open protocol and SDK that removes that middle role:
 People and AI agents buy the same way: an Annon file is an ordinary URL that answers HTTP `402` with
 its offers.
 
-**Status:** public beta on NEAR mainnet since November 2026. The contract can still be upgraded by
-defdone until an independent audit; see [Security](#security-and-limits).
+Three payment routes, named the same in the SDK, the CLI and the MCP server:
+
+| Route | The buyer pays with |
+|---|---|
+| `near` | USDC on NEAR, sent from a NEAR account |
+| `base` | USDC on Base, through x402 |
+| `1click` | A supported token on another chain, swapped by NEAR Intents into USDC on NEAR |
+
+For this release, direct `base` payments require a Base payee in the file's final on-chain terms.
+The listing flow will enable Base for EVM sellers; NEAR and Solana sellers will list with
+`base: null`, for `near` and `1click` purchases. A buyer holding USDC on Base uses `1click` for a
+file without Base terms. Checks across the host, shop and clients are pending release.
+
+**Status:** alpha. The contract runs on NEAR mainnet, can still be upgraded by defdone and has no
+independent audit yet; see [Security](#security-and-limits).
 
 ## Try it
 
 ### In a browser
 
-Open **[demo.annon.dev](https://demo.annon.dev)**, pick a file and pay 0.10 USDC from a NEAR wallet,
-MetaMask or Coinbase Wallet on Base, or another chain through NEAR Intents. You get the decrypted
+Open the demo shop at **[annon.dev/demo](https://annon.dev/demo)**, pick a file and pay from a NEAR
+wallet, an EVM wallet on Base, or a wallet on another chain through 1Click. You get the decrypted
 file and a receipt with links to every transaction.
+
+You buy with your own funds: the demo file costs 0.10 USDC. The sponsorship fee comes from that
+price, through the registered split. On Base you need only USDC, no ETH. On NEAR you also need a
+little NEAR for gas. Through 1Click, fund the quoted source-token amount and gas on its chain; the
+quote includes the swap fees.
+
+About the demo:
+
+- The shop is at `https://annon.dev/demo`, the encrypted files at `https://demo.annon.dev`, and the
+  relayer at `https://relayer.mainnet.annon.dev`.
+- It runs until 18 November 2026, at the latest 19 November.
+- Open uploads are pending release. The demo's open pool will allow 60 new files per UTC day across
+  unlisted sellers, with one per IP address and one per wallet per UTC day. Listed sellers have a
+  separate allowance. Each file may contain at most 50 MB of plaintext.
+- Uploaded files will expire seven days after first publication, except the configured canonical
+  demo file. Keep your own copy of anything you buy.
+- Selling from the browser is pending release: we open it once the acceptance tests pass with NEAR,
+  EVM and Solana wallets.
+- Questions, or a file to report: hello@annon.dev.
 
 ### From the command line
 
 You need Node.js 22 or newer and a NEAR wallet with at least 0.10 USDC and a little NEAR for
 transaction fees.
 
+The alpha package is pending publication. Use these commands once it is published.
+
 ```sh
-npm install -g @defdone/annon@beta
+npm install -g @defdone/annon@alpha
 ```
 
 Create `~/.config/annon/config.json`:
@@ -95,15 +129,16 @@ annon login --wallet near
 Check the file, buy it, wait for the purchase to be accepted, and open it:
 
 ```sh
-annon verify https://demo.annon.dev/f/annon-pitch-deck --trust-contract
-annon buy https://demo.annon.dev/f/annon-pitch-deck --route near
+annon verify https://demo.annon.dev/f/what-we-are-building --trust-contract
+annon buy https://demo.annon.dev/f/what-we-are-building --route near
 annon status 0xPURCHASE_ID
-annon open 0xPURCHASE_ID --output annon-pitch-deck.pdf
+annon open 0xPURCHASE_ID --output what-we-are-building.pdf
 ```
 
 `--trust-contract` records once that you trust this contract to release keys. `buy` shows the terms
-and asks before it pays, then prints the purchase ID. If `status` says `pending` or `payment_not_safe`, wait
-and ask again. Never pay a second time for the same purchase.
+and asks before it pays, then prints the purchase ID. If `status` says `pending`, or a command stops
+with `settlement_pending` (exit code 4), wait and ask again. Never pay a second time for the same
+purchase.
 
 On another computer, the same wallet gets the file again without paying for it a second time.
 Repeat the setup above (install, configuration, backup secret, `annon login`). A NEAR account pays
@@ -118,7 +153,7 @@ Then recover and open:
 
 ```sh
 annon recover --recovery near:YOUR_ACCOUNT.near
-annon open 0xPURCHASE_ID --url https://demo.annon.dev/f/annon-pitch-deck --output annon-pitch-deck.pdf
+annon open 0xPURCHASE_ID --url https://demo.annon.dev/f/what-we-are-building --output what-we-are-building.pdf
 ```
 
 The full command reference, Base and 1Click payments, and local key files are in
@@ -148,6 +183,15 @@ its own purchase storage budget, and check it before you share the URL:
 annon sell report.pdf --price 1.00 --split near:YOUR_ACCOUNT.near:10000 --storage-budget 0.05 --output report.pay2
 annon budget 0xFILE_ID
 ```
+
+### Fees
+
+Using the protocol, the SDK, the CLI or the MCP server on your own infrastructure costs nothing
+beyond network fees. We charge only when you use infrastructure that defdone runs: sponsored
+registration and storage, the relayer, a Base split created by the demo shop, and demo hosting. The
+charge is our cost plus a small margin. For a sponsored listing it is 0.03 USDC plus 1% of the price,
+taken as a share of the file's split. A NEAR seller who funds their own listing pays no protocol
+fee. There is no shop commission.
 
 ## How it works
 
@@ -194,12 +238,12 @@ vectors, so anyone can build a compatible implementation:
 
 An agent buys with the same CLI, or through the local MCP server, under limits its owner sets: the
 contract it trusts, the most it may pay per file and per day, and the directory it may read and
-write.
+write. The alpha package is pending publication. Use this configuration once it is published.
 
 ```json
 {
   "mcpServers": {
-    "annon": { "command": "npx", "args": ["-y", "@defdone/annon-mcp@beta"] }
+    "annon": { "command": "npx", "args": ["-y", "@defdone/annon-mcp@alpha"] }
   }
 }
 ```
@@ -223,7 +267,7 @@ import {
 
 The SDK runs in Node.js and in browsers. The browser entry includes a purchase controller that
 survives reloads and works across tabs, encrypted local receipts, downloads with in-browser
-decryption up to 50 MiB, and adapters for injected EVM, Solana and NEAR wallets. There is no hosted
+decryption up to 50 MB, and adapters for injected EVM, Solana and NEAR wallets. There is no hosted
 checkout: a seller or a marketplace builds its own screen on the SDK. See
 [packages/annon](packages/annon).
 
@@ -254,6 +298,7 @@ cargo test
 |---|---|
 | Contract | [`v1.annon.defdone.near`](https://nearblocks.io/address/v1.annon.defdone.near) |
 | Relayer | `https://relayer.mainnet.annon.dev` |
+| Demo shop | `https://annon.dev/demo` |
 | Demo files | `https://demo.annon.dev` |
 | MPC network | `v1.signer` |
 | USDC | NEAR native USDC and Base USDC |
@@ -263,7 +308,7 @@ cargo test
 Annon handles payments and decryption keys. Read [SECURITY.md](SECURITY.md) before you rely on it.
 In short:
 
-- During the beta defdone can upgrade the contract. That is the largest trust we ask for. It ends
+- During the alpha defdone can upgrade the contract. That is the largest trust we ask for. It ends
   when the contract is locked after an independent audit.
 - A moderator, if a seller names one, can stop new key releases for a file. A request already sent
   to the MPC network can still complete.
@@ -275,11 +320,11 @@ To report a vulnerability, use GitHub's private reporting on this repository.
 
 ## Built at NEAR HACKATHON
 
-All code in this repository was written during the hackathon, starting on 2 November 2026; the
-`pre-hackathon` tag marks the initial commit (license, README and ignore rules, no application
-code). Before the hackathon our team built Payaion, a
-closed file-selling app on Base, and the PAY1 file format that PAY2 extends. No Payaion code is in
-this repository; Payaion will be the first app to adopt Annon.
+All code in this repository was written during the hackathon, starting on 2 November 2026. The
+`pre-hackathon` tag marks the initial commit: license, README and ignore rules, no application code.
+The team is defdone. Before the hackathon we built Payaion, a closed file-selling app on Base, and
+the PAY1 file format that PAY2 extends. No Payaion code is in this repository; Payaion will be the
+first app to adopt Annon.
 
 **Libraries.** The SDK uses [@noble/curves](https://github.com/paulmillr/noble-curves),
 [@noble/hashes](https://github.com/paulmillr/noble-hashes), [@scure/base](https://github.com/paulmillr/scure-base),
@@ -292,8 +337,8 @@ interface crates of [near/mpc](https://github.com/near/mpc). Payments use
 of NEAR Intents.
 
 **AI assistance.** I wrote Annon with AI coding assistants, Claude Code and Codex, for
-implementation, reviews and tests. Every change was reviewed, tested in CI and, for payment paths,
-run on mainnet with real USDC before it was merged.
+implementation, reviews and tests. Changes are reviewed and tested in CI. Before publishing the
+alpha release, I will test the payment paths by hand on mainnet with small amounts of real USDC.
 
 ## License
 

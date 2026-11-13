@@ -508,7 +508,8 @@ scales the others proportionally and assigns rounding to an original non-treasur
 recipient. The exact fee share rounds up by less than one basis point. Base terms require
 a single EVM treasury share at the larger of the two route requirements. Sponsored Base
 registration supplies split kind/salt; the relayer recomputes the ownerless split address
-locally and checks `pay_to`. Base unlock sponsorship requires the same verified terms
-hash in memory, lost on restart. Direct self-funded registration has no compulsory fee. NEAR and 1Click clients
+locally and checks `pay_to`. For Base unlock sponsorship the relayer checks the deployed
+split against the registered terms and keeps each paid purchase's eligibility decision on durable
+storage. Direct self-funded registration has no compulsory fee. NEAR and 1Click clients
 check `file_storage_balance` before paying and refuse with `file_storage_low` when short;
 the contract rechecks on receipt because preflight reserves no budget.

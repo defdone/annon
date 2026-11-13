@@ -28,12 +28,28 @@ Current selling costs:
 | NEAR account | Contract storage for the listing and the file's purchase storage | None |
 | EVM or Solana wallet | No NEAR for sponsored registration | Default sponsorship fee: 0.03 USDC plus 1% of the price |
 
+The fee pays for the infrastructure defdone runs for a sponsored listing, at cost plus a small
+margin. Using the protocol, the SDK or the CLI on your own infrastructure has no fee.
+
 We plan to sponsor contract storage for NEAR accounts. Today, NEAR sellers and recovering buyers
 still fund their own storage. Details for NEAR users: [docs/near-accounts.md](docs/near-accounts.md).
 
 ### Sponsored gas for NEAR accounts
 
 We plan to sponsor gas for NEAR accounts through NEAR meta-transactions, once wallets support them.
+
+### Selling from the browser
+
+A page in the demo shop where you pick a file, set the price and the split, and approve with a
+NEAR, EVM or Solana wallet. It is pending release: we open it once the acceptance tests pass with
+all three. Until then you sell from the CLI, the MCP server or the SDK.
+
+### Base payouts for NEAR and Solana sellers
+
+For this release, the listing flow will enable direct Base payments for EVM sellers. NEAR and
+Solana sellers will list without Base terms, so buyers will use NEAR or 1Click, including 1Click from
+Base. These listing rules are pending release. After the hackathon, we plan to let a NEAR or Solana
+seller name a separate EVM payout address for direct Base proceeds.
 
 ### Instant refund of an underpayment for direct NEAR payers
 
@@ -43,10 +59,16 @@ refunded to your NEAR Intents account, and you withdraw it from there
 from a NEAR account, we plan to return an underpayment straight to the sending account, with no
 withdrawal step.
 
-### Selling from the browser
+### Optional app attribution
 
-Today you sell from the CLI, the MCP server or the SDK. We plan a page where you pick a file, set the
-price and the split, and approve with your wallet.
+An optional `appId` or referrer that a shop or an app can attach to a purchase, so it can count the
+sales it brought. It is attribution only, not a commission: it changes neither the price nor the
+split.
+
+### Server-side catalog search
+
+Catalog search that runs on the shop's server, so a client does not have to download a whole
+catalog to search it.
 
 ### A local purchases panel in the CLI
 
@@ -54,7 +76,7 @@ A panel, started from the CLI, that shows your purchases and sales from your loc
 
 ### Independent audit and contract lock
 
-During the beta defdone can upgrade the contract ([SECURITY.md](SECURITY.md)). We plan an
+During the alpha defdone can upgrade the contract ([SECURITY.md](SECURITY.md)). We plan an
 independent audit, then we remove the upgrade key and lock the contract.
 
 ### A testnet relayer

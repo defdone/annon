@@ -6,7 +6,9 @@ Annon moves money and releases decryption keys, so we treat every report as urge
 
 Please do not open a public issue. Report privately through GitHub: the **Security** tab of this
 repository, then **Report a vulnerability**. We reply within 72 hours and keep you informed until
-the fix ships. If the issue can lose funds or leak keys on mainnet, say so in the title.
+the fix ships. If the issue can lose funds or leak keys on mainnet, say so in the title. If you
+cannot use GitHub, write to hello@annon.dev and we will set up a private channel; do not include
+exploit details in that first message.
 
 In scope:
 
@@ -16,15 +18,15 @@ In scope:
 - the specifications in [`specs/`](specs), where a flaw in the protocol itself is in scope even if
   our code happens to avoid it.
 
-## Status: public beta
+## Status: alpha
 
 | | |
 |---|---|
 | Contract | `v1.annon.defdone.near` on NEAR mainnet, upgradeable by defdone |
-| Packages | `0.1.0-beta.0`, published to npm under the `beta` tag |
+| Packages | Planned release series: `0.1.0-alpha.N` on the npm `alpha` tag; publication is pending |
 | Audits | Internal reviews and mutation testing only. No independent audit yet. |
 
-During the beta defdone keeps a full-access key to the contract account so that a bug can be fixed
+During the alpha defdone keeps a full-access key to the contract account so that a bug can be fixed
 in place. That key can change the contract's code, and therefore its rules. It is the largest trust
 Annon asks for. After an independent audit we will remove the key and lock the contract; a later fix
 then ships as a new contract that sellers move to.
@@ -38,7 +40,7 @@ then ships as a new contract that sellers move to.
 | Host | Refuse to serve a file | Read it, see keys, redirect payouts |
 | Relayer | Refuse to sponsor a transaction | Sign as the buyer or seller, redirect payouts, see keys |
 | NEAR MPC network | Derive keys when the contract asks | Release a key the contract did not request |
-| defdone | Upgrade the contract during the beta | Read a file key from the chain |
+| defdone | Upgrade the contract during the alpha | Read a file key from the chain |
 
 The buyer's one-time key and the decrypted file stay on the buyer's device. Buyer records never
 keep a released file key or decrypted content: the browser decrypts in memory, and the CLI writes
@@ -48,7 +50,7 @@ backup you made elsewhere need your own cleanup.
 
 ## Known limits
 
-These are known and accepted for the beta. Please do not report them as new findings, but do tell
+These are known and accepted for the alpha. Please do not report them as new findings, but do tell
 us if you can make one worse than described.
 
 - **Takedown after a key request.** A moderator's takedown refuses new key requests. A request
@@ -57,10 +59,10 @@ us if you can make one worse than described.
 - **Refund proof window.** When the contract cannot pay a refund right away it records it in an
   on-chain accumulator, and the refund is claimed later with a proof against a recent root. Only a
   bounded number of recent roots are kept, so a refund left unclaimed for very long needs a newer
-  proof. Checkpoints that remove this window are planned after the beta.
+  proof. Checkpoints that remove this window are planned.
 - **A failed payout callback** leaves that step marked in flight. It is never reset automatically:
   a timeout cannot tell a completed transfer from a delayed one, and a reset could pay twice. During
-  the beta a reviewed upgrade can repair a provable accounting error.
+  the alpha a reviewed upgrade can repair a provable accounting error.
 - **1Click refunds.** If NEAR Intents delivers a payment the contract refuses (for example after the
   purchase expired), the refund stays in the NEAR Intents account named in the quote, not on the
   source chain.
@@ -78,4 +80,5 @@ us if you can make one worse than described.
 
 ## Supported versions
 
-Only the latest published beta and the contract listed above receive fixes.
+After publication, only the latest alpha release on npm and the contract listed above will receive
+fixes.

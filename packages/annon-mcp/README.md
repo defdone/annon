@@ -7,11 +7,13 @@ working directory, and no tool call can change them. Stdout carries only the MCP
 
 ## Install
 
+The alpha package is pending publication. Use these commands once it is published.
+
 ```sh
-npm i -g @defdone/annon-mcp@beta
+npm i -g @defdone/annon-mcp@alpha
 ```
 
-Or let the MCP client start it with `npx -y @defdone/annon-mcp@beta`. The `annon-mcp` binary takes
+Or let the MCP client start it with `npx -y @defdone/annon-mcp@alpha`. The `annon-mcp` binary takes
 no arguments.
 
 ## Configure
@@ -25,7 +27,7 @@ The server reads the same configuration and secret sources as the CLI
   "mcpServers": {
     "annon": {
       "command": "npx",
-      "args": ["-y", "@defdone/annon-mcp@beta"],
+      "args": ["-y", "@defdone/annon-mcp@alpha"],
       "env": {
         "ANNON_CONFIG": "/absolute/path/annon-agent.json",
         "ANNON_WALLET": "evm",
@@ -96,6 +98,10 @@ Tools take camelCase versions of the CLI flags, with `target` as the positional 
 **`annon_buy`** also accepts `route` (`"near"`, `"base"` or `"1click"`), `origin`, `recovery` and
 `url`.
 
+- Under the release rule, use `base` only when the file's final on-chain terms include a Base payee.
+  Otherwise use `near`, or `1click` with a human-configured Base `origin`. The remaining route checks
+  are pending release.
+
 - `target` must be a secure resource URL within any configured allowlist. Local offer files are
   refused, and an optional `url` cannot authorize one.
 - The server fetches the offer from that URL and checks that the advertised resource matches it.
@@ -127,9 +133,10 @@ paying when the file's storage budget is too low.
 
 1. `annon_buy` creates the purchase. For 1Click it returns deposit instructions; someone funds the
    deposit from their own wallet before the cutoff. Annon never sends it.
-2. After `submitted`, call `annon_status` about every 30 seconds until `accepted`. `pending` and
-   `payment_not_safe` mean wait, never failure. Resumable pending results and `payment_not_safe`
-   carry `retryAfterSeconds: 30`; a setup that needs a human has no retry hint.
+2. After `submitted`, call `annon_status` about every 30 seconds until `accepted`. A `pending`
+   state and a `settlement_pending` error mean wait, never failure. Resumable pending results and
+   `settlement_pending` errors carry `retryAfterSeconds` (30 when nothing more precise is known); a
+   setup that needs a human has no retry hint. The server refuses a retry before that time.
 3. Open with `annon_open` once the status is `accepted`.
 
 Never pay again for a purchase in flight. `annon_status` and `annon_open` can resume a saved paid
@@ -159,8 +166,11 @@ restricted, use separate OS permissions.
 ## Results and errors
 
 Every tool returns `structuredContent: { ok: true, result: ... }` and the same JSON as text. Errors
-set `isError: true` and return `{ ok: false, error: { code, message } }`. Results never contain
-keys, signed authorizations or plaintext.
+set `isError: true` and return `{ ok: false, error }`, where `error` has `code`, `message` and
+`exitCode` (1 other failure, 2 invalid input or configuration, 3 human approval or trust needed,
+4 pending, retry later), and, when known, `fileId`, `purchaseId`, `txHash`, `minimumAmountUsdc` and
+`retryAfterSeconds`. The CLI's `--json` errors use the same object. Results never contain keys,
+signed authorizations or plaintext.
 
 ## Payment summary
 
@@ -173,13 +183,13 @@ keys, signed authorizations or plaintext.
 | `asset` | `symbol` and `id` |
 | `network` | Network of the payment |
 | `route` | How the buyer paid: `near`, `base` or `1click` |
-| `source` | For 1Click, the reviewed source asset and amount |
+| `source` | For 1Click only, the reviewed source asset and amount |
 
-Top-level `route` is the contract route (`near-usdc`/`base-usdc`); `payment.route` is how the buyer paid (`near`/`base`/`1click`).
-Status and open include the summary when the saved purchase and the backup secret are
-available; older records can lack source details. The summary never contains a deposit address or
-a signed authorization. Reporting is best-effort: an unreadable record or secret omits `payment`
-without blocking an accepted status or a recovery open.
+Top-level `route` in buy, status and open results uses the same names and matches `payment.route`.
+Status and open include the summary when the saved purchase and the backup secret are available;
+without them, `status` and `open` omit `route` rather than guess it. The summary never contains a
+deposit address or a signed authorization. Reporting is best-effort: an unreadable record or secret
+omits `payment` without blocking an accepted status or a recovery open.
 
 ## License
 
