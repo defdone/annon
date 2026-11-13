@@ -17,6 +17,7 @@ import {
 } from '../../packages/annon/src/relay/relay.ts';
 import { termsHash } from '../../packages/annon/src/settle-near/terms.ts';
 import { purchase, terms } from '../../packages/annon/test/fixtures.ts';
+import { dockerAppFiles } from '../docker-test.ts';
 import { type Config, deliverKeeperAlert, fromEnv, handle, hits, serve } from './server.ts';
 
 const config = (over: Partial<Config> = {}): Config => ({
@@ -386,12 +387,13 @@ describe.runIf(process.env.ANNON_TEST_CONTAINER === '1')(
           'packages/annon/package.json',
           'packages/annon-mcp/package.json',
           'apps/relayer/package.json',
-          'apps/relayer/server.ts',
-          'apps/relayer/ts-hook.mjs',
         ])
           await cp(join(root, file), join(dir, file));
+        for (const name of await dockerAppFiles(import.meta.dirname))
+          await cp(join(import.meta.dirname, name), join(dir, 'apps/relayer', name));
         await cp(join(root, 'packages/annon/src'), join(dir, 'packages/annon/src'), {
           recursive: true,
+          filter: (file) => !file.endsWith('.test.ts'),
         });
         const install = spawnSync(
           'pnpm',
@@ -430,8 +432,19 @@ describe.runIf(process.env.ANNON_TEST_CONTAINER === '1')(
           ['--no-warnings', '--import', './ts-hook.mjs', 'server.ts'],
           { cwd: app, encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH } },
         );
-        expect(start.stderr).toContain('fees require a treasury');
+        expect(start.status).toBe(1);
+        expect(start.stderr).toContain('RELAYER_STATE_DIR is not set');
         expect(start.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
+        const cutover = spawnSync(
+          process.execPath,
+          ['--no-warnings', '--import', './ts-hook.mjs', 'cutover.ts'],
+          { cwd: app, encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH } },
+        );
+        expect(cutover.status).toBe(1);
+        expect(cutover.stderr).toContain(
+          'Policy file, RELAYER_STATE_DIR and NEAR_ARCHIVAL_RPC are required.',
+        );
+        expect(cutover.stderr).not.toContain('ERR_MODULE_NOT_FOUND');
         // Prove this harness detects a dev-only runtime import that the dev install permits.
         await appendFile(join(app, 'server.ts'), "\nimport 'vitest';\n");
         const broken = spawnSync(

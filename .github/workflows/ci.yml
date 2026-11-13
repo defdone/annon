@@ -37,6 +37,7 @@ jobs:
       - run: pnpm build
       - run: pnpm test
       - run: ANNON_TEST_CONTAINER=1 pnpm --filter @defdone/annon-relayer exec vitest run -t "starts after the Docker prod-filter install"
+      - run: ANNON_TEST_CONTAINER=1 pnpm --filter @defdone/annon-demo-host exec vitest run -t "starts after the Docker prod-filter install"
 
   contract:
     runs-on: ubuntu-26.04
