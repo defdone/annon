@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import ts from 'typescript';
 
@@ -10,8 +10,7 @@ export async function dockerAppFiles(app: string): Promise<string[]> {
   );
 }
 
-/** Check the ordered context rules and COPY globs against the complete relative import graph. */
-export async function dockerImportProblems(app: string, entries: string[]): Promise<string[]> {
+async function imageContext(app: string) {
   const root = resolve(app, '../..');
   const rules = (await readFile(join(root, '.dockerignore'), 'utf8'))
     .split(/\r?\n/)
@@ -56,26 +55,47 @@ export async function dockerImportProblems(app: string, entries: string[]): Prom
     }
     return allow;
   };
-  const problems: string[] = [];
-  const checked = new Set<string>();
-  const check = (file: string) => {
-    if (checked.has(file)) return;
-    checked.add(file);
-    if (!included(file)) problems.push(`${file}: excluded by .dockerignore`);
-    if (
-      !copies.some(
-        ({ sources, exclusions }) =>
-          sources.some((source) => matches(file, source)) &&
-          !exclusions.some(
-            (pattern) => matches(file, pattern) || matches(file.split('/').at(-1) ?? file, pattern),
-          ),
-      )
-    )
-      problems.push(`${file}: absent from Dockerfile COPY`);
-  };
-  for (const name of await dockerAppFiles(app)) {
-    if (name !== 'build-runtime.ts') check(relative(root, join(app, name)));
+  const files = new Set<string>();
+  for (const { sources, exclusions } of copies) {
+    for (const source of sources) {
+      if (source.startsWith('/')) continue;
+      const clean = source.replace(/\/$/, '');
+      let directory = false;
+      try {
+        directory = (await stat(join(root, clean))).isDirectory();
+      } catch {
+        // Wildcard sources are expanded below, without directory exclusion semantics.
+      }
+      const base = directory ? clean : dirname(clean);
+      const walk = async (folder: string): Promise<void> => {
+        for (const entry of await readdir(join(root, folder), { withFileTypes: true })) {
+          const file = join(folder, entry.name);
+          if (!included(file)) continue;
+          if (directory && exclusions.some((pattern) => matches(relative(clean, file), pattern)))
+            continue;
+          if (entry.isDirectory()) await walk(file);
+          else if (directory || matches(file, clean)) files.add(file);
+        }
+      };
+      await walk(base);
+    }
   }
+  return { root, included, files };
+}
+
+/** Files copied from the build context into the final stage, after context and directory exclusions. */
+export async function dockerImageFiles(app: string): Promise<string[]> {
+  return [...(await imageContext(app)).files].sort();
+}
+
+/** Check the final image against the complete relative import graph. */
+export async function dockerImportProblems(app: string, entries: string[]): Promise<string[]> {
+  const { root, included, files } = await imageContext(app);
+  const problems: string[] = [];
+  const check = (file: string) => {
+    if (!included(file)) problems.push(`${file}: excluded by .dockerignore`);
+    if (!files.has(file)) problems.push(`${file}: absent from Dockerfile COPY`);
+  };
   for (const name of (await readdir(app)).filter((name) => name.endsWith('.test.ts'))) {
     const file = relative(root, join(app, name));
     if (included(file)) problems.push(`${file}: test included by .dockerignore`);

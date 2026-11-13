@@ -23,7 +23,7 @@ it('imports SDK runtime code only through declared package entries', async () =>
   }
 });
 
-it('checks final-stage copies and basename exclusions', async () => {
+it('checks final-stage copies and directory exclusions', async () => {
   const { mkdtemp, mkdir, writeFile, readFile, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
@@ -41,7 +41,7 @@ it('checks final-stage copies and basename exclusions', async () => {
     const build = 'FROM node AS build\nCOPY apps/relayer/*.ts apps/relayer/\nFROM node\n';
     for (const copy of [
       'COPY apps/relayer/server.ts apps/relayer/',
-      'COPY --exclude=module.ts apps/relayer/*.ts apps/relayer/',
+      'COPY --exclude=module.ts apps/relayer/ apps/relayer/',
     ]) {
       await writeFile(join(app, 'Dockerfile'), build + copy);
       expect(await dockerImportProblems(app, ['server.ts'])).toContain(

@@ -30,11 +30,13 @@ import {
   preflight,
 } from '../../packages/annon/src/download/http.ts';
 import { sha256 } from '../../packages/annon/src/envelope/pay2.ts';
+import { isTransient } from '../../packages/annon/src/errors.ts';
 import { type FileInfo, getFile } from '../../packages/annon/src/near/rpc.ts';
 import { clientKey, fixedWindowLimiter } from '../../packages/annon/src/net/ip.ts';
 import type { Facilitator, SellerRecord } from '../../packages/annon/src/pay/settle.ts';
 import type { Store } from '../../packages/annon/src/pay/store.ts';
 import { fileStore } from '../../packages/annon/src/pay/store-node.ts';
+import { BASE_USDC, NEAR_USDC } from '../../packages/annon/src/settle-near/terms.ts';
 import { type Alert, emit, hostAlerts } from './alerts.ts';
 import { hostCapacity } from './capacity.ts';
 import { hostSettings } from './config.ts';
@@ -45,6 +47,8 @@ import { sweepSellerRecords } from './maintenance.ts';
 import { StartupError, type StartupReason } from './startup-errors.ts';
 import { hostStorage } from './storage.ts';
 import { sendBody } from './stream.ts';
+import { uploadHttp } from './upload-http.ts';
+import { uploadService } from './uploads.ts';
 
 export { clientKey, limiter } from '../../packages/annon/src/net/ip.ts';
 export type { Chain } from './facilitator.ts';
@@ -60,6 +64,9 @@ export interface DemoFile {
   priceUsdc?: string;
 }
 export interface Loaded extends DemoFile {
+  verify?: () => Promise<void>;
+  filename?: string;
+  lifecycleId?: string;
   path: string;
   size: number;
   header: Uint8Array;
@@ -77,6 +84,8 @@ export interface HostConfig {
   facilitator?: Facilitator;
   cors?: CorsPolicy;
   capacity?: Awaited<ReturnType<typeof hostCapacity>>;
+  uploads?: Awaited<ReturnType<typeof uploadService>>;
+  uploadLimits?: Parameters<typeof uploadHttp>[5];
   downloads?: FileHostOptions['downloads'];
   relayerOrigin?: string;
   alert?: Alert;
@@ -193,16 +202,21 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
   const perIp = fixedWindowLimiter(c.perIpMinute);
   const cors = c.cors ?? corsPolicy(DEFAULT_ORIGINS);
   const active = c.active ?? new Map<string, number>();
-  const checked = async () =>
-    Promise.all(
-      c.files.map(async (f) => {
-        if (await c.capacity?.expired(f.fileId)) return null;
+  const allFiles = async (
+    snapshot?: Awaited<ReturnType<NonNullable<HostConfig['capacity']>['snapshot']>>,
+  ) => [...c.files, ...((await c.uploads?.files(snapshot)) ?? [])];
+  const checked = async () => {
+    const snapshot = await c.capacity?.snapshot();
+    return Promise.all(
+      (await allFiles(snapshot)).map(async (f) => {
+        if (snapshot?.expiredIds.has(f.fileId)) return null;
         const info = await (c.getFile?.(f.fileId) ?? getFile(c.nearRpc, c.contractId, f.fileId));
         if (!info || info.takenDown !== null || info.salesStoppedAt !== null) return null;
-        const life = await c.capacity?.info(`operator:${f.fileId}`);
+        const life = snapshot?.objects[f.lifecycleId ?? `operator:${f.fileId}`];
         return { f, info, life };
       }),
     );
+  };
   // The SDK resends its payment about every 3 s while it waits, so a buyer makes ~20 a minute.
   const paymentsPerClient = fixedWindowLimiter(c.paymentsPerClientMinute);
   return async (req: IncomingMessage, res: ServerResponse) => {
@@ -243,6 +257,7 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
       }
       if (
         (req.method === 'POST' || req.method === 'PUT') &&
+        !path.startsWith('/v1/uploads') &&
         !hasContentType(requestHeaders.get('Content-Type'), 'application/json')
       )
         return send(415, {});
@@ -266,6 +281,7 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
             retryAfterSeconds: admission.retryAfterSeconds,
           }),
         );
+      if (await uploadHttp(req, res, path, key, c.uploads, c.uploadLimits)) return;
       // GET only: HEAD would run settlement without reading the body.
       if (req.method !== 'GET') return send(405, { Allow: 'GET' });
       if (path === '/' || path === '/files.json') {
@@ -291,8 +307,13 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
           header: `${c.publicUrl}/f/${f.name}/header`,
           byteSize: f.size,
           plaintextSize: f.plaintextSize,
-          createdAt: life?.createdAt,
-          expiresAt: life?.expiresAt,
+          createdAt: life?.createdAt === undefined ? 0 : Math.floor(life.createdAt / 1000),
+          expiresAt:
+            life?.expiresAt === null
+              ? null
+              : life?.expiresAt === undefined
+                ? 0
+                : Math.floor(life.expiresAt / 1000),
           termsHash: info.termsHash,
           terms: info.terms,
           salesStopped: info.salesStoppedAt !== null,
@@ -301,20 +322,22 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
         return send(200, { 'Content-Type': 'application/json' }, JSON.stringify(list));
       }
       const m = /^\/f\/([a-z0-9-]+)(\/header)?$/.exec(path);
-      if (m && (await c.capacity?.expiredSlug(m[1] as string)))
+      const snapshot = m ? await c.capacity?.snapshot() : undefined;
+      if (m && snapshot?.expiredSlugs.has(m[1] as string))
         return send(
           410,
           { 'Content-Type': 'application/json' },
           JSON.stringify({ error: 'file_expired', message: 'This hosted file has expired.' }),
         );
-      const f = m ? c.files.find((x) => x.name === m[1]) : undefined;
+      const f = m ? (await allFiles(snapshot)).find((x) => x.name === m[1]) : undefined;
       if (!m || !f) return send(404, {});
-      if (await c.capacity?.expired(f.fileId))
+      if (snapshot?.expiredIds.has(f.fileId))
         return send(
           410,
           { 'Content-Type': 'application/json' },
           JSON.stringify({ error: 'file_expired', message: 'This hosted file has expired.' }),
         );
+      await f.verify?.();
       if (m[2]) return send(200, { 'Content-Type': 'application/octet-stream' }, f.header);
       if (req.headers['payment-signature']) {
         if (!c.facilitator) return send(501, {});
@@ -362,7 +385,7 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
           },
           // Diagnostics contain only the checked code and public file slug.
           onPaymentError: (e) => {
-            if (e.code === 'transport') emit(c.alert, { type: 'base_rpc_unhealthy' });
+            if (isTransient(e)) emit(c.alert, { type: 'base_rpc_unhealthy' });
             if (e.code === 'relayer_unavailable') emit(c.alert, { type: 'relayer_unavailable' });
             if (e.code === 'facilitator_busy') emit(c.alert, { type: 'facilitator_busy' });
             console.log(
@@ -374,6 +397,17 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
           },
         },
       );
+      if (f.filename && (r.status === 200 || r.status === 206)) {
+        const suggestion =
+          f.filename
+            .split(/[\\/]/)
+            .at(-1)
+            ?.replace(/[\p{Cc}\p{Cs}\p{Cf}\p{Zl}\p{Zp}]/gu, '') ?? '';
+        const filename =
+          !suggestion || suggestion === '.' || suggestion === '..' ? 'download' : suggestion;
+        r.headers['Content-Disposition'] =
+          `attachment; filename*=UTF-8''${encodeURIComponent(filename).replace(/[!'()*]/g, (value) => `%${value.charCodeAt(0).toString(16).toUpperCase()}`)}`;
+      }
       res.writeHead(r.status, r.headers);
       active.set(f.fileId, (active.get(f.fileId) ?? 0) + 1);
       try {
@@ -421,7 +455,26 @@ export async function main(e: Record<string, string | undefined> = process.env) 
       requireState: true,
     });
     const downloads = await downloadLedger(join(dataDir, 'downloads'), settings.downloads);
+    reason = 'config_invalid';
     const files = await loadFiles(need('FILES_DIR'), (id) => capacity.expired(id), settings);
+    reason = 'state_invalid';
+    const signingKey = e.DEMO_RESERVATION_SIGNING_KEY?.trim();
+    const uploads = signingKey
+      ? await uploadService({
+          dir: join(dataDir, 'uploads'),
+          capacity,
+          requireState: true,
+          network: 'near:mainnet',
+          contract: need('CONTRACT_ID'),
+          hostOrigin: settings.publicUrl,
+          nearRpc: need('NEAR_RPC'),
+          signingKey: Buffer.from(signingKey, 'hex'),
+          sellers: settings.sellers,
+          getFile: (id) => getFile(need('NEAR_RPC'), need('CONTRACT_ID'), id),
+          assets: { nearUsdc: NEAR_USDC, baseUsdc: BASE_USDC },
+          ...settings.uploads,
+        })
+      : undefined;
     const active = new Map<string, number>();
     for (const f of files)
       await capacity.importFile({
@@ -454,6 +507,7 @@ export async function main(e: Record<string, string | undefined> = process.env) 
       baseRpc,
       publicUrl: settings.publicUrl,
       files,
+      ...(uploads ? { uploads, uploadLimits: settings.uploadHttp } : {}),
       store,
       capacity,
       downloads,
@@ -468,7 +522,8 @@ export async function main(e: Record<string, string | undefined> = process.env) 
       ...(facilitator ? { facilitator } : {}),
       ...(e.IP_HEADER?.trim() ? { ipHeader: e.IP_HEADER.trim() } : {}),
     };
-    const cleanup = async () => {
+    const cleanup = async (retry = true) => {
+      await uploads?.cleanup(active, retry);
       for (const id of await capacity.sweep()) {
         const record = await capacity.info(id);
         if (
@@ -495,12 +550,23 @@ export async function main(e: Record<string, string | undefined> = process.env) 
         if (inodes >= settings.diskPercent) emit(alert, { type: 'inodes', percent: inodes });
       }
     };
-    await cleanup();
+    await cleanup(false);
 
     emit(alert, { type: 'restart' });
     const handle = handler(c);
     const requests = new Set<Promise<void>>();
     const server = createServer((req, res) => {
+      const ordinary = !(
+        req.method === 'PUT' &&
+        /^\/v1\/uploads\/[a-f0-9]{64}\/(body|header)$/.test((req.url ?? '').split('?')[0] as string)
+      );
+      const requestTimer = ordinary ? setTimeout(() => req.destroy(), 30000) : undefined;
+      const clear = () => {
+        if (requestTimer) clearTimeout(requestTimer);
+      };
+      req.once('end', clear);
+      req.once('close', clear);
+      if (req.complete) clear();
       const task = handle(req, res);
       requests.add(task);
       void task.then(
@@ -508,9 +574,9 @@ export async function main(e: Record<string, string | undefined> = process.env) 
         () => requests.delete(task),
       );
     });
-    server.requestTimeout = 30_000;
+    server.requestTimeout = settings.uploadHttp.requestSeconds * 1000;
     server.headersTimeout = 10_000;
-    server.timeout = 120_000;
+    server.timeout = 120000;
     server.maxConnections = 1_000;
     let maintenance = Promise.resolve();
     const enqueue = (job: () => Promise<void>, type: 'store_busy' | 'base_rpc_unhealthy') => {
@@ -524,7 +590,7 @@ export async function main(e: Record<string, string | undefined> = process.env) 
       type: 'store_busy' | 'base_rpc_unhealthy',
     ) => setInterval(() => enqueue(job, type), seconds * 1000);
     const timers = [
-      schedule(cleanup, settings.sweepSeconds, 'store_busy'),
+      schedule(() => cleanup(), settings.sweepSeconds, 'store_busy'),
       schedule(sample, settings.sampleSeconds, 'base_rpc_unhealthy'),
     ];
     reason = 'config_invalid';

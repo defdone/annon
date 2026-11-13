@@ -40,3 +40,38 @@ it('excludes test sources from both runtime image source copies', async () => {
   }
   expect(docker).not.toContain('COPY apps/demo-host/*.ts');
 });
+
+it.each([
+  ['UPLOAD_AUTH_SECONDS', '601'],
+  ['UPLOAD_RESERVATION_SECONDS', '599'],
+  ['UPLOAD_RESERVATION_SECONDS', '601'],
+  ['UPLOAD_AUTH_HEADER_BYTES', '8193'],
+  ['UPLOAD_FILENAME_BYTES', '256'],
+  ['UPLOAD_TITLE_BYTES', '121'],
+  ['UPLOAD_DESCRIPTION_BYTES', '501'],
+  ['UPLOAD_REQUEST_SECONDS', '1801'],
+  ['OPEN_POOL_ENABLED', '2'],
+  ['DEMO_RESERVATION_SIGNING_KEY', 'invalid'],
+] as const)('rejects invalid upload setting %s', (key, value) => {
+  expect(() => hostSettings({ ...env, [key]: value })).toThrow();
+});
+it('parses upload defaults and disabling separately from the listed allowance', () => {
+  expect(hostSettings({ ...env, OPEN_POOL_ENABLED: '0' })).toMatchObject({
+    uploads: {
+      openPoolEnabled: false,
+      authSeconds: 600,
+      reservationSeconds: 600,
+      filenameBytes: 255,
+      titleBytes: 120,
+      descriptionBytes: 500,
+    },
+    uploadHttp: {
+      maxJsonBytes: 131072,
+      maxHeaderBytes: 65536,
+      authHeaderBytes: 8192,
+      idleSeconds: 600,
+      requestSeconds: 1800,
+    },
+    capacity: { listedPerSellerDay: 20, filesPerDay: 30, filesPerIpDay: 3, filesPerSellerDay: 3 },
+  });
+});

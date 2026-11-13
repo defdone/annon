@@ -3,7 +3,7 @@ import { createServer, request, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { memoryStore } from '../../packages/annon/src/pay/store.ts';
 import { BASE_USDC } from '../../packages/annon/src/settle-near/terms.ts';
 import {
@@ -704,4 +704,72 @@ it('includes a safe message when the payment admission limit is reached', async 
     error: 'rate_limited',
     message: expect.any(String),
   });
+});
+
+it.each(['transport', 'base_rpc_rate_limited', 'payment_rejected'] as const)(
+  'alerts on transient payment failure %s',
+  async (code) => {
+    const { PayError } = await import('../../packages/annon/src/pay/base.ts');
+    const alerts: unknown[] = [];
+    const files = await setup([{ name: 'hello', fileId: FILE_ID, title: 'Hello' }], {
+      hello: pay2(100, 10),
+    });
+    const url = await start(
+      {
+        files,
+        alert: async (event) => {
+          alerts.push(event);
+        },
+      },
+      async (_req, options) => {
+        options.onPaymentError?.(new PayError(code));
+        return { status: 503, headers: {} };
+      },
+    );
+    expect((await fetch(`${url}/f/hello`)).status).toBe(503);
+    expect(alerts).toEqual(code === 'payment_rejected' ? [] : [{ type: 'base_rpc_unhealthy' }]);
+  },
+);
+
+it.each([
+  ['../bad\r\nname(1)!.txt', 'badname%281%29%21.txt'],
+  ['../', 'download'],
+  ['a\u202eb\u200bc\u2028d\u2029.txt', 'abcd.txt'],
+  ['..', 'download'],
+])('confines Content-Disposition filename %j to a plain basename', async (filename, encoded) => {
+  const files = await setup([{ name: 'hello', fileId: FILE_ID, title: 'Hello' }], {
+    hello: pay2(100, 10),
+  });
+  const file = files[0];
+  if (!file) throw new Error('Missing fixture');
+  file.filename = filename;
+  const url = await start({ files }, async () => ({ status: 200, headers: {} }));
+  const response = await fetch(`${url}/f/hello`);
+  expect(response.headers.get('Content-Disposition')).toBe(
+    `attachment; filename*=UTF-8''${encoded}`,
+  );
+  await response.arrayBuffer();
+});
+
+it('reports unavailable upload hosting before processing requests when it is not configured', async () => {
+  const url = await start({ files: [] });
+  const response = await fetch(`${url}/v1/uploads`);
+  expect(response.status).toBe(503);
+  expect(await response.json()).toMatchObject({ error: 'unavailable' });
+});
+
+it('verifies hosted bytes before serving a public header or invoking payment work', async () => {
+  const files = await setup([{ name: 'hello', fileId: FILE_ID, title: 'Hello' }], {
+    hello: pay2(100, 10),
+  });
+  const file = files[0];
+  if (!file) throw new Error('Missing fixture');
+  file.verify = async () => {
+    throw new Error('Corrupt body');
+  };
+  const serve = vi.fn(async () => ({ status: 200, headers: {} }));
+  const url = await start({ files }, serve);
+  expect((await fetch(`${url}/f/hello/header`)).status).toBe(500);
+  expect((await fetch(`${url}/f/hello`)).status).toBe(500);
+  expect(serve).not.toHaveBeenCalled();
 });

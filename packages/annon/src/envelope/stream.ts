@@ -1,5 +1,6 @@
+import type { UploadManifest } from '../download/upload.js';
 import { AnnonError } from '../errors.js';
-import { account } from '../settle-near/codec.js';
+import { account, hex } from '../settle-near/codec.js';
 /**
  * Bounded-memory PAY2 version 2 using Web Streams and the one-shot encoder's WebCrypto primitives.
  *
@@ -153,6 +154,10 @@ function output(
 }
 
 export interface StreamSealed {
+  manifest: UploadManifest;
+  headerSize(contractId: string): number;
+  /** Replays encrypted body chunks before registration without CKD or a final header. */
+  body(plaintext: ReadableStream<Uint8Array>): ReadableStream<Uint8Array>;
   fileId: Bytes;
   /** Register this value before calling finish, as with the one-shot seal. */
   cipherHash: Bytes;
@@ -280,6 +285,28 @@ export async function sealStreamWithKey(
   });
   let finished: Bytes | undefined;
   return {
+    manifest: {
+      version,
+      chunkLog2,
+      metaLen,
+      previewLen,
+      n,
+      keyCommitments: commits.map(hex),
+      chunkHashes: hashes.map(hex),
+    },
+    headerSize(contractId) {
+      account(contractId);
+      return 206 + utf8.encode(contractId).length + 32 * (kc + n);
+    },
+    body(replay) {
+      return output(replay, async function* (reader) {
+        let i = 0;
+        for await (const wire of encrypt(reader, true)) {
+          if (!equal(await sha256(wire), hashes[i++] as Bytes)) throw new SourceChangedError();
+          yield wire;
+        }
+      });
+    },
     fileId: copy(fileId),
     cipherHash,
     async finish(replay, finishOpts) {

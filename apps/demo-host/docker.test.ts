@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { appendFile, cp, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { dockerAppFiles, dockerImportProblems } from '../docker-test.ts';
+import { dockerAppFiles, dockerImageFiles, dockerImportProblems } from '../docker-test.ts';
 
 it('includes every relative import reachable from server.ts in the Docker context', async () => {
   expect(await dockerImportProblems(import.meta.dirname, ['server.ts'])).toEqual([]);
@@ -92,3 +92,66 @@ describe.runIf(process.env.ANNON_TEST_CONTAINER === '1')(
     }, 180000);
   },
 );
+
+it('excludes the relayer build helper from the final image', async () => {
+  const files = await dockerImageFiles(join(import.meta.dirname, '../relayer'));
+  expect(files).toContain('apps/relayer/cutover-scan.ts');
+  expect(files).not.toContain('apps/relayer/build-runtime.ts');
+});
+
+it('models directory-relative BuildKit exclusions without basename rules or name skips', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'docker-copy-'));
+  const app = join(root, 'apps/demo-host');
+  try {
+    await mkdir(join(app, 'nested'), { recursive: true });
+    await writeFile(join(root, '.dockerignore'), '**/*.test.ts\n');
+    await writeFile(join(app, 'server.ts'), "import './nested/module.ts';");
+    await writeFile(join(app, 'nested/module.ts'), 'export {};');
+    await writeFile(join(app, 'build-runtime.ts'), 'export {};');
+    const prefix = 'FROM node AS build\nCOPY apps/demo-host/ apps/demo-host/\nFROM node\n';
+    for (const [copy, missing] of [
+      ['COPY apps/demo-host/server.ts apps/demo-host/', true],
+      ['COPY --exclude=nested/module.ts apps/demo-host/ apps/demo-host/', true],
+      ['COPY --exclude=module.ts apps/demo-host/ apps/demo-host/', false],
+      ['COPY --exclude=apps/demo-host/nested/module.ts apps/demo-host/ apps/demo-host/', false],
+      [
+        'COPY --exclude=module.ts apps/demo-host/nested/*.ts apps/demo-host/nested/\nCOPY apps/demo-host/server.ts apps/demo-host/',
+        false,
+      ],
+      [
+        'COPY --exclude=build-runtime.ts apps/demo-host/*.ts apps/demo-host/\nCOPY apps/demo-host/nested/ apps/demo-host/nested/',
+        false,
+      ],
+      ['COPY --exclude=build-runtime.ts apps/demo-host/ apps/demo-host/', false],
+    ] as const) {
+      await writeFile(join(app, 'Dockerfile'), prefix + copy);
+      const problems = await dockerImportProblems(app, ['server.ts']);
+      expect(
+        problems.includes('apps/demo-host/nested/module.ts: absent from Dockerfile COPY'),
+        copy,
+      ).toBe(missing);
+    }
+    expect(await dockerImageFiles(app)).not.toContain('apps/demo-host/build-runtime.ts');
+    await writeFile(
+      join(app, 'Dockerfile'),
+      `${prefix}COPY --exclude=build-runtime.ts apps/demo-host/*.ts apps/demo-host/`,
+    );
+    expect(await dockerImageFiles(app)).toContain('apps/demo-host/build-runtime.ts');
+    await writeFile(
+      join(app, 'Dockerfile'),
+      `${prefix}COPY --exclude=**/*.ts apps/demo-host/*.ts apps/demo-host/`,
+    );
+    expect(await dockerImageFiles(app)).toContain('apps/demo-host/server.ts');
+    await writeFile(join(app, 'server.ts'), "import './build-runtime.ts';");
+    await writeFile(
+      join(app, 'Dockerfile'),
+      `${prefix}COPY --exclude=build-runtime.ts apps/demo-host/ apps/demo-host/`,
+    );
+    expect(await dockerImportProblems(app, ['server.ts'])).toContain(
+      'apps/demo-host/build-runtime.ts: absent from Dockerfile COPY',
+    );
+    expect(await readFile(join(app, 'build-runtime.ts'), 'utf8')).toBe('export {};');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

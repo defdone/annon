@@ -21,7 +21,7 @@ COPY packages/annon-mcp/package.json packages/annon-mcp/
 COPY apps/relayer/package.json apps/relayer/
 RUN pnpm install --frozen-lockfile --prod --filter @defdone/annon --filter @defdone/annon-relayer
 COPY --from=build /repo/packages/annon/dist packages/annon/dist
-COPY --exclude=build-runtime.ts apps/relayer/*.ts apps/relayer/ts-hook.mjs apps/relayer/
+COPY --exclude=build-runtime.ts apps/relayer/ apps/relayer/
 WORKDIR /repo/apps/relayer
 ENV NODE_ENV=production NODE_NO_WARNINGS=1
 USER node

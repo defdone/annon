@@ -3,6 +3,11 @@ import { settings } from './settings.ts';
 
 export function hostSettings(e: Record<string, string | undefined>) {
   const parsed = settings(e);
+  if (
+    e.DEMO_RESERVATION_SIGNING_KEY !== undefined &&
+    !/^[a-f0-9]{64}$/.test(e.DEMO_RESERVATION_SIGNING_KEY)
+  )
+    throw new Error('invalid reservation signing key');
   const origin = (key: string) => {
     const raw = e[key]?.trim();
     if (!raw) throw new Error(`${key} is required`);

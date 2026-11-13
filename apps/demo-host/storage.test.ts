@@ -55,7 +55,7 @@ it('seeds every state and commits readiness before returning on a legacy or empt
         await writeFile(join(dir, 'seller', 'evidence.json'), 'preserved');
       }
       const first = await hostStorage(dir);
-      expect(await readFile(join(dir, '.host-ready'), 'utf8')).toBe('1');
+      expect(await readFile(join(dir, '.host-ready'), 'utf8')).toBe('2');
       await first.close();
       const second = await hostStorage(dir);
       const { hostCapacity } = await import('./capacity.ts');
@@ -92,6 +92,52 @@ it('refuses a seller entry that is not a directory', async () => {
   try {
     await writeFile(join(dir, 'seller'), 'not a directory');
     await expect(hostStorage(dir)).rejects.toThrow();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('recovers an interrupted first initialization without resetting an existing ledger', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'host-init-crash-'));
+  try {
+    await writeFile(join(dir, '.host-initializing'), '1');
+    await mkdir(join(dir, 'seller'));
+    await mkdir(join(dir, 'capacity'));
+    const host = await hostStorage(dir);
+    expect(await readFile(join(dir, '.host-ready'), 'utf8')).toBe('2');
+    await host.close();
+    const next = await hostStorage(dir);
+    await next.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('rejects invalid readiness versions and a changed owner during recovery', async () => {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const dir = await mkdtemp(join(tmpdir(), 'host-owner-race-'));
+  try {
+    const host = await hostStorage(dir);
+    await host.close();
+    await writeFile(join(dir, '.host-ready'), '3');
+    await expect(hostStorage(dir)).rejects.toMatchObject({ reason: 'state_invalid' });
+    await writeFile(join(dir, '.host-ready'), '2');
+    await mkdir(join(dir, '.host-lock'));
+    const old = { pid: process.pid, stamp: 'old', token: 'old' };
+    await writeFile(join(dir, '.host-lock/pid'), JSON.stringify(old));
+    let calls = 0;
+    await expect(
+      hostStorage(dir, {
+        processStamp: async () => {
+          if (++calls === 2)
+            await writeFile(
+              join(dir, '.host-lock/pid'),
+              JSON.stringify({ ...old, token: 'changed' }),
+            );
+          return 'new';
+        },
+      }),
+    ).rejects.toThrow('owner changed');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

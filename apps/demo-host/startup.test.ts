@@ -58,7 +58,7 @@ it('probes legacy migration, seeded restart, key activation and recovery after f
     await writeFile(join(c.data, 'seller', 'evidence.json'), '{}');
     await writeFile(join(c.files, 'files.json'), 'invalid');
     await expect(main(c.env)).rejects.toThrow();
-    expect(await readFile(join(c.data, '.host-ready'), 'utf8')).toBe('1');
+    expect(await readFile(join(c.data, '.host-ready'), 'utf8')).toBe('2');
     expect(await readFile(join(c.data, 'seller', 'evidence.json'), 'utf8')).toBe('{}');
     await writeFile(join(c.files, 'files.json'), '[]');
     const first = await main(c.env);
@@ -135,6 +135,90 @@ it('fails closed with a missing-state reason if initialized capacity is removed'
     await mkdir(join(c.data, 'capacity'));
     await expect(main(c.env)).rejects.toMatchObject({ reason: 'state_missing' });
   } finally {
+    await rm(c.root, { recursive: true, force: true });
+  }
+});
+
+it('reports config_invalid for a broken files directory and state_missing for deleted facilitator state', async () => {
+  const c = await config();
+  try {
+    await expect(main({ ...c.env, FILES_DIR: join(c.root, 'absent') })).rejects.toMatchObject({
+      reason: 'config_invalid',
+    });
+    const first = await main(c.env);
+    await first.close();
+    const { readdir } = await import('node:fs/promises');
+    for (const file of await readdir(join(c.data, 'facilitator')))
+      await rm(join(c.data, 'facilitator', file));
+    await expect(main(c.env)).rejects.toMatchObject({ reason: 'state_missing' });
+  } finally {
+    await rm(c.root, { recursive: true, force: true });
+  }
+});
+
+it('boots with encrypted uploads enabled and serves body staging and reservation reads', async () => {
+  const c = await config();
+  const { privateKeyToAccount } = await import('viem/accounts');
+  const { parseUpload, uploadText, encodeUploadAuthorization } = await import(
+    '../../packages/annon/src/download/upload.ts'
+  );
+  const vectors = (await import('../../specs/vectors/upload.json')).default;
+  const req = parseUpload(vectors.cases[0]?.request);
+  c.env.PUBLIC_URL = req.intent.hostOrigin;
+  c.env.CONTRACT_ID = req.intent.contract;
+  req.intent.expiresAt = Math.floor(Date.now() / 1000) + 600;
+  const account = privateKeyToAccount(`0x${'01'.repeat(32)}`);
+  req.auth = { kind: 'evm', sig: await account.signMessage({ message: uploadText(req.intent) }) };
+  const host = await main({ ...c.env, DEMO_RESERVATION_SIGNING_KEY: '07'.repeat(32) });
+  try {
+    expect(host.server.timeout).toBe(120000);
+    expect(host.server.requestTimeout).toBe(1800000);
+    const base = `http://127.0.0.1:${c.env.PORT}`;
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const created = await fetch(`${base}/v1/uploads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    expect(created.status).toBe(201);
+    expect(timers.mock.calls.some((c) => c[1] === 30000)).toBe(true);
+    expect(timers.mock.calls.some((c) => c[1] === 1800000)).toBe(false);
+    timers.mockClear();
+    const { uploadId } = await created.json();
+    const body = Uint8Array.from(Buffer.from(vectors.bodyHex, 'hex'));
+    const staged = await fetch(`${base}/v1/uploads/${uploadId}/body`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Annon-Upload-Authorization': encodeUploadAuthorization(req),
+      },
+      body,
+    });
+    expect(staged.status).toBe(201);
+    expect(timers.mock.calls.some((c) => c[1] === 1800000)).toBe(true);
+    expect(timers.mock.calls.some((c) => c[1] === 30000)).toBe(false);
+    timers.mockClear();
+    expect((await fetch(`${base}/v1/upload-reservations/${uploadId}`)).status).toBe(200);
+    const status = await fetch(`${base}/v1/uploads/${uploadId}`, {
+      headers: { 'Annon-Upload-Authorization': encodeUploadAuthorization(req) },
+    });
+    expect(await status.json()).toMatchObject({ state: 'reserved', baseSplit: null });
+    expect(timers.mock.calls.some((c) => c[1] === 30000)).toBe(true);
+    expect(timers.mock.calls.some((c) => c[1] === 1800000)).toBe(false);
+    timers.mockClear();
+    expect(
+      (
+        await fetch(`${base}/v1/uploads/${uploadId}/body`, {
+          headers: { 'Annon-Upload-Authorization': encodeUploadAuthorization(req) },
+        })
+      ).status,
+    ).toBe(405);
+    expect(timers.mock.calls.some((c) => c[1] === 30000)).toBe(true);
+    expect(timers.mock.calls.some((c) => c[1] === 1800000)).toBe(false);
+    timers.mockRestore();
+  } finally {
+    vi.restoreAllMocks();
+    await host.close();
     await rm(c.root, { recursive: true, force: true });
   }
 });

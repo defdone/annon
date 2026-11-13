@@ -16,8 +16,9 @@ import { fileStore } from '../../packages/annon/src/pay/store-node.ts';
 import { hostCapacity } from './capacity.ts';
 import { initFacilitatorState } from './facilitator.ts';
 import { StartupError } from './startup-errors.ts';
+import { initUploadState } from './uploads.ts';
 
-const areas = ['seller', 'downloads', 'capacity', 'facilitator'] as const;
+const areas = ['seller', 'downloads', 'capacity', 'facilitator', 'uploads'] as const;
 async function processStamp(pid: number): Promise<string | undefined> {
   try {
     const [boot, record] = await Promise.all([
@@ -94,11 +95,44 @@ export async function hostStorage(
   try {
     const entries = await readdir(dir);
     const initialized = entries.includes('.host-ready');
-    if (!initialized && entries.some((name) => name !== '.host-lock' && name !== 'seller'))
+    const version = initialized ? await readFile(join(dir, '.host-ready'), 'utf8') : undefined;
+    if (initialized && version !== '1' && version !== '2') throw new StartupError('state_invalid');
+    const initializing = entries.includes('.host-initializing');
+    if (
+      !initialized &&
+      entries.some(
+        (name) =>
+          name !== '.host-lock' &&
+          name !== 'seller' &&
+          !(
+            initializing &&
+            ([...areas, '.host-initializing', '.host-ready.tmp'] as readonly string[]).includes(
+              name,
+            )
+          ),
+      )
+    )
       throw new StartupError('storage_uninitialized');
+    if (!initialized && !initializing) {
+      const marker = await open(join(dir, '.host-initializing'), 'wx', 0o600);
+      try {
+        await marker.writeFile('1');
+        await marker.sync();
+      } finally {
+        await marker.close();
+      }
+      const directory = await open(dir, 'r');
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+    }
+    // A ready volume predating uploads can add that empty area only before upload admission exists.
+    const addUploads = initialized && version === '1' && !entries.includes('uploads');
     for (const area of areas) {
       const path = join(dir, area);
-      if (initialized || entries.includes(area)) {
+      if ((initialized && !(addUploads && area === 'uploads')) || entries.includes(area)) {
         let exists = false;
         try {
           exists = (await stat(path)).isDirectory();
@@ -111,14 +145,19 @@ export async function hostStorage(
       for (const name of await readdir(path))
         if (name.endsWith('.lock') || name.endsWith('.tmp')) await unlink(join(path, name));
     }
-    if (!initialized) {
+    if (addUploads) await initUploadState(join(dir, 'uploads'));
+    if (!initialized || version === '1') {
       // Only a fresh volume or the seller-only layout can establish empty counters.
-      await (await hostCapacity(join(dir, 'capacity'))).sweep();
-      await initFacilitatorState(fileStore(join(dir, 'facilitator')));
+      await (await hostCapacity(join(dir, 'capacity'), { requireState: initialized })).sweep();
+      await initFacilitatorState(fileStore(join(dir, 'facilitator')), initialized);
+      await initUploadState(join(dir, 'uploads'));
+      await unlink(join(dir, '.host-ready.tmp')).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      });
       const temporary = join(dir, '.host-ready.tmp');
       const file = await open(temporary, 'wx', 0o600);
       try {
-        await file.writeFile('1');
+        await file.writeFile('2');
         await file.sync();
       } finally {
         await file.close();
@@ -131,6 +170,9 @@ export async function hostStorage(
         await handle.close();
       }
     }
+    await unlink(join(dir, '.host-initializing')).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    });
     return { initialized, close, async ready() {} };
   } catch (e) {
     await close();

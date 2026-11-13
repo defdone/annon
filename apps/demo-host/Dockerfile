@@ -11,7 +11,7 @@ COPY apps/relayer/package.json apps/relayer/
 COPY apps/demo-host/package.json apps/demo-host/
 RUN pnpm install --frozen-lockfile --prod --filter @defdone/annon --filter @defdone/annon-demo-host
 COPY --exclude=**/*.test.ts packages/annon/src packages/annon/src
-COPY --exclude=**/*.test.ts apps/demo-host/*.ts apps/demo-host/ts-hook.mjs apps/demo-host/
+COPY --exclude=**/*.test.ts apps/demo-host/ apps/demo-host/
 WORKDIR /repo/apps/demo-host
 ENV NODE_ENV=production NODE_NO_WARNINGS=1
 USER node

@@ -461,11 +461,16 @@ export async function baseFacilitator(
     try {
       if ((await pub.getChainId()) !== 8453) throw new PayError('network_mismatch');
       const timestamp = Number((await pub.getBlock()).timestamp);
-      await pub.call({
+      const expected = BigInt(timestamp + (options.simulationMarginSeconds ?? 30));
+      const result = await pub.call({
         to: account.address,
         data: '0x',
-        blockOverrides: { time: BigInt(timestamp + (options.simulationMarginSeconds ?? 30)) },
+        blockOverrides: { time: expected },
+        stateOverride: [{ address: account.address, code: '0x4260005260206000f3' }],
       });
+      // The temporary code returns TIMESTAMP, proving that the override took effect.
+      if (result.data !== `0x${expected.toString(16).padStart(64, '0')}`)
+        throw new Error('Block timestamp override was not applied.');
       enabled = true;
     } catch {
       emit(options.alert, { type: 'base_rpc_unhealthy' });

@@ -2,7 +2,11 @@ import { expect, it, vi } from 'vitest';
 
 const mocked = vi.hoisted(() => ({
   chainId: vi.fn(async () => 8453),
-  call: vi.fn(async () => ({ data: '0x' })),
+  call: vi.fn(async (request: { stateOverride?: unknown; blockOverrides?: { time: bigint } }) => ({
+    data: request.stateOverride
+      ? `0x${request.blockOverrides?.time.toString(16).padStart(64, '0')}`
+      : '0x',
+  })),
   sign: vi.fn(async () => '0x1234'),
   send: vi.fn(async () => '0xhash'),
   transport: vi.fn(),
@@ -119,4 +123,10 @@ it('checks block override support before admitting paid requests and disables wi
   });
   expect(mocked.call.mock.calls).toHaveLength(calls);
   await expect(f.selfCheck()).resolves.toBe(true);
+});
+
+it('refuses a provider that accepts overrides but returns the unmodified block timestamp', async () => {
+  const f = await baseFacilitator('42'.repeat(32), 'https://base.invalid', 0.5, 10);
+  mocked.call.mockResolvedValueOnce({ data: `0x${(1000).toString(16).padStart(64, '0')}` });
+  expect(await f.selfCheck()).toBe(false);
 });

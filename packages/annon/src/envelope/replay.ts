@@ -1,4 +1,5 @@
 /** Replayable file adapters shared by the browser SDK and Node file I/O. */
+import type { UploadManifest } from '../download/upload.js';
 import {
   type Bytes,
   checkSigned,
@@ -49,6 +50,11 @@ export type SellFile<T extends SellData> = T extends Uint8Array
   ? Bytes
   : ReadableStream<Uint8Array>;
 export interface PreparedSeal<T extends SellData> {
+  manifest: UploadManifest;
+  headerSize(contractId: string): number;
+  body(): ReadableStream<Uint8Array>;
+  /** Stage ciphertext in caller-owned immutable storage for reservation and restart. */
+  stage<R>(spool: Spool, use: (source: ReplayableSource) => Promise<R>): Promise<R>;
   cipherHash: Bytes;
   preview: import('./pay2.js').Sealed['preview'];
   finish(opts: FinishOptions): Promise<{
@@ -66,9 +72,21 @@ export async function prepareSeal<T extends SellData>(
   opts: SealOptions,
 ): Promise<PreparedSeal<T>> {
   if (data instanceof Uint8Array) {
-    const sealed = await sealWithKey(key, data, opts);
+    const immutable = data.slice();
+    const sealed = await sealWithKey(key, immutable, opts);
+    const stream = await sealStreamWithKey(
+      key,
+      new Blob([immutable]).stream(),
+      immutable.length,
+      opts,
+    );
+    const body = () => stream.body(new Blob([immutable]).stream());
     return {
       ...sealed,
+      manifest: stream.manifest,
+      headerSize: stream.headerSize,
+      body,
+      stage: (spool, use) => spool(body(), use),
       async finish(options) {
         const file = await sealed.finish(options);
         return {
@@ -90,6 +108,8 @@ export async function prepareSeal<T extends SellData>(
   }
   return {
     ...sealed,
+    body: () => sealed.body(data.read()),
+    stage: (spool, use) => spool(sealed.body(data.read()), use),
     async finish(options) {
       const replay = data.read();
       let wire: ReadableStream<Uint8Array>;
