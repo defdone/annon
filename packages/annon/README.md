@@ -117,10 +117,12 @@ purchases with the wallet you pass in (`evmWallet`, `solanaWallet`, `nearKeyPair
 "configure a transaction transport for relayed calls".
 
 For sponsored calls through a relayer instead of your own NEAR account, `send` posts to the
-relayer's `/v1/relay` endpoint and waits for its result. The CLI's adapter,
+relayer's `/v1/relay` endpoint and waits for its result. The CLI implements that transport in
+[`packages/annon/src/node/relay-transport.ts`](https://github.com/defdone/annon/blob/master/packages/annon/src/node/relay-transport.ts).
+Its adapter,
 [`packages/annon/src/node/core-adapter.ts`](https://github.com/defdone/annon/blob/master/packages/annon/src/node/core-adapter.ts),
-implements that transport and is the complete reference integration, including trust, prompts and
-backups.
+and the command modules it calls are the complete reference integration, including trust, prompts
+and backups.
 
 ## Browser purchases
 
