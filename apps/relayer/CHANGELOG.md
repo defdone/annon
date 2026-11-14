@@ -1,5 +1,11 @@
 # @defdone/annon-relayer
 
+## 0.1.0-alpha.2
+
+### Patch Changes
+
+- Uses `@defdone/annon` 0.1.0-alpha.2.
+
 ## 0.1.0-alpha.1
 
 ### Patch Changes
