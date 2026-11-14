@@ -169,6 +169,26 @@ it('retains known transaction evidence when browser submission cannot be verifie
   }
 });
 
+it('offers only connectable NEAR wallets and frames only the HOT widget origin', async () => {
+  const s = await startBrowserSession({ open: vi.fn() });
+  try {
+    const u = new URL(s.url);
+    const page = await send(s.url, '/', { host: u.host });
+    const csp = String(page.headers['content-security-policy'] ?? '');
+    expect(csp.split('; ').filter((d: string) => d.startsWith('frame-src'))).toEqual([
+      'frame-src https://hot-labs.org',
+    ]);
+    expect(csp).toContain("default-src 'none'");
+    expect([...page.body.matchAll(/<option value="([^"]+)">/g)].map((m) => m[1])).toEqual([
+      'meteor-wallet',
+      'hot-wallet',
+    ]);
+    expect(page.body).not.toMatch(/my-near-wallet|MyNearWallet/i);
+  } finally {
+    await s.close();
+  }
+});
+
 it('serves the actual built bundle from source under a CSP with no dynamic code or inline scripts', async () => {
   const s = await startBrowserSession({ open: vi.fn() });
   try {

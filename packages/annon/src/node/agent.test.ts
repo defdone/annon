@@ -112,6 +112,67 @@ it('login works before deployment configuration and saves only public account/ch
   }
 });
 
+it('NEAR browser login requests a NEP-413 signature without a callbackUrl, as in-page wallets sign it', async () => {
+  const { createAdapter } = await import('./adapter.js');
+  const { ed25519 } = await import('@noble/curves/ed25519.js');
+  const { base58, base64 } = await import('@scure/base');
+  const { nep413Hash } = await import('../near/nep413.js');
+  const secret = new Uint8Array(32).fill(3);
+  const publicKey = `ed25519:${base58.encode(ed25519.getPublicKey(secret))}`;
+  const dir = await mkdtemp(join(tmpdir(), 'annon-near-login-'));
+  const config = join(dir, 'config.json');
+  const requested: Record<string, unknown>[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init?: RequestInit) => {
+      const q = JSON.parse(String(init?.body));
+      return Response.json({
+        jsonrpc: '2.0',
+        id: q.id,
+        result: { nonce: 1, permission: 'FullAccess', block_height: 1, block_hash: '1' },
+      });
+    }),
+  );
+  try {
+    const adapter = createAdapter(
+      {},
+      {
+        notify: vi.fn(),
+        browser: async () => ({
+          url: 'http://127.0.0.1:1234/#CAPABILITY',
+          pairingCode: '123456',
+          close: vi.fn(async () => {}),
+          async request<T>(q: { id: string; expiresAt: number }, verify: (r: T) => Promise<void>) {
+            const p = (q as unknown as { payload: Record<string, unknown> }).payload;
+            requested.push(p);
+            const hash = nep413Hash({
+              message: String(p.message),
+              recipient: String(p.recipient),
+              nonce: Uint8Array.from(p.nonce as number[]),
+            });
+            const result = {
+              accountId: 'bot.near',
+              publicKey,
+              signature: base64.encode(ed25519.sign(hash, secret)),
+            } as T;
+            await verify(result);
+            return result;
+          },
+        }),
+      },
+    );
+    expect(await adapter({ command: 'login', wallet: 'near', config })).toMatchObject({
+      identity: { kind: 'near', id: 'bot.near' },
+      mode: 'browser',
+    });
+    expect(requested).toHaveLength(1);
+    expect(Object.keys(requested[0] ?? {}).sort()).toEqual(['message', 'nonce', 'recipient']);
+  } finally {
+    vi.unstubAllGlobals();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it('persists agent chain/deployment flags together with an environment reference without reading a key', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'annon-agent-chain-'));
   const config = join(dir, 'config.json');

@@ -52,7 +52,8 @@ annon login --wallet near    # or: annon login --wallet evm
 ```
 
 Login opens a local page in your browser and proves you control the wallet. It installs no key.
-Every payment is approved in the wallet.
+Every payment is approved in the wallet. For NEAR, pick Meteor Wallet or HOT Wallet on the page;
+MyNearWallet no longer connects to apps.
 
 ## 4. Buy and open
 

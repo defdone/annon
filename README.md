@@ -361,7 +361,8 @@ the PAY1 file format that PAY2 extends. No Payaion code is in this repository.
 **Libraries.** The SDK uses [@noble/curves](https://github.com/paulmillr/noble-curves),
 [@noble/hashes](https://github.com/paulmillr/noble-hashes), [@scure/base](https://github.com/paulmillr/scure-base),
 [near-api-js](https://github.com/near/near-api-js) and [viem](https://viem.sh); the CLI's browser
-login bundles [NEAR Wallet Selector](https://github.com/near/wallet-selector). The MCP server uses
+login bundles [NEAR Wallet Selector](https://github.com/near/wallet-selector) with its Meteor Wallet
+and HOT Wallet modules. The MCP server uses
 the official [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) and
 [zod](https://zod.dev). The contract uses [near-sdk](https://github.com/near/near-sdk-rs) and the
 interface crates of [near/mpc](https://github.com/near/mpc). Payments use

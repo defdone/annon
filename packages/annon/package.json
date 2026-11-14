@@ -120,7 +120,8 @@
   },
   "devDependencies": {
     "@near-wallet-selector/core": "10.1.4",
-    "@near-wallet-selector/my-near-wallet": "10.1.4",
+    "@near-wallet-selector/hot-wallet": "10.1.4",
+    "@near-wallet-selector/meteor-wallet": "10.1.4",
     "@types/node": "26.6.5",
     "buffer": "6.0.3",
     "esbuild": "0.28.2",

@@ -15,16 +15,20 @@ const cspDependencies: Plugin = {
       const source = await readFile(path, 'utf8');
       const start = source.indexOf('  var nodeWrap = function (method, is224) {');
       const end = source.indexOf('  var createHmacOutputMethod', start);
-      if (start < 0 || end < 0 || (source.slice(start, end).match(/\beval\(/g) ?? []).length !== 2)
+      const node = start < 0 || end < 0 ? '' : source.slice(start, end);
+      // 0.9 reaches Node crypto through eval; 0.11 (HOT Wallet SDK) through require.
+      const evals = (node.match(/\beval\(/g) ?? []).length;
+      const requires = (node.match(/\brequire\(/g) ?? []).length;
+      if (!node || !((evals === 2 && requires === 2) || (evals === 0 && requires === 2)))
         throw new Error('Review the updated js-sha256 browser CSP adapter');
-      // Browsers use the existing pure JS hashing implementation, never Node crypto via eval.
+      // Browsers use the existing pure JS hashing implementation, never Node crypto.
       return {
         contents: `${source.slice(0, start)}  var nodeWrap = function (method) { return method; };\n\n${source.slice(end)}`,
         loader: 'js',
       };
     });
     builder.onLoad(
-      { filter: /[/\\]@near-wallet-selector[/\\](core|my-near-wallet)[/\\]index\.js$/ },
+      { filter: /[/\\]@near-wallet-selector[/\\](core|meteor-wallet|hot-wallet)[/\\]index\.js$/ },
       async ({ path }) => {
         const source = await readFile(path, 'utf8');
         const fallback = "Function('return this')()";
@@ -34,6 +38,40 @@ const cspDependencies: Plugin = {
         return { contents: source.replace(fallback, 'globalThis'), loader: 'js' };
       },
     );
+    // The Meteor Wallet SDK imports `utils` from near-api-js 6, which near-api-js 7 no longer
+    // exports. Its only use decodes a base58 block hash; give it exactly that and nothing else.
+    builder.onResolve({ filter: /^near-api-js$/ }, ({ importer }) =>
+      /[/\\]@meteorwallet[/\\]sdk[/\\]/.test(importer)
+        ? { path: 'near-api-js-utils', namespace: 'meteor-near-api-js' }
+        : undefined,
+    );
+    // Its unused, unexported zod schemas pull in zod, whose JIT probes `new Function`. Drop them.
+    builder.onLoad(
+      { filter: /[/\\]@meteorwallet[/\\]sdk[/\\]dist[/\\]index\.js$/ },
+      async ({ path }) => {
+        const source = await readFile(path, 'utf8');
+        const zod = 'import { z } from "zod";\n';
+        const start = source.indexOf('//#region src/ported_common/dapp/dapp.validation.ts');
+        const end = source.indexOf('//#endregion', start);
+        const contents =
+          start < 0 || end < 0 ? '' : (source.slice(0, start) + source.slice(end)).replace(zod, '');
+        if (
+          source.split(zod).length !== 2 ||
+          source.split('import { utils } from "near-api-js";').length !== 2 ||
+          source.split('utils.serialize.base_decode(').length !== 2 ||
+          !contents ||
+          /\bz\.|ZO_/.test(contents)
+        )
+          throw new Error('Review the updated Meteor Wallet SDK browser adapter');
+        return { contents, loader: 'js' };
+      },
+    );
+    builder.onLoad({ filter: /.*/, namespace: 'meteor-near-api-js' }, () => ({
+      contents:
+        "import { base58 } from '@scure/base';\nexport const utils = { serialize: { base_decode: (value) => base58.decode(value) } };",
+      loader: 'js',
+      resolveDir: fileURLToPath(new URL('..', import.meta.url)),
+    }));
   },
 };
 
@@ -114,6 +152,9 @@ export const browserBuildOptions: BuildOptions = {
   format: 'iife',
   target: 'es2022',
   minify: true,
+  // Node-era dependencies of the wallet SDKs read `global` (randombytes) and, at module load,
+  // `process.env.DEFAULT_FINALITY` (@near-js/accounts 2.2.5). Browsers have neither.
+  define: { global: 'globalThis', 'process.env.DEFAULT_FINALITY': 'undefined' },
   plugins: [cspDependencies, emittedCsp],
 };
 
