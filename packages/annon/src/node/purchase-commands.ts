@@ -21,6 +21,7 @@ import type { CommandSession, RequestContext } from './command-context.js';
 import { AdapterError, publicError, usage } from './errors.js';
 import { fileSource, newOutput, withOutput, withSpool } from './io.js';
 import { resourceHeader } from './offers.js';
+import { rememberPurchase } from './purchase-ref.js';
 import { resourceAllowed } from './resources.js';
 import { retryGate } from './retry-gate.js';
 import { readBackupSecret } from './wallets.js';
@@ -103,6 +104,8 @@ async function recover(ctx: CommandSession): Promise<Record<string, unknown>> {
     wallet: await wallet(),
     ...(o.purchase ? { purchaseId: o.purchase } : {}),
   });
+  // Recovered purchases can be named by an ID prefix under this contract; the latest stays as is.
+  for (const r of recovered) await rememberPurchase(c, r.purchase_id, false);
   return {
     errors,
     recovered: recovered.map((r) => ({

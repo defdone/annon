@@ -42,7 +42,6 @@ afterEach(() => {
 const url = 'https://files.test/file';
 const headerUrl = 'https://files.test/header';
 const sourceAsset = 'nep141:base-usdc.synthetic.near';
-const next = 'Fund the deposit if instructed, then check status and open this purchase.';
 
 it.each([false, true])('verify checks a file against its listing (remote %s)', async (remote) => {
   const ws = await workspace('verify');
@@ -132,6 +131,8 @@ async function harness(
     purchase?: Dependencies['purchase'];
     prompt?: boolean;
     spy?: Spy;
+    /** Further synthetic hosts, for example a shop manifest and its catalog. */
+    hosts?: (target: string) => Response | undefined;
   } = {},
 ) {
   const ws = await workspace('buy', {
@@ -171,7 +172,7 @@ async function harness(
         });
       }
       if (target === headerUrl) return new Response(sealed.header);
-      return undefined;
+      return o.hosts?.(target);
     },
   );
   vi.stubGlobal('fetch', fetcher);
@@ -256,7 +257,9 @@ it.each([
         next:
           state === 'uncertain'
             ? `The wallet may have sent this payment. Do not pay again. Run annon status ${record.id} until it is accepted.`
-            : next,
+            : state === 'deposit_required'
+              ? 'Fund the deposit as instructed, then check status and open this purchase.'
+              : `Payment sent. Run annon status ${record.id}, then annon open ${record.id} --output <file>.`,
       });
       expect(h.buy).toHaveBeenCalledTimes(1);
       const options = h.buy.mock.calls[0]?.[0];
@@ -727,3 +730,122 @@ it.each([true, false])(
     }
   },
 );
+
+it('a buy becomes the latest purchase before it is saved, so status without an ID finds it', async () => {
+  const h = await harness({ purchase: async () => ({ file_id: fileId, grants: [] }) as never });
+  const record = purchaseRecord({ headerHash: h.sealed.headerHash });
+  const latest = () =>
+    fileStore<{ id: string; revision: number; purchaseId: string; ids: string[] }>(
+      join(h.ws.dir, 'latest-purchase'),
+    ).load(JSON.stringify(['near:mainnet', contract]));
+  h.buy.mockImplementation(async (o, sdk) => {
+    await o.beforeSave?.(record);
+    // Already the latest purchase, and listed for this contract, when the record is written and
+    // the payment follows.
+    expect(await latest()).toMatchObject({ purchaseId: record.id, ids: [record.id] });
+    return saving(record)({ ...o, beforeSave: async () => {} }, sdk);
+  });
+  try {
+    await h.run(h.input());
+    for (const target of [undefined, record.id.slice(0, 12)])
+      expect(await h.run({ command: 'status', ...(target ? { target } : {}) })).toMatchObject({
+        purchaseId: record.id,
+        state: 'accepted',
+      });
+  } finally {
+    await h.ws.remove();
+  }
+});
+
+/** A shop whose catalog lists the harness file as its second row. */
+function shop(sealed: Awaited<ReturnType<typeof sealedFile>>) {
+  const manifest = {
+    version: 1,
+    name: 'Shop',
+    shopUrl: 'https://shop.test/demo',
+    network: 'near:mainnet',
+    contract,
+    relayer: 'https://relay.test',
+    host: 'https://files.test',
+    catalog: {
+      url: 'https://files.test/files.json',
+      format: 'annon-catalog-array-v1',
+      search: 'client',
+    },
+  };
+  const entry = (title: string, target: string, createdAt: number) => ({
+    name: 'file',
+    fileId,
+    title,
+    description: '',
+    url: target,
+    header: headerUrl,
+    byteSize: 1,
+    plaintextSize: 1,
+    createdAt,
+    expiresAt: null,
+    termsHash: sealed.info.termsHash,
+    terms: sealed.terms,
+    salesStopped: false,
+    takenDown: false,
+  });
+  return (target: string) =>
+    target === 'https://shop.test/.well-known/annon-shop.json'
+      ? Response.json(manifest)
+      : target === manifest.catalog.url
+        ? Response.json([entry('Other', 'https://files.test/other', 2), entry('Mine', url, 1)])
+        : undefined;
+}
+const shops = {
+  shops: [{ id: 'demo', manifest: 'https://shop.test/.well-known/annon-shop.json' }],
+};
+
+it('buy takes a catalog row number, names the row and buys its URL with every usual check', async () => {
+  let hosts: ReturnType<typeof shop> | undefined;
+  const h = await harness({ config: shops, hosts: (target) => hosts?.(target) });
+  hosts = shop(h.sealed);
+  try {
+    expect(await h.run({ command: 'buy', target: '2', shop: 'demo' })).toMatchObject({
+      fileId,
+      state: 'submitted',
+    });
+    expect(h.notify).toHaveBeenCalledWith(`Row 2: Mine (${url})`);
+    expect(h.buy.mock.calls[0]?.[0]).toMatchObject({ fileId, url });
+    expect(h.prompt).toHaveBeenCalledWith('Type yes to pay: ');
+    // --search numbers the rows of the filtered listing, as catalog --search prints them.
+    await expect(
+      h.run({ command: 'buy', target: '1', shop: 'demo', search: 'mine', force: true }),
+    ).resolves.toMatchObject({ fileId });
+    const missing = await h.run({ command: 'buy', target: '3', shop: 'demo' }).catch((e) => e);
+    expect(publicError(missing)).toEqual({
+      code: 'invalid_arguments',
+      message: 'The catalog has no row 3. Run annon catalog to list the rows.',
+      exitCode: 2,
+    });
+    expect(h.buy).toHaveBeenCalledTimes(2);
+  } finally {
+    await h.ws.remove();
+  }
+});
+
+it('an agent can buy neither a row number nor with --open', async () => {
+  let hosts: ReturnType<typeof shop> | undefined;
+  const h = await harness({
+    agent: true,
+    config: { ...shops, dailyBudget: '1' },
+    hosts: (target) => hosts?.(target),
+  });
+  hosts = shop(h.sealed);
+  try {
+    const row = await h.run({ command: 'buy', target: '2', shop: 'demo' }).catch((e) => e);
+    expect(publicError(row)).toMatchObject({ code: 'resource_not_allowed', exitCode: 2 });
+    const open = await h.run(h.input({ open: join(h.ws.dir, 'out.bin') })).catch((e) => e);
+    expect(publicError(open)).toMatchObject({ code: 'agent_policy', exitCode: 2 });
+    expect(h.buy).not.toHaveBeenCalled();
+    expect(h.fetcher.mock.calls.some(([target]) => String(target).endsWith('files.json'))).toBe(
+      false,
+    );
+  } finally {
+    await h.ws.remove();
+  }
+});

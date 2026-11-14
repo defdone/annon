@@ -40,6 +40,8 @@ npm i @defdone/annon@alpha        # the SDK
 npm i -g @defdone/annon@alpha     # the annon CLI
 ```
 
+If npm reports no matching version right after a release, retry with `--prefer-online`.
+
 | Entry point | Use |
 | --- | --- |
 | `@defdone/annon` | SDK core: `Annon`, wallets, identities, terms, 1Click, encrypted stores and backups, storage funding, sponsorship checks and types, size/retry limits, error classes |
@@ -63,7 +65,10 @@ Build with `pnpm build`. In a checkout, run `node packages/annon/dist/node/main.
 
 The shortest path is the CLI: [docs/quickstart.md](https://github.com/defdone/annon/blob/master/docs/quickstart.md)
 buys, opens and recovers a demo file in a few commands, and [CLI.md](CLI.md) covers configuration,
-encrypted purchase backups and every command.
+encrypted purchase backups and every command. Run `annon` with no arguments for an interactive
+session: `catalog`, `buy 2`, and the file is saved. `annon buy <url> --open <file>` does the same in
+one command. In a terminal the CLI prints short text; `--json`, pipes and agent mode keep the JSON
+envelope.
 
 In code, an `Annon` instance needs a deployment, a durable record store, a persisted backup secret, a
 place to write encrypted backups, and a transport for contract calls. In Node, with a NEAR account

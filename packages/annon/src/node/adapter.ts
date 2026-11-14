@@ -3,6 +3,7 @@ import { createCoreAdapter, type Dependencies } from './core-adapter.js';
 // core-adapter.js loads first: it imports the SDK modules in the order this file did, so they initialize as before.
 
 import { identityJson, parseIdentity } from '../settle-near/identity.js';
+import { isRow } from './adapter-checks.js';
 import { agentPolicy, configPath, initAgent, savePublicConfig } from './agent.js';
 import { initBackupSecret, initPolicy } from './backup-secret-init.js';
 import { type BrowserSession, startBrowserSession } from './browser-login.js';
@@ -11,7 +12,7 @@ import { loadConfig } from './config.js';
 import { AdapterError } from './errors.js';
 import { osKeychain } from './keychain.js';
 import { confinePaths } from './paths.js';
-import { discoverShops, isDiscovery } from './shops.js';
+import { catalogRow, discoverShops, isDiscovery } from './shops.js';
 import { assertSignerInput, configuredWallet } from './signer-wallet.js';
 import { type SigningResult, signingRequest, verifySigningResult } from './signing.js';
 import { type Environment, identity } from './wallets.js';
@@ -40,6 +41,9 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
         : initBackupSecret(o, env, d.notify);
     const c = await loadConfig(o, env, o.command === 'login', d.agent);
     if (agent || c.agent) o = await confinePaths(o, c.workDir as string);
+    // Agents buy allowed resource URLs only; a row number stays a refused target for them.
+    else if (o.command === 'buy' && isRow(o.target))
+      o = await catalogRow(o, env, d.notify, d.fetch);
     if (c.signer) {
       assertSignerInput(o);
       if (o.recovery && identityJson(identity(o.recovery)) !== identityJson(c.signer.identity))

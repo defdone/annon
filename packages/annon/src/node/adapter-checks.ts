@@ -12,5 +12,7 @@ const backupPath = (c: Config, id: string) => {
   if (!/^(recovery:|sell:|seller-key:)?0x[0-9a-f]{64}(:revision:[0-9]+)?$/.test(id)) throw usage();
   return join(c.stateDir, 'backups', `${id.replaceAll(':', '-')}.json`);
 };
+/** A catalog row number in place of a URL: `buy 2 --shop demo`. */
+const isRow = (target: string | undefined) => /^[1-9][0-9]{0,4}$/.test(target ?? '');
 
-export { backupPath, fail, isId };
+export { backupPath, fail, isId, isRow };
