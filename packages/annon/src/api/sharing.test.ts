@@ -22,6 +22,259 @@ const seller = {
   })),
 };
 const now = 1800000000;
+
+it.each([
+  ['deposit', 'done'],
+  ['fund', 'done'],
+  ['deposit', 'refused'],
+  ['fund', 'refused'],
+] as const)(
+  'validates untrusted %s hashes before accepting a current %s outcome',
+  async (step, finalState) => {
+    const h = await staged('near');
+    await h.engine.next(h.q.fileId, h.input);
+    if (step === 'fund') {
+      await h.engine.next(h.q.fileId, h.input);
+      await h.engine.next(h.q.fileId, h.input);
+    }
+    h.nearCall.mockImplementationOnce(async () => {
+      const checkpoint = must((await h.engine.load(h.q.fileId)).hosting.pending);
+      expect(checkpoint.validUntil).toBe(now + 172800);
+      expect(checkpoint.operation?.deposit).toBe(
+        String(step === 'deposit' ? h.input.listingStorage : h.input.storageBudget),
+      );
+      throw new AnnonError('transport');
+    });
+    await expect(h.engine.next(h.q.fileId, h.input)).rejects.toMatchObject({ code: 'transport' });
+    const pending = must((await h.engine.load(h.q.fileId)).hosting.pending);
+    expect(pending.validUntil).toBe(now + 172800);
+    const operation = must(pending.operation);
+    const sends = h.nearCall.mock.calls.length;
+    const candidate = {
+      transaction: {
+        hash: 'synthetic-candidate',
+        signer_id: h.input.seller.identity.id,
+        receiver_id: fixture.contract,
+        actions: [
+          {
+            FunctionCall: {
+              method_name: operation.method,
+              args: Buffer.from(JSON.stringify(operation.args)).toString('base64'),
+              deposit: operation.deposit,
+            },
+          },
+        ],
+      },
+      transaction_outcome: { block_hash: 'synthetic-inclusion-block' },
+      status: { SuccessValue: '' },
+      receipts_outcome: [],
+    };
+    const rpcFetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (String(_url) !== h.options.nearRpc) return h.fetcher(_url as string, init);
+      const request = JSON.parse(String(init?.body));
+      if (request.method === 'EXPERIMENTAL_tx_status') {
+        expect(request.params.wait_until).toBe('FINAL');
+        return Response.json({ id: request.id, result: evidence });
+      }
+      expect(request.method).toBe('block');
+      expect(request.params).toEqual({ block_id: 'synthetic-inclusion-block' });
+      return Response.json({ id: request.id, result: block });
+    });
+    let evidence: unknown = candidate;
+    let block: unknown = { header: { timestamp_nanosec: String(BigInt(now + 1) * 1000000000n) } };
+    vi.stubGlobal('fetch', rpcFetch);
+    for (const probe of [
+      'one-yocto',
+      'one-yocto-refused',
+      'old',
+      'old-refused',
+      'unreadable',
+      'missing-block',
+      'wrong-method',
+      'wrong-args',
+      'wrong-signer',
+      'wrong-receiver',
+    ] as const) {
+      const changed = structuredClone(candidate);
+      block = { header: { timestamp_nanosec: String(BigInt(now + 1) * 1000000000n) } };
+      if (probe === 'one-yocto' || probe === 'one-yocto-refused')
+        must(changed.transaction.actions[0]).FunctionCall.deposit = '1';
+      if (probe === 'old' || probe === 'old-refused')
+        block = { header: { timestamp_nanosec: String(BigInt(now) * 1000000000n - 1n) } };
+      if (probe === 'old-refused' || probe === 'one-yocto-refused')
+        Object.assign(changed, { status: { Failure: { ActionError: 'refused' } } });
+      if (probe === 'missing-block') block = { header: {} };
+      if (probe === 'wrong-method')
+        must(changed.transaction.actions[0]).FunctionCall.method_name = 'stop_sales';
+      if (probe === 'wrong-args')
+        must(changed.transaction.actions[0]).FunctionCall.args =
+          Buffer.from('{}').toString('base64');
+      if (probe === 'wrong-signer') changed.transaction.signer_id = 'other.synthetic.near';
+      if (probe === 'wrong-receiver') changed.transaction.receiver_id = 'other.synthetic.near';
+      evidence = probe === 'unreadable' ? null : changed;
+      await expect(
+        h.engine.next(h.q.fileId, { ...h.input, txHash: candidate.transaction.hash }),
+        probe,
+      ).rejects.toMatchObject({ code: 'transaction_uncertain' });
+      const saved = await h.engine.load(h.q.fileId);
+      expect(saved.hosting.pending, probe).toEqual(pending);
+      expect(saved.hosting.completed, probe).not.toContain(step);
+      // A later check cannot send again while the original call can still land.
+      await expect(h.engine.next(h.q.fileId, h.input)).rejects.toMatchObject({
+        code: 'transaction_uncertain',
+      });
+      expect(h.nearCall, probe).toHaveBeenCalledTimes(sends);
+    }
+    evidence = candidate;
+    if (finalState === 'refused')
+      Object.assign(candidate, { status: { Failure: { ActionError: 'refused' } } });
+    block = { header: { timestamp_nanosec: String(BigInt(now + 1) * 1000000000n) } };
+    await h.engine.next(h.q.fileId, { ...h.input, txHash: candidate.transaction.hash });
+    expect((await h.engine.load(h.q.fileId)).hosting.completed.includes(step)).toBe(
+      finalState === 'done',
+    );
+    expect((await h.engine.load(h.q.fileId)).hosting.pending).toBeNull();
+    expect(h.nearCall).toHaveBeenCalledTimes(sends);
+    if (finalState === 'refused') {
+      await h.engine.next(h.q.fileId, h.input);
+      expect(h.nearCall).toHaveBeenCalledTimes(sends + 1);
+    }
+  },
+);
+
+type Staged = Awaited<ReturnType<typeof staged>>;
+function nearEvidence(h: Staged) {
+  const state = {
+    tx: null as unknown,
+    ts: '0' as unknown,
+    calls: [] as string[],
+  };
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url) !== h.options.nearRpc) return h.fetcher(url as string, init);
+      const request = JSON.parse(String(init?.body));
+      state.calls.push(request.method);
+      if (request.method === 'EXPERIMENTAL_tx_status')
+        return Response.json({ id: request.id, result: state.tx });
+      return Response.json({ id: request.id, result: { header: { timestamp_nanosec: state.ts } } });
+    }),
+  );
+  return state;
+}
+const nearTransaction = (
+  h: Staged,
+  hash: string,
+  op: { method: string; args: object; deposit: string },
+  refused = false,
+) => ({
+  transaction: {
+    hash,
+    signer_id: h.input.seller.identity.id,
+    receiver_id: fixture.contract,
+    actions: [
+      {
+        FunctionCall: {
+          method_name: op.method,
+          args: Buffer.from(JSON.stringify(op.args)).toString('base64'),
+          deposit: op.deposit,
+        },
+      },
+    ],
+  },
+  transaction_outcome: { block_hash: 'synthetic-inclusion-block' },
+  status: refused ? { Failure: { ActionError: 'refused' } } : { SuccessValue: '' },
+  receipts_outcome: [],
+});
+const ns = (s: number, d = 0n) => String(BigInt(s) * 1000000000n + d);
+
+async function pendingNearStep(step: 'deposit' | 'fund' | 'publish') {
+  const h = await staged('near');
+  for (let i = 0; i < must(h.job.hosting).steps.indexOf(step); i++)
+    await h.engine.next(h.q.fileId, h.input);
+  h.nearCall.mockRejectedValueOnce(new AnnonError('transport'));
+  await expect(h.engine.next(h.q.fileId, h.input)).rejects.toMatchObject({ code: 'transport' });
+  const pending = must((await h.engine.load(h.q.fileId)).hosting.pending);
+  return { h, pending, op: must(pending.operation) };
+}
+
+it('checks the trusted deposit hash against the exact deposit without reading an inclusion block', async () => {
+  const h = await staged('near');
+  await h.engine.next(h.q.fileId, h.input);
+  h.nearCall.mockRejectedValueOnce(new TransactionUncertain('saved'));
+  await expect(h.engine.next(h.q.fileId, h.input)).rejects.toMatchObject({
+    code: 'transaction_uncertain',
+  });
+  const pending = must((await h.engine.load(h.q.fileId)).hosting.pending);
+  const op = must(pending.operation);
+  expect(pending.txHash).toBe('saved');
+  expect(op.method).toBe('storage_deposit');
+  const c = nearEvidence(h);
+  c.tx = nearTransaction(h, 'saved', { ...op, deposit: '1' });
+  await expect(h.engine.next(h.q.fileId, h.input)).rejects.toMatchObject({ code: 'transport' });
+  expect((await h.engine.load(h.q.fileId)).hosting.pending).toEqual(pending);
+  c.tx = nearTransaction(h, 'saved', { ...op, deposit: '1' }, true);
+  await expect(h.engine.next(h.q.fileId, h.input)).rejects.toMatchObject({ code: 'transport' });
+  expect((await h.engine.load(h.q.fileId)).hosting.pending).toEqual(pending);
+  // A supplied candidate cannot override the trusted saved hash.
+  c.tx = nearTransaction(h, 'other', op);
+  await expect(h.engine.next(h.q.fileId, { ...h.input, txHash: 'other' })).rejects.toMatchObject({
+    code: 'transport',
+  });
+  expect((await h.engine.load(h.q.fileId)).hosting.pending).toEqual(pending);
+  c.tx = nearTransaction(h, 'saved', op);
+  c.ts = ns(1); // Trusted hashes have no inclusion time bound.
+  c.calls.length = 0;
+  await h.engine.next(h.q.fileId, h.input);
+  expect(c.calls).toEqual(['EXPERIMENTAL_tx_status']);
+  expect((await h.engine.load(h.q.fileId)).hosting.completed).toContain('deposit');
+});
+
+it.each([
+  'old-done',
+  'old-refused',
+  'one-yocto-refused',
+  'current-refused',
+  'current-done',
+] as const)('persists the publish checkpoint and validates a %s candidate', async (probe) => {
+  const { h, pending, op } = await pendingNearStep('publish');
+  expect(op.method).toBe('publish_header');
+  expect(pending.startedAt).toBe(now);
+  expect(pending.validUntil).toBeUndefined();
+  const c = nearEvidence(h);
+  c.tx = nearTransaction(
+    h,
+    'cand',
+    probe === 'one-yocto-refused' ? { ...op, deposit: '1' } : op,
+    probe.endsWith('refused'),
+  );
+  c.ts = probe.startsWith('old') ? ns(now, -1n) : ns(now + 3);
+  const run = h.engine.next(h.q.fileId, { ...h.input, txHash: 'cand' });
+  if (probe === 'current-refused') {
+    await run;
+    expect((await h.engine.load(h.q.fileId)).hosting.pending).toBeNull();
+  } else if (probe === 'current-done') {
+    await run;
+    expect((await h.engine.load(h.q.fileId)).published).toBeTruthy();
+  } else {
+    await expect(run).rejects.toMatchObject({ code: 'transaction_uncertain' });
+    expect((await h.engine.load(h.q.fileId)).hosting.pending).toEqual(pending);
+  }
+});
+
+it('rejects invalid persisted operation checkpoints', async () => {
+  const { h, pending } = await pendingNearStep('publish');
+  const cur = await h.engine.load(h.q.fileId);
+  for (const bad of [-1, 1.5, '5'])
+    await expect(
+      (h.engine as never as { save: (a: unknown, b: unknown) => Promise<unknown> }).save(cur, {
+        ...cur,
+        revision: cur.revision + 1,
+        hosting: { ...cur.hosting, pending: { ...pending, startedAt: bad } },
+      }),
+    ).rejects.toThrow('Invalid operation checkpoint');
+});
+
 function harness() {
   const raw = memoryStore<EncryptedRecord>();
   const backups: string[] = [];
@@ -1758,7 +2011,7 @@ it.each(['done', 'pending', 'mismatch'] as const)(
     if (state === 'done') await resumed;
     else
       await expect(resumed).rejects.toMatchObject({
-        code: state === 'pending' ? 'transaction_uncertain' : 'invalid_response',
+        code: 'transaction_uncertain',
       });
     expect(check).toHaveBeenCalledWith(
       h.options.nearRpc,
@@ -1766,15 +2019,30 @@ it.each(['done', 'pending', 'mismatch'] as const)(
       h.input.seller.identity.id,
       fixture.contract,
       'FINAL',
-      { method: 'storage_deposit', args: { account_id: h.input.seller.identity.id } },
+      {
+        method: 'storage_deposit',
+        args: { account_id: h.input.seller.identity.id },
+        deposit: String(h.input.listingStorage),
+        notBefore: now,
+      },
     );
     const saved = await h.engine.load(h.q.fileId);
     expect(saved.hosting.completed.includes('deposit')).toBe(state === 'done');
-    if (state !== 'done')
-      expect(saved.hosting.pending?.txHash).toBe(
-        state === 'pending' ? 'synthetic-redirect' : undefined,
-      );
+    if (state !== 'done') expect(saved.hosting.pending?.txHash).toBeUndefined();
     expect(h.nearCall).toHaveBeenCalledTimes(1);
+  },
+);
+it.each(['near', 'evm'] as const)(
+  'rejects a hash supplied without an eligible pending call for a %s seller',
+  async (kind) => {
+    const h = await staged(kind);
+    await expect(
+      h.engine.next(h.q.fileId, { ...h.input, txHash: 'synthetic-candidate' }),
+    ).rejects.toMatchObject({ code: 'invalid_arguments' });
+    expect((await h.engine.load(h.q.fileId)).hosting.pending).toBeNull();
+    expect(h.nearCall).not.toHaveBeenCalled();
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.fetcher).not.toHaveBeenCalled();
   },
 );
 it.each([undefined, '-1', '01', (2n ** 128n).toString(), 'bad'])(

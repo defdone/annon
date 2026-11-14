@@ -407,6 +407,8 @@ export interface ExpectedCall {
   method?: string;
   /** The call's JSON arguments, compared as values (key order aside). */
   args?: unknown;
+  /** The exact attached deposit in yoctoNEAR, when the caller requires it. */
+  deposit?: string;
 }
 
 const canonical = (v: unknown): string =>
@@ -421,8 +423,8 @@ const canonical = (v: unknown): string =>
 
 /**
  * Reads an `EXPERIMENTAL_tx_status` / `tx` result. With `expect`, the answer must be about that
- * transaction and, when given, that method with those arguments: a relayer can't hand back an
- * older or another call. Reads exactly one function call; register may include a positive
+ * transaction and, when given, that method with those arguments and deposit. Reads exactly
+ * one function call; register may include a positive
  * caller-funded file_budget when the expected arguments omit it.
  */
 export function readOutcome(result: unknown, contractId: string, expect?: ExpectedCall): Outcome {
@@ -431,7 +433,7 @@ export function readOutcome(result: unknown, contractId: string, expect?: Expect
       hash?: unknown;
       signer_id?: unknown;
       receiver_id?: unknown;
-      actions?: { FunctionCall?: { method_name?: unknown; args?: unknown } }[];
+      actions?: { FunctionCall?: { method_name?: unknown; args?: unknown; deposit?: unknown } }[];
     };
     status?: Status;
     receipts_outcome?: { outcome?: { executor_id?: unknown; logs?: unknown; status?: Status } }[];
@@ -450,6 +452,8 @@ export function readOutcome(result: unknown, contractId: string, expect?: Expect
   if (expect?.method !== undefined && method !== expect.method) {
     return malformed('an outcome of another method');
   }
+  if (expect?.deposit !== undefined && actions[0]?.FunctionCall?.deposit !== expect.deposit)
+    return malformed('an outcome with another deposit');
   if (expect?.args !== undefined) {
     let sent: unknown;
     try {
@@ -537,14 +541,38 @@ export async function txOutcome(
   signer: string,
   contractId: string,
   wait: 'EXECUTED_OPTIMISTIC' | 'FINAL' = 'FINAL',
-  call?: { method: string; args: unknown },
+  call?: {
+    method: string;
+    args: unknown;
+    deposit?: string;
+    /** Untrusted candidates must have been included at or after this Unix time in seconds. */
+    notBefore?: number;
+  },
 ): Promise<Outcome> {
   const r = await rpc(url, 'EXPERIMENTAL_tx_status', {
     tx_hash: txHash,
     sender_account_id: signer,
     wait_until: wait,
   });
-  return readOutcome(r, contractId, { txHash, signer, ...call });
+  const outcome = readOutcome(r, contractId, { txHash, signer, ...call });
+  if (call?.notBefore !== undefined) {
+    const blockHash = (r.transaction_outcome as { block_hash?: unknown } | undefined)?.block_hash;
+    if (
+      !Number.isSafeInteger(call.notBefore) ||
+      call.notBefore < 0 ||
+      typeof blockHash !== 'string' ||
+      !blockHash
+    )
+      return malformed('missing transaction inclusion checkpoint');
+    const block = await rpc(url, 'block', { block_id: blockHash });
+    const timestamp = (block.header as { timestamp_nanosec?: unknown } | undefined)
+      ?.timestamp_nanosec;
+    if (typeof timestamp !== 'string' || !/^(0|[1-9][0-9]*)$/.test(timestamp))
+      return malformed('transaction inclusion time');
+    if (BigInt(timestamp) < BigInt(call.notBefore) * 1_000_000_000n)
+      return malformed('a transaction before the current attempt');
+  }
+  return outcome;
 }
 
 /** The current access key at finality, never an optimistic or wallet-supplied permission. */

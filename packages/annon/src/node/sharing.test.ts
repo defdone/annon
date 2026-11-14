@@ -94,6 +94,7 @@ it.each([undefined, 'other', 'https://other.example/.well-known/annon-shop.json'
         }),
       );
       const share = vi.fn(async (options) => {
+        expect(options).not.toHaveProperty('txHash');
         expect(options.hosting.origin).toBe(profile.host);
         expect(options.data.size).toBe(4);
         expect(await new Response(options.data.read()).text()).toBe('file');

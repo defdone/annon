@@ -121,6 +121,7 @@ export interface HostedCheckpoint {
     snapshot?: string;
     storageAccountExisted?: boolean;
     validUntil?: number;
+    startedAt?: number;
     operation?: { method: string; args: object; deposit: string };
     auth?: import('../settle-near/identity.js').Authorization;
   } | null;
@@ -143,6 +144,7 @@ const assets = (t: Terms) => ({
   ...(t.base ? { baseUsdc: t.base.usdc } : {}),
 });
 const salt = `0x${'00'.repeat(32)}`;
+const nearValiditySeconds = 172800;
 export function shareSteps(seller: Identity): ShareStep[] {
   return seller.kind === 'near'
     ? ['stage', 'deposit', 'register', 'fund', 'publish']
@@ -210,6 +212,11 @@ export function validateHostedRecord(job: SellRecord): void {
     )
       throw new Error('Invalid funding snapshot.');
   }
+  if (
+    h.pending?.startedAt !== undefined &&
+    (!Number.isSafeInteger(h.pending.startedAt) || h.pending.startedAt < 0)
+  )
+    throw new Error('Invalid operation checkpoint.');
   if (
     h.lease !== null &&
     (!h.lease || typeof h.lease.owner !== 'string' || !Number.isSafeInteger(h.lease.until))
@@ -763,16 +770,37 @@ export class HostedSelling {
     };
     const uncertain = (retryAfterSeconds = 30) =>
       Object.assign(new AnnonError('transaction_uncertain'), { retryAfterSeconds });
-    const checkedOutcome = async (operation: { method: string; args: object }, txHash: string) => {
-      const outcome = await effect(() =>
-        txOutcome(this.o.nearRpc, txHash, job.terms.seller.id, this.o.contractId, 'FINAL', {
-          method: operation.method,
-          args: operation.args,
-        }),
-      );
-      if (input.txHash && !job.hosting.pending?.txHash)
-        await update({}, { pending: { ...present(job.hosting.pending), txHash } });
-      return outcome;
+    const checkedOutcome = async (
+      operation: { method: string; args: object; deposit: string },
+      txHash: string,
+    ) => {
+      const pending = present(job.hosting.pending);
+      const candidate = !pending.txHash;
+      // Funding already persists its attempt time through the wallet validity bound.
+      const notBefore =
+        pending.validUntil === undefined
+          ? pending.startedAt
+          : pending.validUntil - nearValiditySeconds;
+      if (candidate && notBefore === undefined) throw uncertain();
+      return effect(async () => {
+        try {
+          return await txOutcome(
+            this.o.nearRpc,
+            txHash,
+            job.terms.seller.id,
+            this.o.contractId,
+            'FINAL',
+            {
+              ...operation,
+              ...(candidate ? { notBefore: present(notBefore) } : {}),
+            },
+          );
+        } catch (error) {
+          // Invalid candidate evidence says nothing about the outstanding wallet call.
+          if (candidate) throw uncertain();
+          throw error;
+        }
+      });
     };
     try {
       let h = job.hosting;
@@ -792,6 +820,15 @@ export class HostedSelling {
         if (job.hosting.completed.includes(step) || job.published) return job;
         h = job.hosting;
       }
+      if (
+        input.txHash !== undefined &&
+        (typeof input.txHash !== 'string' ||
+          !input.txHash ||
+          job.terms.seller.kind !== 'near' ||
+          !h.pending?.operation ||
+          !['deposit', 'fund', 'publish'].includes(step))
+      )
+        throw new AnnonError('invalid_arguments');
       // Unsaved signatures cannot have reached the host or the chain.
       if (
         h.pending &&
@@ -933,7 +970,7 @@ export class HostedSelling {
       freshAttempt = true;
       const prepared = await this.prepared(job, input);
       await fence();
-      await update({}, { pending: { step, token: crypto.randomUUID() } });
+      await update({}, { pending: { step, token: crypto.randomUUID(), startedAt: this.now() } });
       if (!journal) {
         const claim = { ...job, revision: 0, hosting: { ...job.hosting, lease: null } };
         await fence();
@@ -980,7 +1017,7 @@ export class HostedSelling {
               operation,
               snapshot: (snapshot ?? 0n).toString(),
               ...(step === 'deposit' ? { storageAccountExisted: snapshot !== null } : {}),
-              validUntil: this.now() + 172800,
+              validUntil: this.now() + nearValiditySeconds,
             },
           },
         );

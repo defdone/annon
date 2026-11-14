@@ -81,8 +81,13 @@ export interface SaleHandle {
   attachWallet(connection: SellerConnection): Promise<void>;
   attachFile(file: Blob & { readonly name: string }): Promise<void>;
   unlock(secret: string): Promise<void>;
+  /**
+   * A rejected txHash must not be passed again. Call next() later without txHash
+   * to reconcile from final contract state.
+   */
   next(options?: {
     signal?: AbortSignal;
+    /** Untrusted NEAR wallet return candidate, checked against the pending call and attempt. */
     txHash?: string;
     onProgress?: (progress: SellProgress) => void;
   }): Promise<SaleView>;

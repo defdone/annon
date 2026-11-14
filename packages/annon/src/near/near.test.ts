@@ -122,6 +122,30 @@ describe('readOutcome', () => {
     });
   });
 
+  it('checks the exact attached deposit only when requested, including refusals', () => {
+    const expected = {
+      txHash: 'TxHash',
+      signer: 'relayer.annon.defdone.near',
+      method: 'storage_deposit',
+      args: { account_id: 'seller.synthetic.near' },
+    };
+    for (const status of [ok, panic('refused')]) {
+      const sent = tx('storage_deposit', status, []);
+      const call = { method_name: expected.method, args: b64(expected.args), deposit: '1000' };
+      sent.transaction.actions[0] = { FunctionCall: call };
+      const state = status === ok ? 'done' : 'refused';
+      expect(readOutcome(sent, CONTRACT, expected).state).toBe(state);
+      expect(readOutcome(sent, CONTRACT, { ...expected, deposit: '1000' }).state).toBe(state);
+      for (const deposit of ['1', '0', '01000', 1000, undefined]) {
+        Object.assign(call, { deposit });
+        expect(() => readOutcome(sent, CONTRACT, { ...expected, deposit: '1000' })).toThrow(
+          /another deposit/,
+        );
+        expect(readOutcome(sent, CONTRACT, expected).state).toBe(state);
+      }
+    }
+  });
+
   it('keeps events only from successful receipts of the trusted contract', () => {
     const o = readOutcome(
       tx('unlock', { SuccessValue: b64({ error: 'x' }) }, [
@@ -255,6 +279,49 @@ describe('views', () => {
     );
     expect(await codeOf(view('https://rpc', CONTRACT, 'get_file', {}))).toBe('transport');
   });
+
+  it.each(['done', 'refused'] as const)(
+    'binds a candidate %s outcome to the transaction inclusion block at the checkpoint',
+    async (state) => {
+      const sent = {
+        ...tx('storage_deposit', state === 'done' ? ok : panic('refused'), []),
+        transaction_outcome: { block_hash: 'included-block' },
+      };
+      const functionCall = { method_name: 'storage_deposit', args: b64({}), deposit: '1000' };
+      sent.transaction.actions[0] = { FunctionCall: functionCall };
+      let timestamp: unknown = '10000000000';
+      const fetcher = vi.fn(async (_url: unknown, options?: RequestInit) => {
+        const request = JSON.parse(String(options?.body));
+        if (request.method === 'EXPERIMENTAL_tx_status')
+          return Response.json({ id: request.id, result: sent });
+        expect(request.method).toBe('block');
+        expect(request.params).toEqual({ block_id: 'included-block' });
+        return Response.json({
+          id: request.id,
+          result: { header: { timestamp_nanosec: timestamp } },
+        });
+      });
+      vi.stubGlobal('fetch', fetcher);
+      const read = (notBefore?: number) =>
+        txOutcome('https://rpc', 'TxHash', 'relayer.annon.defdone.near', CONTRACT, 'FINAL', {
+          method: 'storage_deposit',
+          args: {},
+          deposit: '1000',
+          ...(notBefore === undefined ? {} : { notBefore }),
+        });
+      expect((await read(10)).state).toBe(state);
+      timestamp = '9999999999';
+      await expect(read(10)).rejects.toMatchObject({ code: 'transport' });
+      for (const malformed of [undefined, 'bad', '-1', '01', 10000000000]) {
+        timestamp = malformed;
+        await expect(read(10)).rejects.toMatchObject({ code: 'transport' });
+      }
+      // Existing callers need no inclusion block read.
+      fetcher.mockClear();
+      expect((await read()).state).toBe(state);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 describe('draft-3 authoritative texts', () => {
