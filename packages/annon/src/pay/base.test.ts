@@ -188,6 +188,13 @@ async function respond(
       return reply(w.code);
     case 'eth_getLogs': {
       const q = p0 as { address: string; fromBlock: string; toBlock: string; topics: unknown[] };
+      // QuickNode's limit, and its exact answer to a wider range.
+      if (Number(q.toBlock) - Number(q.fromBlock) + 1 > 10_000) {
+        return {
+          id: body.id,
+          error: { code: -32614, message: 'eth_getLogs is limited to a 10,000 range' },
+        };
+      }
       const match = (l: RpcLog) =>
         l.address.toLowerCase() === q.address.toLowerCase() &&
         Number(l.blockNumber) >= Number(q.fromBlock) &&
@@ -718,6 +725,140 @@ describe('status', () => {
       w.getLogs = [l];
       expect(await codeOf(status(BASE, job()))).toBe('transport');
     }
+  });
+
+  describe('a search wider than one eth_getLogs range', () => {
+    // validBefore 10,000 s after signing: the window is [SIGNED, SIGNED + 50,000], six chunks.
+    const LAST = SIGNED + 50_000;
+    const long = () => job({ validBefore: String(NOW + 10_000) });
+    const queries = () =>
+      vi
+        .mocked(fetch)
+        .mock.calls.map(([, i]) => JSON.parse(String(i?.body)))
+        .filter((b) => b.method === 'eth_getLogs')
+        .map((b) => [Number(b.params[0].fromBlock), Number(b.params[0].toBlock)]);
+    /** The chunks of `[from, to]` in search order, each at most 10,000 blocks. */
+    const chunks = (from: number, to: number, count: number) =>
+      Array.from({ length: count }, (_, i) => [
+        from + i * 10_000,
+        Math.min(to, from + i * 10_000 + 9_999),
+      ]);
+    const paidAt = async (n: number) => {
+      w.getLogs = [atBlock(used(ANNON), n)];
+      w.receipt = receipt(x402Receipt().map((l) => atBlock(l, n)));
+      return await status(BASE, long());
+    };
+    beforeEach(() => {
+      w.head = at(SIGNED + 100_000);
+    });
+
+    it('finds a payment in a later chunk, reading chunks earliest first and stopping there', async () => {
+      expect(await paidAt(SIGNED + 35_000)).toMatchObject({ state: 'paid', txHash: TX });
+      expect(queries()).toEqual(chunks(SIGNED, LAST, 4));
+    });
+
+    it('finds a payment in the first chunk with one query', async () => {
+      expect(await paidAt(SIGNED + 20)).toMatchObject({ state: 'paid', txHash: TX });
+      expect(queries()).toEqual(chunks(SIGNED, LAST, 1));
+    });
+
+    it('finds a payment on either side of a chunk boundary', async () => {
+      expect(await paidAt(SIGNED + 9_999)).toMatchObject({ state: 'paid' });
+      expect(queries()).toEqual(chunks(SIGNED, LAST, 1));
+      vi.mocked(fetch).mockClear();
+      expect(await paidAt(SIGNED + 10_000)).toMatchObject({ state: 'paid' });
+      expect(queries()).toEqual(chunks(SIGNED, LAST, 2));
+      vi.mocked(fetch).mockClear();
+      expect(await paidAt(LAST)).toMatchObject({ state: 'paid' });
+      expect(queries()).toEqual(chunks(SIGNED, LAST, 6));
+    });
+
+    it('takes the earliest used log, as one query over the whole window did', async () => {
+      const other = `0x${'dd'.repeat(32)}`;
+      w.getLogs = [
+        atBlock(used(ANNON), SIGNED + 12_000),
+        { ...atBlock(used(ANNON), SIGNED + 31_000), transactionHash: other },
+      ];
+      w.receipt = receipt(x402Receipt());
+      expect(await status(BASE, long())).toMatchObject({ state: 'paid', txHash: TX });
+    });
+
+    it('finds a cancellation in a later chunk, and a used log after it still wins', async () => {
+      w.getLogs = [atBlock(canceledLog(), SIGNED + 25_000)];
+      w.finalized = at(SIGNED + 24_999);
+      expect(await status(BASE, long())).toEqual({ state: 'pending' });
+      w.finalized = at(SIGNED + 25_000);
+      expect(await status(BASE, long())).toEqual({ state: 'canceled' });
+      // Every chunk is read: a used authorization later in the window decides.
+      vi.mocked(fetch).mockClear();
+      w.getLogs = [atBlock(canceledLog(), SIGNED + 5), atBlock(used(ANNON), SIGNED + 45_000)];
+      w.receipt = receipt(x402Receipt());
+      expect(await status(BASE, long())).toMatchObject({ state: 'paid' });
+      expect(queries()).toEqual(chunks(SIGNED, LAST, 5));
+    });
+
+    it('stays pending with no log, reading the whole window and nothing past it', async () => {
+      w.finalized = at(LAST - 1);
+      expect(await status(BASE, long())).toEqual({ state: 'pending' });
+      expect(queries()).toEqual(chunks(SIGNED, LAST, 6));
+      w.finalized = at(LAST);
+      expect(await status(BASE, long())).toEqual({ state: 'expired' });
+    });
+
+    it('reads up to the head while the head is still inside the window', async () => {
+      w.head = at(SIGNED + 23_456);
+      w.finalized = at(SIGNED + 20_000);
+      expect(await status(BASE, long())).toEqual({ state: 'pending' });
+      expect(queries()).toEqual(chunks(SIGNED, SIGNED + 23_456, 3));
+    });
+
+    it('reads nothing for an empty range', async () => {
+      // A load-balanced RPC whose `latest` lags behind the block the purchase was signed at.
+      const respondAll = vi.mocked(fetch).getMockImplementation() as typeof fetch;
+      vi.mocked(fetch).mockImplementation(async (url, init) => {
+        const b = JSON.parse(String(init?.body));
+        if (b.method === 'eth_getBlockByNumber' && b.params[0] === 'latest') {
+          const l = at(SIGNED - 10);
+          const result = {
+            number: `0x${l.number.toString(16)}`,
+            timestamp: `0x${l.timestamp.toString(16)}`,
+          };
+          return { json: async () => ({ id: b.id, result }) } as Response;
+        }
+        return respondAll(url, init);
+      });
+      w.finalized = at(SIGNED - 20);
+      expect(await status(BASE, long())).toEqual({ state: 'pending' });
+      expect(queries()).toEqual([]);
+    });
+
+    it('reads no late cancellation range when the head is still inside the window', async () => {
+      w.head = at(SIGNED + 23_456);
+      w.authorizationState = true;
+      expect(await codeOf(status(BASE, long()))).toBe('transport');
+      expect(queries()).toEqual(chunks(SIGNED, SIGNED + 23_456, 3));
+    });
+
+    it('finds a late cancellation several chunks past the deadline', async () => {
+      w.getLogs = [atBlock(canceledLog(), LAST + 25_000)];
+      w.authorizationState = true;
+      w.finalized = at(LAST + 30_000);
+      expect(await status(BASE, long())).toEqual({ state: 'canceled' });
+      expect(queries()).toEqual([
+        ...chunks(SIGNED, LAST, 6),
+        ...chunks(LAST + 1, SIGNED + 100_000, 3),
+      ]);
+    });
+
+    it('refuses a log outside the chunk it was returned for, though inside the window', async () => {
+      w.honest = false;
+      w.finalized = at(SIGNED + 100_000);
+      w.getLogs = [atBlock(canceledLog(), SIGNED + 15_000)];
+      expect(await codeOf(status(BASE, long()))).toBe('transport');
+      w.getLogs = [atBlock(used(ANNON), SIGNED + 15_000)];
+      w.receipt = receipt(x402Receipt());
+      expect(await codeOf(status(BASE, long()))).toBe('transport');
+    });
   });
 });
 
