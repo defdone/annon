@@ -308,7 +308,7 @@ in the wallet.
 | Wallet | How | Signing supported |
 | --- | --- | --- |
 | EVM | Injected EIP-1193 wallet on Base | `personal_sign` for the SDK's authorization texts, `eth_signTypedData_v4` for the exact EIP-3009/x402 payload |
-| NEAR | MyNearWallet through Wallet Selector, account-only sign-in (no `contractId`, no function-call key) | NEP-413 and `signAndSendTransaction`, including the required deposit `"1"` on `ft_transfer_call` |
+| NEAR | Meteor Wallet (extension or web popup; mainnet and testnet) or HOT Wallet (mainnet only) through Wallet Selector, picked on the page; account-only sign-in (no `contractId`, no method list) | NEP-413 and `signAndSendTransaction`, including the required deposit `"1"` on `ft_transfer_call` |
 
 Browser and remote EVM split-deployment transactions and browser and remote Solana signing are not
 included; the local-key adapters remain available for those workflows.
@@ -322,7 +322,10 @@ chain on the page before approving in the wallet.
 - In open mode, a same-origin POST bootstraps the capability once into the opened page, then the
   bootstrap route closes. With `--no-open`, bootstrap is disabled and the capability exists only in
   the printed URL fragment. It is never passed to the browser launcher in argv.
-- Bundled scripts, a restrictive CSP, no framing, `no-store` and `no-referrer` are enforced.
+- Bundled scripts, a restrictive CSP, no framing, `no-store` and `no-referrer` are enforced. The page
+  connects only to itself, the Wallet Selector's NEAR RPC (`free.rpc.fastnear.com` on mainnet,
+  `test.rpc.fastnear.com` on testnet, fixed in the page and independent of your configured RPC) and
+  HOT's relay `h4n.app`, and frames only `hot-labs.org`.
 - Actions expire after two minutes and are verified once. Identical popup and opener result
   submissions return the same outcome.
 - Sessions close after the command or after five idle minutes. Active approvals keep their own
@@ -335,12 +338,19 @@ chain on the page before approving in the wallet.
 the printed port with `ssh -L PORT:127.0.0.1:PORT host` and open that exact URL locally. Keep the
 capability URL private.
 
-**NEAR redirects.** The page removes capabilities and NEAR redirect fragments from browser history
-immediately. MyNearWallet receives only a random per-action nonce as `state`. The callback posts the
-nonce and proof to its same-origin opener, where the capability stays in RAM; nonce matching and
-local signature verification are required. No capability is sent to the wallet. The callback URL is
-included in the signed NEP-413 hash, as [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md)
-specifies.
+**NEAR wallets.** MyNearWallet is retired and no longer connects to apps, so the page offers Meteor
+Wallet and HOT Wallet. HOT's Wallet Selector module sends no network with its requests, so the page
+offers it for `near:mainnet` only and refuses it, before loading it, for any other network; requests
+for chains other than `near:mainnet` and `near:testnet` are refused. Both return results to the page itself: Meteor through its extension or a
+popup on `wallet.meteorwallet.app`, HOT through its extension or the HOT widget, which the page
+frames from `hot-labs.org` (the only `frame-src` the CSP allows) and which exchanges the request
+through HOT's relay at `h4n.app`. The page removes the capability from browser history immediately,
+and no capability is sent to a wallet. NEP-413 requests carry no callback URL, so the signed hash
+covers the message, nonce and recipient, as [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md)
+specifies. Meteor's SDK creates a local key pair during sign-in and sends its public key to the
+wallet; the page never names a contract or methods. The secret stays in the localStorage of the
+session's own `127.0.0.1` origin, is never logged (the bundled SDK's key-pair log is removed) and
+is removed when the page signs out of Meteor before a new sign-in.
 
 **What is saved.** Only public identity, network and configuration go into the config file. Login
 works before you choose a contract; NEAR ownership checks use a public mainnet or testnet RPC by

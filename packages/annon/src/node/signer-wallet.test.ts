@@ -104,3 +104,64 @@ it.each(['evmKeyFile', 'nearKeyFile', 'solanaKeyFile'] as const)(
     expect(keychain.read).not.toHaveBeenCalled();
   },
 );
+
+it('browser NEAR recovery requests a NEP-413 signature without a callbackUrl, as in-page wallets sign it', async () => {
+  const { ed25519 } = await import('@noble/curves/ed25519.js');
+  const { base58, base64 } = await import('@scure/base');
+  const { nep413Hash } = await import('../near/nep413.js');
+  const secret = new Uint8Array(32).fill(5);
+  const publicKey = `ed25519:${base58.encode(ed25519.getPublicKey(secret))}`;
+  const requested: Record<string, unknown>[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (_url: string, init?: RequestInit) => {
+      const q = JSON.parse(String(init?.body));
+      return Response.json({ jsonrpc: '2.0', id: q.id, result: { permission: 'FullAccess' } });
+    }),
+  );
+  try {
+    const wallet = (await configuredWallet(
+      { mode: 'browser', identity: { kind: 'near', id: 'buyer.near' } },
+      {
+        nearRpc: 'https://fake.rpc',
+        baseRpc: '',
+        contractId: purchase.contract,
+        network: 'near:testnet',
+        stateDir: '/unused',
+      },
+      { command: 'buy' },
+      {},
+      { read: vi.fn(), create: vi.fn() },
+      async () => ({
+        url: 'http://127.0.0.1:1234/#CAPABILITY',
+        pairingCode: '123456',
+        close: async () => {},
+        async request<T>(q: { id: string; expiresAt: number }, verify: (r: T) => Promise<void>) {
+          const p = (q as unknown as { payload: Record<string, unknown> }).payload;
+          requested.push(p);
+          const hash = nep413Hash({
+            message: String(p.message),
+            recipient: String(p.recipient),
+            nonce: Uint8Array.from(p.nonce as Uint8Array),
+          });
+          const result = {
+            accountId: 'buyer.near',
+            publicKey,
+            signature: base64.encode(ed25519.sign(hash, secret)),
+          } as T;
+          await verify(result);
+          return result;
+        },
+      }),
+      () => null,
+    )) as NearWallet;
+    await wallet.proveControl?.('recover', {
+      contractId: purchase.contract,
+      nearRpc: 'https://fake.rpc',
+    });
+    expect(requested).toHaveLength(1);
+    expect(Object.keys(requested[0] ?? {}).sort()).toEqual(['message', 'nonce', 'recipient']);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

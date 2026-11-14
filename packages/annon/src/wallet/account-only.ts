@@ -1,4 +1,4 @@
-/** Never supply contractId/methodNames: MyNearWallet otherwise generates a local secret. */
+/** Never supply contractId/methodNames: a wallet would otherwise add a function-call key for them. */
 export async function signInAccountOnly(wallet: {
   signOut?: () => Promise<void>;
   signIn(params: { contractId?: string }): Promise<{ accountId: string }[]>;

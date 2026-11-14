@@ -67,7 +67,6 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
                 message: challenge,
                 recipient: c.contractId || 'annon-cli',
                 nonce: [...crypto.getRandomValues(new Uint8Array(32))],
-                callbackUrl: new URL('/callback', s.url).href,
               },
         );
         let identity: ReturnType<typeof parseIdentity> | undefined;

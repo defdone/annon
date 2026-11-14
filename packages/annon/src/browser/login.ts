@@ -1,5 +1,3 @@
-import { setupWalletSelector } from '@near-wallet-selector/core';
-import { setupMyNearWallet } from '@near-wallet-selector/my-near-wallet';
 import { Buffer } from 'buffer';
 import type { SigningRequest, SigningResult } from '../node/signing.js';
 import type { TypedData } from '../pay/eip3009.js';
@@ -11,6 +9,28 @@ const pair = document.getElementById('pair') as HTMLElement;
 const display = document.getElementById('action') as HTMLElement;
 const status = document.getElementById('status') as HTMLElement;
 const approve = document.getElementById('approve') as HTMLButtonElement;
+const nearChoice = document.getElementById('near-wallet') as HTMLSelectElement | null;
+const hotChoice = document.getElementById('near-wallet-hot') as HTMLOptionElement | null;
+type NearNetwork = 'mainnet' | 'testnet';
+/** Signing-request chains the page can bind a NEAR wallet to. Anything else is refused. */
+const NEAR_NETWORKS = new Map<string, NearNetwork>([
+  ['near:mainnet', 'mainnet'],
+  ['near:testnet', 'testnet'],
+]);
+/** The selector's only RPC per network. The page CSP allows exactly these (browser-login.ts). */
+const NEAR_RPC: Record<NearNetwork, string> = {
+  mainnet: 'https://free.rpc.fastnear.com',
+  testnet: 'https://test.rpc.fastnear.com',
+};
+/**
+ * NEAR wallets offered on this page and the networks each is bound to. MyNearWallet is retired
+ * and no longer connects to apps. HOT's selector module sends no network with its requests, so
+ * it is offered for mainnet only and never loaded for another network.
+ */
+const NEAR_WALLETS = new Map<string, { name: string; networks: readonly NearNetwork[] }>([
+  ['meteor-wallet', { name: 'Meteor Wallet', networks: ['mainnet', 'testnet'] }],
+  ['hot-wallet', { name: 'HOT Wallet', networks: ['mainnet'] }],
+]);
 const fragment = new URLSearchParams(location.hash.slice(1));
 const redirected = location.pathname === '/callback';
 let capability = redirected ? '' : location.hash.slice(1);
@@ -71,6 +91,9 @@ async function poll() {
     current = r.action ?? undefined;
     display.textContent = current ? JSON.stringify(current, null, 2) : 'Waiting for the CLI…';
     approve.disabled = !current || used.has(current.id);
+    if (hotChoice)
+      hotChoice.disabled =
+        current?.chain?.startsWith('near:') === true && current.chain !== 'near:mainnet';
     setTimeout(() => {
       void poll();
     }, 1000);
@@ -110,12 +133,30 @@ approve.onclick = async () => {
             }
           : { signature: await wallet.signTypedData(q.payload as TypedData) };
     } else {
-      const networkId = q.chain === 'near:mainnet' ? 'mainnet' : 'testnet';
+      const networkId = NEAR_NETWORKS.get(q.chain);
+      if (!networkId)
+        throw new Error(
+          `Browser NEAR wallets support near:mainnet and near:testnet, not ${q.chain}.`,
+        );
+      const id = nearChoice?.value || 'meteor-wallet';
+      const offered = NEAR_WALLETS.get(id);
+      if (!offered) throw new Error('Unknown NEAR wallet');
+      if (!offered.networks.includes(networkId))
+        throw new Error(`${offered.name} is offered for near:mainnet only. Pick Meteor Wallet.`);
+      // Only the chosen wallet is loaded, on first use: the page starts without wallet code
+      // touching storage or listeners, and a refused wallet never runs.
+      const [{ setupWalletSelector }, module] = await Promise.all([
+        import('@near-wallet-selector/core'),
+        id === 'hot-wallet'
+          ? import('@near-wallet-selector/hot-wallet').then((m) => m.setupHotWallet())
+          : import('@near-wallet-selector/meteor-wallet').then((m) => m.setupMeteorWallet()),
+      ]);
       const selector = await setupWalletSelector({
         network: networkId,
-        modules: [setupMyNearWallet()],
+        fallbackRpcUrls: [NEAR_RPC[networkId]],
+        modules: [module],
       });
-      const wallet = await selector.wallet('my-near-wallet');
+      const wallet = await selector.wallet(id);
       const accounts = await signInAccountOnly(wallet);
       const account = q.account || accounts[0]?.accountId;
       if (!account || !accounts.some((a) => a.accountId === account))
@@ -126,7 +167,7 @@ approve.onclick = async () => {
           message: string;
           recipient: string;
           nonce: number[];
-          callbackUrl: string;
+          callbackUrl?: string;
         };
         const state = crypto.randomUUID();
         callbacks.set(state, q.id);
@@ -135,7 +176,7 @@ approve.onclick = async () => {
           nonce: Buffer.from(p.nonce),
           state,
         });
-        if (!signed) return; // redirect wallet: /callback forwards fragment
+        if (!signed) return; // redirect wallets: /callback forwards the fragment
         callbacks.delete(state);
         result = signed;
       } else {

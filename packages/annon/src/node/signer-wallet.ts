@@ -181,13 +181,8 @@ export async function configuredWallet(
       },
     },
     id.id,
-    (text, context) =>
-      proveNearControl(
-        id.id,
-        text,
-        { ...context, ...(session ? { callbackUrl: new URL('/callback', session.url).href } : {}) },
-        signMessage,
-      ),
+    // Browser NEAR wallets return NEP-413 signatures in the page, so the payload has no callbackUrl.
+    (text, context) => proveNearControl(id.id, text, context, signMessage),
   );
   return {
     ...wallet,

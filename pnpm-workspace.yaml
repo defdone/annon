@@ -9,6 +9,8 @@ minimumReleaseAge: 20160
 overrides:
   '@modelcontextprotocol/sdk@1.32.2>hono': '4.13.18'
   '@modelcontextprotocol/sdk@1.32.2>@hono/node-server': '2.1.7'
+  # Meteor Wallet SDK 1.0.24 pins nanoid 5.1.5; 5.1.16 carries the published nanoid fixes.
+  '@meteorwallet/sdk@1.0.24>nanoid': '5.1.16'
 
 # Security fixes; exact releases only.
 # Recheck after 2026-11-25; remove exceptions once both clear 14 days.
@@ -17,7 +19,10 @@ minimumReleaseAgeExclude:
   - '@hono/node-server@2.1.7'
 
 # Wallet Selector uses secp256k1's JS fallback; esbuild uses its optional platform binary.
-# Neither dependency needs an install-time native build in this workspace.
+# ws (pulled in by the HOT Wallet SDK) falls back to JS without bufferutil and utf-8-validate.
+# None of these dependencies needs an install-time native build in this workspace.
 allowBuilds:
   secp256k1: false
   esbuild: false
+  bufferutil: false
+  utf-8-validate: false
