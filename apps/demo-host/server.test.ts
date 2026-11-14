@@ -878,6 +878,7 @@ describe('file page for browsers', () => {
     expect(html).toContain('annon buy https://demo.example/f/hello --route near');
     expect(html).toContain('annon buy https://demo.example/f/hello --route base');
     expect(html).toContain('annon buy https://demo.example/f/hello --from-chain solana');
+    expect(html).toContain('Every purchase requires a spending cap. Add --max-price 0.2');
     expect(html).toContain('Already bought it?');
     // Inline style only: the CSP allows it and nothing else.
     expect(html).toContain('<style>');

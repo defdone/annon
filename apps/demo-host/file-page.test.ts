@@ -61,6 +61,8 @@ describe('file page', () => {
       `https://annon.dev/demo#file=${FILE_ID}`,
       'https://h.example/f/a&quot;&lt;b&gt;',
     ]);
+    expect(html.split('https://h.example/f/a&quot;&lt;b&gt;')).toHaveLength(3); // near, 1click
+    expect(html).not.toMatch(/(href|src)="\/\//);
   });
 
   const file = { fileId: FILE_ID, title: 'T', url: 'https://h.example/f/t' };
@@ -82,6 +84,13 @@ describe('file page', () => {
     );
     expect(all).toContain(
       'The route decides which wallet signs: a NEAR account for NEAR, an EVM wallet for Base.',
+    );
+    // The cap sentence sits right below the commands.
+    expect(all).toContain(
+      '</ul>\n<p>Every purchase requires a spending cap. Add --max-price 0.2 to set a 0.20 USDC maximum, or set ANNON_MAX_PRICE or maxPrice in your configuration. Choose a cap appropriate for this file.</p>',
+    );
+    expect(all).toContain(
+      'With --from-chain, the command returns a deposit address on that chain for you to fund.',
     );
     // A file without Base terms (a NEAR or Solana seller) gets no Base command.
     const noBase = offer(['near', '1click']);

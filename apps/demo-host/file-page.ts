@@ -129,6 +129,10 @@ function commands(url: string, routes: Route[]): string {
   ].join('');
 }
 
+/** `buy` refuses to run without a cap (CLI.md); the offer never supplies one. */
+const CAP =
+  'Every purchase requires a spending cap. Add --max-price 0.2 to set a 0.20 USDC maximum, or set ANNON_MAX_PRICE or maxPrice in your configuration. Choose a cap appropriate for this file.';
+
 const ALREADY_BOUGHT =
   '<section><h2>Already bought it?</h2><p>Open it in the demo shop under My purchases in the browser you bought it with, or recover it with the same wallet: <code>annon recover --help</code>.</p></section>';
 
@@ -161,7 +165,8 @@ export function filePage(
       ? `<p>This file is encrypted. Buy it in the Annon demo shop, or with the command line.</p>
 <a class="b" href="${esc(`${DEMO_SHOP}#file=${f.fileId}`)}">Buy in the demo shop</a>
 <section><h2>Buy with the command line</h2><ul>${commands(f.url, routes)}</ul>
-<p>The route decides which wallet signs: a NEAR account for NEAR, an EVM wallet for Base.</p></section>
+<p>${CAP}</p>
+<p>The route decides which wallet signs: a NEAR account for NEAR, an EVM wallet for Base. With --from-chain, the command returns a deposit address on that chain for you to fund.</p></section>
 ${ALREADY_BOUGHT}`
       : state === 'stopped'
         ? `<p>The seller has stopped selling this file. Earlier buyers can still download it with the command line.</p>
