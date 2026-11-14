@@ -1,13 +1,11 @@
-<!-- verify against merged code in the phase 2 docs pass -->
-
 # Using Annon with a NEAR account
 
 A NEAR account can buy directly on NEAR, sell files and recover its purchases. Selling and recovery
 require NEAR for gas and contract storage. Direct Base payments require a separate EVM wallet.
 
-Under the release rule, a file sold from a NEAR account will list without Base terms. Buyers will
-pay on NEAR or through 1Click, including 1Click with Base as the source chain. This listing rule is
-pending release. A separate EVM payout address for Base proceeds is on the
+A file sold from a NEAR account lists without Base terms. Buyers pay on NEAR or through 1Click,
+including 1Click with Base as the source chain; a direct Base payment is refused with
+`route_unavailable`. A separate EVM payout address for Base proceeds is on the
 [roadmap](../ROADMAP.md#base-payouts-for-near-and-solana-sellers).
 
 This page explains why NEAR accounts pay storage, what it costs, and what we plan to change.
@@ -43,12 +41,16 @@ transaction costs.
 
 ## Selling from a NEAR account
 
-Configure the reviewed deployment, NEAR wallet and backup secret first (see the
-[README](../README.md#from-the-command-line)). Replace the account, file ID and amounts with your own
-values.
+Configure the reviewed deployment, NEAR wallet and backup secret first (see
+[quickstart.md](quickstart.md)). Replace the account, file ID and amounts with your own values. With
+hosted selling (`annon share`), a NEAR seller also sends the registration and the storage funding
+from their own wallet: `--listing-storage` (default 0.01 NEAR) covers the listing and
+`--storage-budget` (default 0.05 NEAR) the file's purchase storage, and both are shown before you
+approve ([selling.md](selling.md)). The steps below are for self-hosted `annon sell`.
 
-1. Prepay contract storage with `storage_deposit` (the README example uses 0.01 NEAR). If it runs
-   short, a register or recover call stops with `storage_required`; deposit more and resume.
+1. Prepay contract storage with `storage_deposit` (the [quickstart](quickstart.md#5-open-it-on-another-computer)
+   example uses 0.01 NEAR). If it runs short, a register or recover call stops with
+   `storage_required`; deposit more and resume.
 2. Give the file a purchase storage budget when you sell:
 
    ```sh

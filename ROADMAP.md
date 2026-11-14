@@ -1,5 +1,3 @@
-<!-- verify against merged code in the phase 2 docs pass -->
-
 # Roadmap
 
 What we plan to build next. If one of these matters to you, open an issue or write to
@@ -46,10 +44,17 @@ all three. Until then you sell from the CLI, the MCP server or the SDK.
 
 ### Base payouts for NEAR and Solana sellers
 
-For this release, the listing flow will enable direct Base payments for EVM sellers. NEAR and
-Solana sellers will list without Base terms, so buyers will use NEAR or 1Click, including 1Click from
-Base. These listing rules are pending release. After the hackathon, we plan to let a NEAR or Solana
-seller name a separate EVM payout address for direct Base proceeds.
+Direct Base payments need a Base payee in the file's terms. Hosted EVM listings get a split contract
+on Base; self-hosted EVM listings get one only with `--base`. NEAR and Solana sellers list without
+Base terms, so their buyers pay on NEAR or through 1Click, including 1Click from Base. After the hackathon, we plan to let a NEAR or Solana seller name a
+separate EVM payout address for direct Base proceeds.
+
+### Shop quotas that count finished listings
+
+Today a shop's host counts an upload when it accepts it, and the relayer counts a sponsored
+registration when it admits it. We plan to count only listings that are registered and published, so
+a failed attempt does not use up a seller's daily allowance, with the host and the relayer agreeing
+on each listing's state.
 
 ### Instant refund of an underpayment for direct NEAR payers
 
@@ -65,10 +70,24 @@ An optional `appId` or referrer that a shop or an app can attach to a purchase, 
 sales it brought. It is attribution only, not a commission: it changes neither the price nor the
 split.
 
-### Server-side catalog search
+### Server-side catalog search and signed shop directories
 
 Catalog search that runs on the shop's server, so a client does not have to download a whole
-catalog to search it.
+catalog to search it. Shop directories signed by their publisher, so a client can check where a
+list of shops came from.
+
+### Categories and tags for files
+
+Today every file in a shop catalog has a name, a title and a description, and catalog search covers
+all three. We plan seller-chosen categories and tags, set when sharing a file, signed with the rest
+of the listing metadata, and a matching filter in the CLI, the MCP tools and the shop, so people and
+agents can browse a shop by topic.
+
+### Sending a file straight to someone's key
+
+A way to send a file to one recipient without a sale: the sender encrypts the file for the
+recipient's public key and hosts the ciphertext. There is no contract call and no fee, only hosting.
+It suits agents that need to hand a file to another agent they already know.
 
 ### A local purchases panel in the CLI
 

@@ -1,5 +1,3 @@
-<!-- verify against merged code in the phase 2 docs pass -->
-
 # What can go wrong, and what to do
 
 Each section says what happens and what you do. The codes in `backticks` are the ones the SDK, the
@@ -8,8 +6,9 @@ least that long before you try again.
 
 Three rules cover most cases:
 
-- **Never pay a second time for the same purchase.** Every `buy` creates a new purchase. If you are
-  unsure whether a payment went through, check the one you have.
+- **Never pay a second time for the same purchase.** Resume the existing purchase with `status` and
+  `open`. A saved live or accepted purchase blocks another buy with `purchase_open`. Only an explicit
+  `--force` (MCP `force: true`) creates another purchase despite that saved purchase.
 - **Keep your purchase ID and your backup secret.** They let you check, resume and open a purchase.
   Losing them does not lose the file: the same wallet can recover it.
 - **Exit code 4 means wait.** The CLI exits with it, and CLI JSON and MCP errors carry it as
@@ -22,9 +21,10 @@ needed, 4 pending.
 
 ### The quote or the purchase expired
 
-- **1Click:** after you review the terms, at least ten minutes must remain before the deposit cutoff.
-  Otherwise you get `quote_expired` ("The 1Click quote expired. Run buy again."). Nothing was sent.
-  Run `buy` again for a fresh quote.
+- **1Click:** after review and recovery proof, at least ten minutes must remain before the deposit
+  cutoff, or the command returns `quote_expired`. Do not fund that quote. After confirming that no
+  deposit was sent, request a fresh quote with `buy --force` using the same URL and source options
+  (MCP `force: true`). Keep the old purchase record.
 - **Base:** the SDK signs a payment authorization lasting at most 180 seconds. Keep the saved
   purchase and check `status`. Start another purchase only after final chain evidence establishes
   that the authorization expired or was cancelled without payment. A payment that settled before its
@@ -38,9 +38,12 @@ purchase before starting another one.
 
 ### The file has no Base route
 
-Before choosing `base`, check that the file's final on-chain terms include a Base payee. If they do
-not, use `near`, or `1click` with Base as the source chain. The release will report
-`route_unavailable` (exit code 2) for this case; that error is pending release.
+`route_unavailable` (exit code 2, "This file does not support the selected payment route."): the
+file's final on-chain terms have no Base payee, so it cannot be paid directly on Base. Files from NEAR
+and Solana sellers are like this. You get this before any wallet or payment step, and the host
+refuses such a payment too. Use `near`, or `1click` with Base as the source chain
+(`annon buy URL --route 1click --from-chain base`, or an MCP `origin` the owner configured for Base).
+An EVM wallet without `--route` gets `origin_required` for such a file, with the same advice.
 
 ### 1Click refuses the quote
 
@@ -54,6 +57,8 @@ another available payment route if the file's price cannot be quoted.
   your wallet signs the payment. Pay on NEAR or through 1Click instead.
 - `relayer_unavailable` or `relayer_rate_limited`: the relayer is busy or paused. Wait for
   `retryAfterSeconds` and try again.
+- `budget` while selling: the relayer has paused new listings, or a daily sponsorship limit is used
+  up. Buying keeps working. Wait for `retryAfterSeconds`, or list with your own NEAR account.
 
 If you have already paid, a busy relayer delays the unlock but never cancels your purchase. See
 [the payment is still pending](#the-payment-is-still-pending).
@@ -91,8 +96,8 @@ you pay, and the file host answers 410.
 `settlement_pending` (exit code 4) means the payment or the key release is not final yet. Keep the
 saved purchase.
 
-- **Base:** payments must reach Safe finality on Base before NEAR verifies them; this commonly takes
-  one to three minutes.
+- **Base:** a Base payment must reach Safe finality before NEAR can verify it. Poll `status` and
+  honor `retryAfterSeconds`.
 - **1Click:** a swap can take several minutes, and its `SUCCESS` status alone does not prove Annon
   accepted the purchase.
 - **Relayer busy:** the unlock is queued and retried. It is delayed, not cancelled.
@@ -117,6 +122,37 @@ signature may be requested first to prove recovery ownership.
   same configured wallet, replacing `kind:id` with its identity. Recovery reports successful grants
   and per-purchase errors. Remove leftover `.tmp` files and `.annon-spool-*` directories beside the
   output before opening again.
+
+## While you sell
+
+### The shop refuses the upload
+
+A shop sets its own hosting and sponsorship limits ([shops and limits](shops-and-limits.md)).
+`rate_limited` means the host's daily upload count for your wallet, your IP address or the whole
+shop is used up: wait `retryAfterSeconds`. `limited` means a relayer admission limit is reached,
+such as an hourly request limit or a daily sponsorship quota: wait `retryAfterSeconds`, then resume
+the saved sale. Do not start a new listing to bypass the limit. `host_capacity` means the host has no room or does not
+accept uploads from you; try later or host the file yourself. `too_large` means the file is above
+the shop's size limit. A refusal before you sign anything costs nothing. A shop that publishes
+rules shows them in `annon shops` and in the `annon share` result.
+
+### The sale stopped part way
+
+Resume the saved sale with the same file (`annon share FILE --resume 0xFILE_ID --shop SHOP_ID`,
+or `annon sell FILE --resume 0xFILE_ID` for a self-hosted sale); never start a new one for the same
+file. Resume checks
+the chain before it repeats any step, so an uncertain transaction is never sent twice blindly. Keep
+the backup secret: without it the saved sale cannot be resumed.
+
+An unfinished verified upload is kept for 24 hours from body verification. After that, requests
+return `upload_expired`. The host permits restaging unfinished uploads, but this does not guarantee
+that every saved CLI checkpoint can resume automatically. Keep the original file and saved seller
+state; if resumption cannot finish, serve the same registered ciphertext from another host. A file
+that was published and later expired cannot be republished on that host under the same file ID.
+
+`not_sponsored` when you register with an EVM or Solana wallet means the relayer does not sponsor
+this registration. defdone's relayer sponsors files its shop hosts (hosted selling) and the sellers
+it lists. Use hosted selling, run your own relayer, or sell from a NEAR account.
 
 ## If the amount was wrong
 
@@ -186,8 +222,8 @@ right away. After that you wait:
 | 5th | 2 hours after the 4th finished |
 | Each later one | 24 hours after the previous one finished |
 
-`retryAfterSeconds` says exactly how long is left, and the browser shows a countdown. Save the file
-once and keep it.
+`retryAfterSeconds` says how long to wait before requesting another download. Save the file once
+and keep it.
 
 The host counts a download when it finishes transmitting the complete encrypted body. A later
 decryption or local-save failure does not undo that count. Interrupted transmissions do not count.

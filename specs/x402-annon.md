@@ -29,7 +29,8 @@ the client; no deployment is implicitly pinned by this draft. `accepts` is deriv
 
 A host MUST omit the Base offer when the file's final terms have `terms.base: null`. Hosts and
 clients MUST refuse direct Base payments for that file. A buyer holding USDC on Base uses the NEAR
-offer through 1Click. Full enforcement in the reference host and clients is pending release.
+offer through 1Click. The reference host answers such a payment with `400 route_unavailable`, and
+the reference clients refuse the `base` route for that file before any wallet step.
 
 `maxTimeoutSeconds` is positive; Base authorizations are capped at 180 seconds, with 60 seconds
 clock tolerance. `assetTransferMethod` is absent or `eip3009`; nonempty payment `splits` are refused.

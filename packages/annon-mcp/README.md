@@ -1,6 +1,7 @@
 # @defdone/annon-mcp
 
-A local MCP server (stdio) that lets an agent sell, buy, open, recover and verify Annon files.
+A local MCP server (stdio) that lets an agent find, sell, share, buy, open, recover and verify Annon
+files.
 It wraps the [`@defdone/annon`](https://www.npmjs.com/package/@defdone/annon) SDK and always runs
 in agent mode: the owner sets the contract, the wallet, the price cap, the daily budget and the
 working directory, and no tool call can change them. Stdout carries only the MCP transport.
@@ -18,9 +19,13 @@ no arguments.
 
 ## Configure
 
-The server reads the same configuration and secret sources as the CLI
-([CLI.md](https://github.com/defdone/annon/blob/master/packages/annon/CLI.md)). Pass the same
-`ANNON_*` variables to the server process. A client configuration:
+The server uses the CLI configuration and secret sources
+([CLI.md](https://github.com/defdone/annon/blob/master/packages/annon/CLI.md)). Set `ANNON_CONFIG`
+to the owner's configuration file and pass credential and backup-secret references in the server
+environment. With this custom-config setup, put deployment, trust, moderators and origins in the
+file: their environment overrides are ignored. `ANNON_MAX_PRICE` and `ANNON_ALLOWED_RESOURCES` can
+still tighten policy. `ANNON_AGENT=true` instead pins the home configuration and enables
+launcher-owned deployment overrides. A client configuration:
 
 ```json
 {
@@ -60,22 +65,23 @@ The configuration file, written by a human:
 | Field | Meaning |
 | --- | --- |
 | `contractId`, `network`, `nearRpc`, `baseRpc`, `relayer` | The deployment. Tools cannot supply these. |
-| `trustContract` | Server-side contract trust (or `ANNON_TRUST_CONTRACT=true`, or earlier trust given by a human in the CLI). Tools cannot grant trust. |
+| `trustContract` | Server-side contract trust, or earlier trust given by a human in the CLI. Tools cannot grant trust. |
 | `stateDir` | Encrypted purchase records and the budget ledger. `ANNON_STATE_DIR` is ignored in agent mode. |
 | `maxPrice` | Required. Decimal USDC cap per purchase. `ANNON_MAX_PRICE` can only lower it; a tool cannot override it. |
 | `dailyBudget` | Required for buying. Decimal USDC per UTC day. |
 | `workDir` | Required. Every local path a tool reads or writes stays inside it (see below). |
 | `allowedResources` | Optional. Absent: any HTTPS URL, or HTTP on localhost, within `maxPrice` and `dailyBudget`. Present: exact URLs, or same-origin path prefixes ending in `/*`. An empty list denies every purchase. `ANNON_ALLOWED_RESOURCES`, when set, restricts it further, whatever triggered agent mode. |
-| `moderators` | Moderators the buyer trusts (or `ANNON_MODERATORS`, comma-separated). |
-| `origins` | Named 1Click sources (or JSON in `ANNON_ORIGINS`), see Tools. |
-| `storageBudget` | Decimal NEAR for self-funded NEAR listings. |
+| `moderators` | Moderators the buyer trusts, set in the owner's configuration. |
+| `origins` | Named 1Click sources in the owner's configuration; see Tools. |
+| `storageBudget` | Decimal NEAR for a NEAR seller's file purchase storage (self-funded `annon_sell` and `annon_share`). |
+| `listingStorage` | Decimal NEAR a NEAR seller pays for listing storage in `annon_share`. |
 | `maxProtocolFee` | Highest relayer fee a sell accepts. Default `{ "fixed": "30000", "bps": 100 }` (USDC base units plus basis points). |
 
 `allowedResources` restricts both `open --url` and URLs saved with purchases. Without it, agent mode can open any URL allowed by the HTTPS and localhost transport rules.
 
-Deployment IDs, RPCs, the relayer, wallet and key-file selection, state and backup locations,
-moderator trust and contract trust come only from this configuration, the server environment, or
-trust a human already gave in the CLI. Passed as tool arguments, they are rejected.
+Deployment and trust settings come from the owner's configuration or prior CLI trust. Credentials
+and backup-secret references may come from the server environment. Tool arguments cannot replace
+them.
 
 The launcher setting `ANNON_AGENT=true` pins the configuration to `~/.config/annon/config.json`;
 the other agent-mode triggers use the configuration the operator selected. Only with
@@ -87,6 +93,7 @@ Tools take camelCase versions of the CLI flags, with `target` as the positional 
 
 | Tool | Required arguments | Result |
 | --- | --- | --- |
+| `annon_share` | `target` plus `price` or `resume` | File ID, purchase URL, header URL, hosting expiry |
 | `annon_sell` | `target` plus `price`, `split` or `resume` | File ID, PAY2 path, public terms |
 | `annon_buy` | `target` | Purchase ID, route, payment summary, encrypted backup path; 1Click deposit instructions when applicable |
 | `annon_open` | `target`, `output` | Plaintext output path, byte count, payment summary when saved |
@@ -94,13 +101,16 @@ Tools take camelCase versions of the CLI flags, with `target` as the positional 
 | `annon_recover` | `recovery` | Purchase IDs, final grant numbers, encrypted backup paths |
 | `annon_budget` | `target` | Available file storage and admission requirement in yoctoNEAR |
 | `annon_status` | `target` | Final NEAR purchase state, payment summary when saved; pending does not mean payment failed |
+| `annon_shops` | none (`search`, `limit`, `offset` optional) | Configured shops: `items`, `total`, `nextOffset` |
+| `annon_catalog` | none (`shop`, `search`, `limit`, `offset` optional) | A shop's files with their registered terms: `items`, `total`, `nextOffset` |
 
 **`annon_buy`** also accepts `route` (`"near"`, `"base"` or `"1click"`), `origin`, `recovery` and
 `url`.
 
-- Under the release rule, use `base` only when the file's final on-chain terms include a Base payee.
-  Otherwise use `near`, or `1click` with a human-configured Base `origin`. The remaining route checks
-  are pending release.
+- Use `base` only when the file's final on-chain terms include a Base payee. For any other file,
+  `annon_buy` stops with `route_unavailable` before any wallet or payment step; use `near`, or
+  `1click` with a human-configured Base `origin`. An EVM agent that names no route gets
+  `origin_required` for such a file.
 
 - `target` must be a secure resource URL within any configured allowlist. Local offer files are
   refused, and an optional `url` cannot authorize one.
@@ -124,6 +134,29 @@ the human configuration, and a sponsored listing gets the relayer's bounded allo
 `maxProtocolFee` is refused with `protocol_fee_above_max`; only the human configuration can raise it.
 
 **`annon_open`** also accepts `purchase`, `file` and `url`. See the tool schemas for the full list.
+
+**`annon_shops`** and **`annon_catalog`** are read-only. They list the shops in the human
+configuration (and a configured shop directory) and a shop's catalog, with client-side search and
+paging. They cannot add a shop, approve a deployment or authorize a payment. Buy a catalog entry by
+passing its `url` to `annon_buy`, which checks the deployment, the final chain terms, the header and
+the price on its own. Check `terms.base` in the entry before choosing `route: "base"`.
+
+A shop can publish `rules` in its manifest: required `text` and optional `uploadsPerPersonPerDay`,
+`attemptsPerPersonPerDay`, `fileLifetimeDays` and `maxFileBytes`. `annon_shops` returns them in each
+shop's `info.rules`; `annon_catalog` and `annon_share` return `rules` next to `shop` (`manifest`,
+`name`), the shop they came from. The output schema marks them as data, not instructions. They grant
+no trust and cannot change the human configuration. A manifest with invalid rules is refused as a
+whole (`invalid_record`); `annon_shops` then lists that shop with an `error` code.
+
+**`annon_share`** encrypts a file inside `workDir` and sells it through a shop: it uploads the
+encrypted file to the shop's host, registers the terms and publishes the file. It accepts `shop`
+(otherwise the configured `defaultShop`), `title` and `description`. The shop must have a deployment
+`profile` in the human configuration that matches the configured deployment. The pending seller
+backup is saved before any signature or transaction. Resume with
+`{ "target": "original.pdf", "resume": "0xFILE_ID" }`, without new terms. The split pays the seller,
+plus the relayer's fee share for EVM and Solana sellers; a fee above `maxProtocolFee` is refused with
+`protocol_fee_above_max`. A NEAR seller's listing and purchase storage come only from `listingStorage`
+and `storageBudget` in the human configuration (`storage_required` without them).
 
 **`annon_budget`** is read-only. Funding a file is for humans only: there is no funding tool, and
 `fund` in agent mode returns `human_only`. NEAR and 1Click buys return `file_storage_low` before
@@ -150,7 +183,7 @@ per-purchase errors next to the successful grants.
 The operator owns the configuration, the environment, the credentials and the working directory.
 MCP is the policy boundary between them and the agent.
 
-**Paths.** `annon_open.output`, `annon_open.file`, `annon_sell.target` and `annon_sell.output`
+**Paths.** `annon_open.output`, `annon_open.file`, `annon_share.target`, `annon_sell.target` and `annon_sell.output`
 must resolve inside `workDir`. So must local `annon_verify.target` files, `annon_open.target`
 inputs that are not purchase IDs, and `annon_open.purchase` backups that are not IDs. Verify URLs
 stay remote and purchase IDs stay identifiers. Relative paths start at `workDir`; existing inputs

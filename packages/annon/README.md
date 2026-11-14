@@ -6,14 +6,22 @@ another chain through NEAR Intents, and the contract releases the file key to th
 SDK runs in Node.js and in browsers; the CLI is built on it for developers and agents. People buying
 files in a browser should use the browser purchase flow.
 
-Protocol overview and a full walkthrough: the [repository README](https://github.com/defdone/annon/blob/master/README.md). Command
-reference: [CLI.md](CLI.md). Security model and known limits: [SECURITY.md](https://github.com/defdone/annon/blob/master/SECURITY.md).
+Protocol overview: the [repository README](https://github.com/defdone/annon/blob/master/README.md).
+Walkthroughs: [buying](https://github.com/defdone/annon/blob/master/docs/quickstart.md),
+[selling](https://github.com/defdone/annon/blob/master/docs/selling.md) and
+[agents](https://github.com/defdone/annon/blob/master/docs/agents.md). Command reference:
+[CLI.md](CLI.md). Security model and known limits:
+[SECURITY.md](https://github.com/defdone/annon/blob/master/SECURITY.md).
+
+The SDK and CLI have no usage fees or daily upload or sales quotas. Shops set their own hosting and
+sponsorship limits ([shops and limits](https://github.com/defdone/annon/blob/master/docs/shops-and-limits.md)).
 
 ## Contents
 
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Browser purchases](#browser-purchases)
+- [Hosted selling](#hosted-selling)
 - [CLI browser wallet login](#cli-browser-wallet-login)
 - [Agent initialization and spending policy](#agent-initialization-and-spending-policy)
 - [Remote signer, HTTP JSON v1](#remote-signer-http-json-v1)
@@ -54,8 +62,8 @@ Build with `pnpm build`. In a checkout, run `node packages/annon/dist/node/main.
 
 ## Quick start
 
-The shortest path is the CLI: the [repository README](https://github.com/defdone/annon/blob/master/README.md#from-the-command-line) buys,
-opens and recovers a demo file in a few commands, and [CLI.md](CLI.md) covers configuration,
+The shortest path is the CLI: [docs/quickstart.md](https://github.com/defdone/annon/blob/master/docs/quickstart.md)
+buys, opens and recovers a demo file in a few commands, and [CLI.md](CLI.md) covers configuration,
 encrypted purchase backups and every command.
 
 In code, an `Annon` instance needs a deployment, a durable record store, a persisted backup secret, a
@@ -149,10 +157,10 @@ const { meta, data } = await controller.open({ onProgress: renderDownload });
 ### Checkouts, reloads and tabs
 
 - Use a stable, caller-owned checkout ID for each terms review. Creation refuses an existing ID.
-- `route` is `'near'`, `'base'` or `'1click'`, the same names as in CLI and MCP results. Under the
-  release rule, offer `'base'` only when the file's final on-chain terms include a Base payee. For a
-  file without Base terms, a buyer holding USDC on Base uses `'1click'` with Base as the source
-  chain. The remaining route checks are pending release.
+- `route` is `'near'`, `'base'` or `'1click'`, the same names as in CLI and MCP results. Offer
+  `'base'` only when the file's final on-chain terms include a Base payee; otherwise the SDK refuses
+  it with `route_unavailable` before any wallet step. For a file without Base terms, a buyer holding
+  USDC on Base uses `'1click'` with Base as the source chain.
 - After a reload, construct `new BrowserPurchaseController({ storage, sdk, id })` and call
   `resume()`. Never call `buy()` or create another checkout to resume an uncertain payment.
 - `storage.list()` supplies the purchases list.
@@ -232,6 +240,53 @@ Each adapter checks what the wallet returns: the signature is verified against t
 identity, the account is still the selected one, and Base payments are signed for chain 8453.
 Failures raise `BrowserWalletError` with a code a page can show: `rejected`, `wrong_chain`,
 `wrong_identity`, `invalid_signature`, `missing_method`, `invalid_response` or `wallet_error`.
+
+## Hosted selling
+
+`annon.share(options)` sells a file through a shop's host: it quotes the final terms without writing
+anything, calls `onSplit` with the split and fee for approval, saves the pending encrypted backup
+(`confirmBackup` must resolve only after you stored it and its separate secret), then uploads,
+creates the shop's Base split for an EVM seller, registers, funds a NEAR seller's storage and
+publishes. It returns `{ fileId, url, header, expiresAt }`. `hosting.origin` is the host of a shop
+you approved; there is no default host. Each step is checkpointed in the encrypted sell record, and
+`annon.resumeShare({ fileId, data, seller, hosting })` continues a stopped sale with the original
+file and terms, reconciling any uncertain transaction before it sends another.
+
+- Without `near.recipients` the split pays the seller; sponsored EVM and Solana sellers get the
+  relayer's fee share added, as with `sell`.
+- Only EVM sellers get Base terms. NEAR and Solana sellers list with `base: null`.
+- A NEAR seller signs the upload with NEP-413 (`hosting.signUpload`; `signNearUpload` in the browser
+  entry), sends its own transactions, and pays `listingStorage` and `storageBudget` in yoctoNEAR.
+- `UploadClient` and `uploadText` are exported for shops that drive the upload protocol themselves.
+
+In a page, `createBrowserSeller(options)` from `@defdone/annon/browser` returns a `SellerFacade`:
+
+```ts
+const seller = createBrowserSeller({ ...trustedSdkOptions, host, indexStore, wallet });
+const quote = await seller.quote(connection, { file, title, description, priceUsdc: '1.00' });
+const sale = await seller.begin(quote.quoteId);   // after the person approved the quote
+const backup = await sale.exportBackup();         // let the person save it, then:
+await sale.confirmBackup();
+let view = await sale.view();
+while (view.next) view = await sale.next();       // the only method that signs or writes
+```
+
+- `quote` signs and writes nothing. It shows the shares, fee, NEAR funding, routes and steps.
+- `next()` runs one step. Each step is persisted before its effect, and a lease keeps two tabs from
+  running the same sale.
+- After a reload, `active()` returns the open sale. `attachWallet`, `attachFile` and `unlock` supply
+  what `view().needs` lists; `discard()` drops a sale.
+- `view().result` holds `{ fileId, url, expiresAt }` once the file is published.
+
+### Shop discovery
+
+`listShops(config, query)` and `catalog(config, query)`, from both entries, read shop manifests and
+catalogs with client-side search and paging and return `{ items, total, nextOffset }`. `config` is the
+public discovery configuration (`shops`, `defaultShop`, `shopDirectoryUrl`); there is no built-in
+shop or directory. A manifest's optional `rules` (`ShopRules`) is validated strictly and returned as
+shop-provided data: on each shop's `info` from `listShops`, and as `rules` with `shop` (`manifest`,
+`name`) from `catalog`. Show it as text from that shop; it grants no trust. Limits and fields:
+[CLI.md](CLI.md#shop-discovery).
 
 ## CLI browser wallet login
 
@@ -446,7 +501,7 @@ service.
 
 ## Durable keeper
 
-`keep` is exported from `@defdone/annon/relay/relay`. Supply a stable `network` (`near:mainnet`,
+`keep` is exported from `@defdone/annon/relay`. Supply a stable `network` (`near:mainnet`,
 `near:testnet` or `near:sandbox`), a dedicated account and key, durable `store` and `budgetStore`,
 hourly and daily yoctoNEAR budgets, and a maximum gas price. In Node, create private directories and
 use `fileStore<KeeperRecord>` and `fileStore<BudgetRecord>`. Environment configuration is in the
@@ -463,66 +518,12 @@ use `fileStore<KeeperRecord>` and `fileStore<BudgetRecord>`. Environment configu
 - InFlight funding and slots are never reset or newly submitted. Calls for other pending slots can
   proceed; the contract guards InFlight slots.
 
-### Submissions and retries
+### Running the keeper
 
-- Signed bytes and hash, signer, and the reference block hash and height are persisted before
-  sending. The retained reference height permits expiry checks even after the RPC garbage-collects
-  that block.
-- Inclusion is uncertainty, not success: outstanding submissions stay monitored even after
-  open-index retirement.
-- Retry counts and deadlines live per network, contract, delivery, funding phase or payment slot.
-  RPC changes preserve both jobs and network and account gas reservations.
-- Successful finalized trusted-executor `funding_failed` and `payment_failed` events, together with
-  current state, distinguish failures, partial progress and InFlight uncertainty.
-- Delay is 1, 2, 4, 8, 16, then 30 minutes, with ±10% jitter. Only verified funding or slot progress
-  clears its delay.
-- A shared contract and dependency breaker slows pause and locked-sender failures and permits a probe
-  after its deadline. Separate account and key queues keep relay traffic independent.
-
-### Spending limits
-
-- Gas reservations use twice the attached gas times the configured price ceiling, with no automatic
-  reimbursement. The current gas price must be within the ceiling before signing.
-- Hourly and daily UTC reservations persist across restarts; uncertain operations keep their
-  reservation.
-- Refund materialization also reserves `storagePerRefund` (default 0.04096 NEAR) against the same
-  limits.
-- These are conservative caps, not measured gas burn. Bounds default to 20 new transactions and 50
-  unresolved submissions; refund sources reserve half of a pass for refund work.
-- Storage on the contract must already be prepaid. Monitor `reserve_low`, `in_flight`, `uncertain`
-  and breaker alerts; `reserveLowWater` is configurable. Reserve exhaustion creates refund leaves
-  that the open index cannot discover.
-
-### Refunds
-
-Refund automation accepts a pluggable `RefundSource.leaves({nearRpc,contractId,limit})` that returns
-current `MaterializeRefundArgs` (leaf, index and 32-sibling proof). It calls the SDK
-`materializeRefund` binding with deposit zero to spend prepaid storage.
-
-- No indexer or archive integration is bundled. The operator must provide complete durable leaf
-  history and refresh proofs before the last-32-root window expires. Without a source, `keep`
-  services open deliveries only.
-- A permanently paused or locked dependency, or an uncertain InFlight callback, cannot be repaired by
-  retries.
-
-### Unknown transactions
-
-For an unknown transaction the keeper checks its signed nonce against the keeper access key at a
-finalized block, and its reference block height against that finalized height and the protocol
-transaction validity period plus a two-block margin. Age-based retirement requires
-`final.height - ref.height > transaction_validity_period + 2`. The validity period is measured in
-blocks, as [nearcore](https://near.github.io/nearcore/architecture/how/tx_routing.html) describes.
-
-- A consumed nonce or an expired block hash means the transaction can no longer land: finalized
-  delivery state is re-read, the hash is cleared by CAS, backoff is saved and unresolved capacity is
-  released.
-- Otherwise only the same durable bytes may be resent, and only while no affected step is InFlight.
-- Unavailable or malformed validity evidence leaves the transaction tracked.
-- Older records without a retained reference height need an RPC that can still serve that block,
-  unless the finalized key nonce already proves the transaction cannot land.
-
-Do not share one signing key across independent processes. Use independent funded keeper accounts
-and RPC infrastructure.
+Run the keeper with a dedicated funded account and durable state. Configure its hourly and daily
+spending limits, retain its state after a timeout, and check the saved transaction before retrying.
+The relayer README lists the service settings. A `RefundSource` integration supplies refund leaves
+and current proofs for `materializeRefund`. Run one keeper process per signing key.
 
 ## RPC configuration
 

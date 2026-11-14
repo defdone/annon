@@ -77,6 +77,12 @@ us if you can make one worse than described.
 - **Real browsers.** Browser code is tested against stubbed wallets and IndexedDB, and its bundles are
   checked for CSP compatibility. Behaviour in specific browsers and wallet extensions is tested by
   hand, not in CI.
+- **Previews.** A PAY2 file can carry a preview, but clients do not verify previews for buyers in
+  this release. A page must not present a preview as checked.
+- **Not DRM.** The seller knows the content and a buyer can share what they decrypted. Listing terms,
+  titles, descriptions and file sizes are public.
+- **Hosting.** Key release does not keep a file online. A shop's host can refuse, expire or lose a
+  file; the purchase stays on chain and opens from any host that serves the same checked file.
 
 ## Supported versions
 
