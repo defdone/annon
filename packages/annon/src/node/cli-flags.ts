@@ -37,6 +37,7 @@ export const perCommand: Record<Command, string[]> = {
     'keychain-entry',
     'new-key',
     'daily-budget',
+    'deployment',
   ],
   share: ['resume', 'price', 'shop', 'title', 'description', 'storage-budget', 'listing-storage'],
   sell: ['resume', 'price', 'split', 'base', 'moderator', 'output', 'storage-budget'],

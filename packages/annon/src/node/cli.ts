@@ -62,6 +62,8 @@ export interface Input {
   nearAccount?: string;
   nearPublicKey?: string;
   backupSecretFile?: string;
+  /** Bare `init --deployment defdone`: write that preset config without asking. */
+  deployment?: string;
   resume?: string;
   origin?: string;
   price?: string;
@@ -82,7 +84,7 @@ export interface Input {
   /** `buy --open <path>`: wait for acceptance, then write the opened file there. */
   open?: string;
 }
-const bareInit = ['json', 'config', 'stateDir', 'backupSecretFile'];
+const bareInit = ['json', 'config', 'stateDir', 'backupSecretFile', 'deployment'];
 /** Without a target `status` and `open` use the latest purchase; these take none at all. */
 const optionalTarget = ['status', 'open'];
 const noTarget = ['recover', 'login', 'init', 'shops', 'catalog'];
@@ -162,6 +164,12 @@ export function parseCli(argv: string[]): Input {
       Object.keys(values).some((k) => !bareInit.includes(k))
     )
       throw usage();
+    // The only preset is defdone's deployment; agent init writes signer settings, never a preset.
+    if (
+      values.deployment !== undefined &&
+      (values.agent === true || values.deployment !== 'defdone')
+    )
+      throw usage();
     if (cmd === 'recover' && !values.recovery) throw usage();
     // --shop and --search only select the catalog listing a row number refers to.
     if (
@@ -188,7 +196,7 @@ annon (no arguments, in a terminal) or annon shell: interactive session; type he
 shops [--search <q>] [--limit <n>] [--offset <n>]
 shop add <url> [--id <alias>]
 catalog [--shop <id>] [--search <q>] [--limit <n>] [--offset <n>]
-init [--backup-secret-file <file>] [--state-dir <dir>] [--config <file>]
+init [--deployment defdone] [--backup-secret-file <file>] [--state-dir <dir>] [--config <file>]
 login [--wallet evm|near] [--no-open]
 init --agent --daily-budget <USDC> [--recovery <kind:id>] [--key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> (--credential-env <name> | --credential-keychain <name>)]
 share <file> --price <USDC> [--shop <id>] [--title <title>] [--description <text>] [--listing-storage <NEAR>] [--storage-budget <NEAR>]

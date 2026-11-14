@@ -19,7 +19,26 @@ of `annon`.
 
 ## 2. Configure
 
-Create `~/.config/annon/config.json`:
+Annon is an open protocol and any team can run a deployment. The quickest start uses the one run by
+defdone. Run:
+
+```sh
+annon init --deployment defdone
+```
+
+It does two things and prints where each file is:
+
+- If nothing exists yet at `~/.config/annon/config.json` (or the file named by `--config` or
+  `ANNON_CONFIG`), it writes the configuration for the deployment run by defdone there. It never
+  changes, replaces or writes through anything already at that path; init says it kept it.
+- It creates the backup secret that encrypts your local purchase records (below).
+
+Plain `annon init` in a terminal asks the same question: "Use the Annon deployment run by defdone
+(...)? [Y/n]". Enter or yes writes the configuration; no writes none and prints this page's link.
+Without a terminal and without `--deployment`, init writes no configuration and says how to add one.
+
+This is the configuration it writes. `stateDir` is set to the absolute path of
+`~/.local/share/annon`. To use another deployment, write your own file in the same shape:
 
 ```json
 {
@@ -54,13 +73,8 @@ The `shops` entry adds the demo shop, so `annon catalog` lists its files and `an
 shop with a profile that matches this configuration, and stops with `trust_required` without one or
 `config_conflict` when a value differs.
 
-Create the backup secret that encrypts your local purchase records:
-
-```sh
-annon init
-```
-
-It writes 32 random bytes to `~/.config/annon/backup-secret`, readable only by you, and prints where
+The same `annon init` creates the backup secret that encrypts your local purchase records. It writes
+32 random bytes to `~/.config/annon/backup-secret`, readable only by you, and prints where
 the file is. It never prints the secret and never replaces an existing file: run it again and it only
 checks the file. Other commands read the file but never create it. To keep the secret somewhere
 else, point `ANNON_BACKUP_SECRET_FILE` at that file instead.

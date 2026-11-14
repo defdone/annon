@@ -41,6 +41,8 @@ export interface Dependencies {
   purchase?: typeof getPurchase;
   fetch?: typeof fetch;
   prompt?: TrustPrompt;
+  /** A free-form terminal question; undefined when cancelled. Absent without a terminal. */
+  ask?: (message: string) => Promise<string | undefined>;
   notify?: (message: string) => void;
   wait?: (ms: number) => Promise<void>;
 }

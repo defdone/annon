@@ -24,18 +24,17 @@ if (
   // A confirmed Ctrl-C leaves a command running; exiting ends it as it would end a one-shot run.
   process.exit(await session.run());
 }
+const ask = async (message: string) => {
+  const reader = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return (await reader.question(message)).trim();
+  } finally {
+    reader.close();
+  }
+};
 const adapter = createAdapter(process.env, {
   ...(process.stdin.isTTY && process.stderr.isTTY
-    ? {
-        prompt: async (message: string) => {
-          const reader = createInterface({ input: process.stdin, output: process.stderr });
-          try {
-            return (await reader.question(message)).trim().toLowerCase() === 'yes';
-          } finally {
-            reader.close();
-          }
-        },
-      }
+    ? { ask, prompt: async (message: string) => (await ask(message)).toLowerCase() === 'yes' }
     : {}),
   notify,
 });

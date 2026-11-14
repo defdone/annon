@@ -5,11 +5,12 @@ import { createCoreAdapter, type Dependencies } from './core-adapter.js';
 import { identityJson, parseIdentity } from '../settle-near/identity.js';
 import { isRow } from './adapter-checks.js';
 import { agentPolicy, configPath, initAgent, savePublicConfig } from './agent.js';
-import { initBackupSecret, initPolicy } from './backup-secret-init.js';
+import { initPolicy } from './backup-secret-init.js';
 import { type BrowserSession, startBrowserSession } from './browser-login.js';
 import type { Input } from './cli.js';
 import { loadConfig } from './config.js';
 import { AdapterError } from './errors.js';
+import { initHuman } from './init-config.js';
 import { osKeychain } from './keychain.js';
 import { confinePaths } from './paths.js';
 import { catalogRow, discoverShops, isDiscovery } from './shops.js';
@@ -36,9 +37,7 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
     );
     if (isDiscovery(o)) return discoverShops(o, env, agent, d.fetch);
     if (o.command === 'init')
-      return o.agent
-        ? initAgent(o, env, d.keychain ?? osKeychain)
-        : initBackupSecret(o, env, d.notify);
+      return o.agent ? initAgent(o, env, d.keychain ?? osKeychain) : initHuman(o, env, d);
     const c = await loadConfig(o, env, o.command === 'login', d.agent);
     if (agent || c.agent) o = await confinePaths(o, c.workDir as string);
     // Agents buy allowed resource URLs only; a row number stays a refused target for them.
