@@ -2,28 +2,30 @@
 import type { Account } from 'near-api-js';
 import { isTransient } from '../errors.js';
 import { getFile, getPurchase, rpcReply, view } from '../near/rpc.js';
-import { identityJson } from '../settle-near/identity.js';
+import { registerText } from '../near/texts.js';
+// Preserve dependency evaluation order before the split modules enter the relay cycle.
+import '../net/retry.js';
+import '../pay/base.js';
+import '../pay/split.js';
+import { identityJson, verifyAuthorization } from '../settle-near/identity.js';
 import { parsePurchaseMessage } from '../settle-near/purchase.js';
-import { termsHash } from '../settle-near/terms.js';
+import { type SettlementAssets, termsHash } from '../settle-near/terms.js';
 import { admissionBalance, checkAdmissionFloor } from './admission.js';
+import './fees.js';
 import { type KeepOptions, type KeepResult, runKeeper } from './keeper-runner.js';
 import type { RelayLedger, SponsorshipDecision } from './ledger.js';
 import { requestHash } from './ledger.js';
+import './reservation.js';
+import './sponsorship.js';
 import { checkRelay } from './relay-checks.js';
 import { durableStatus } from './relay-reconciliation.js';
+import { canonicalRequest, contractArgs } from './relay-request.js';
+import { send, sign } from './relay-transactions.js';
 import {
-  canonicalRequest,
-  contractArgs,
-  identity,
-  quota,
-  requestBinding,
-} from './relay-request.js';
-import { send, senderKey, sign } from './relay-transactions.js';
-import {
-  asRelayError,
   type CheckOptions,
   fail,
   RelayError,
+  type RelayPolicy,
   type RelayRequest,
   type RelayResult,
   type Sender,
@@ -34,38 +36,63 @@ export type { KeeperRecord, KeepOptions, KeepResult, RefundSource } from './keep
 export { checkRelay } from './relay-checks.js';
 export { reconcileRelayStorage } from './relay-reconciliation.js';
 export { canonicalRequest, contractArgs } from './relay-request.js';
-export {
-  type CheckOptions,
-  RelayError,
-  type RelayErrorCode,
-  type RelayPolicy,
-  type RelayRequest,
-  type RelayResult,
-  type Sender,
+export type {
+  CheckOptions,
+  RelayErrorCode,
+  RelayPolicy,
+  RelayRequest,
+  RelayResult,
+  Sender,
 } from './relay-types.js';
+export { RelayError } from './relay-types.js';
+
+const asRelayError = (e: unknown): never => {
+  if (e instanceof RelayError) throw e;
+  return fail(isTransient(e) ? 'transport' : 'bad_request', (e as Error).message);
+};
+
+/** Gas for every call: `unlock` needs 150 Tgas, MPC's callbacks use the rest; unused gas returns. */
+const GAS = 300_000_000_000_000n;
 
 /**
  * Prepaid storage counted per write (`register`, `unlock`, `reopen`): more than any of them takes
  * (an unlock reserves 0.005 NEAR, a reopen marker under 0.001).
  */
-const STORAGE_PER_WRITE = 10n ** 22n; // 0.01 NEAR
+const STORAGE_PER_WRITE = 10n ** 22n;
+
+// 0.01 NEAR
 /** An operation is held this long after it is sent, so a repeat doesn't burn gas on a refusal. */
 const HOLD = 15 * 60_000;
+
+/** How many more tries after the first send: the same bytes again, or after PENDING a lookup. */
+const RESENDS = 2;
+
+/** The first wait before trying again when NEAR says "later" or "pending"; it grows each try. */
+const RETRY_WAIT = 1_000;
 
 /** Requests waiting for their turn; past this the relayer answers busy. */
 const MAX_WAITING = 32;
 
 const accounts = new Map<string, Account>();
+
 const verifiedBaseTerms = new Set<string>();
+
 const refusedBaseTerms = new Map<string, number>();
+
 const queues = new Map<string, Promise<unknown>>();
+
 const statusReads = new WeakMap<
   RelayLedger,
   Map<string, Promise<RelayResult | 'pending' | null>>
 >();
+
 const reconciliationCursor = new WeakMap<RelayLedger, number>();
+
 let waiting = 0;
+
 let checking = 0;
+
+const isObject = (v: unknown): v is object => typeof v === 'object' && v !== null;
 
 /** The statuses of a transaction in a block (`NONE`: known, not yet in one). */
 const IN_BLOCK = new Set([
@@ -75,6 +102,61 @@ const IN_BLOCK = new Set([
   'EXECUTED',
   'FINAL',
 ]);
+
+const inBlock = (result: unknown) => {
+  const s = (result as { final_execution_status?: unknown } | null | undefined)
+    ?.final_execution_status;
+  return typeof s === 'string' && IN_BLOCK.has(s);
+};
+
+/** Ask for FINAL evidence by hash; a lost reply never proves rejection. */
+const lookUp = (url: string, tx: string, accountId: string) =>
+  rpcReply(url, 'tx', { tx_hash: tx, sender_account_id: accountId, wait_until: 'FINAL' }).catch(
+    () => null,
+  );
+
+const senderKey = (o: { nearRpc: string; sender: Sender }) =>
+  `${o.nearRpc}|${o.sender.accountId}|${o.sender.key}`;
+
+/**
+ * What makes two requests the same operation. Only a party that could make the request succeed
+ * can hold it: wallet signatures are checked against their authoritative identities before
+ * anything is held, and an unlock
+ * includes the buyer's key, which only the buyer knows before it is sent.
+ */
+const identity = (r: RelayRequest) => {
+  if (r.method === 'unlock') return `unlock:${JSON.parse(r.args.purchase).purchase.purchase_id}`;
+  if (r.method === 'claim_key') return `claim:${r.args.purchase_id}:${r.args.grant ?? 0}`;
+  if (r.method === 'reopen')
+    return `reopen:${r.args.purchase_id}:${r.args.fresh_key}:${r.args.nonce}`;
+  if (r.method === 'register') return `register:${r.args.terms.file_id}`;
+  if (r.method === 'fund_file_storage')
+    return `fund_file_storage:${r.args.file_id}:${r.args.nonce}`;
+  return `${r.method}:${r.args.file_id}:${r.args.key ?? ''}`;
+};
+
+const signedByItsWallet = (r: RelayRequest, contract: string, assets?: SettlementAssets) => {
+  if (
+    r.method === 'register' &&
+    !verifyAuthorization(r.args.terms.seller, registerText(contract, r.args, assets), r.auth)
+  )
+    fail('bad_signature');
+};
+
+const quota = (r: RelayRequest, p: RelayPolicy): [string, number] | null =>
+  r.method === 'register'
+    ? [`register:${identityJson(r.args.terms.seller)}`, p.registrationsPerSeller ?? 20]
+    : r.method === 'claim_key'
+      ? [`claim:${r.args.purchase_id}:${r.args.grant ?? 0}`, p.claimsPerGrant ?? 3]
+      : r.method === 'reopen'
+        ? [`reopen:${r.args.purchase_id}`, p.reopensPerWalletFile ?? 10]
+        : null;
+
+const requestBinding = (r: RelayRequest) => {
+  if (r.method !== 'register') return r;
+  const { hostingReservation: _reservation, ...binding } = r;
+  return binding;
+};
 
 /** Runs jobs one at a time, in order: checks and nonces never interleave. */
 function enqueue<T>(job: () => Promise<T>, scope = 'relay'): Promise<T> {
@@ -443,14 +525,27 @@ export {
   settle,
 } from './keeper.js';
 
-// Shared state stays here to preserve module initialization order.
+// Load-time declarations stay together in their original evaluation order.
 export {
   accounts,
+  asRelayError,
   enqueue,
+  fail,
+  GAS,
   HOLD,
   IN_BLOCK,
+  identity,
+  inBlock,
+  isObject,
+  lookUp,
+  quota,
+  RESENDS,
+  RETRY_WAIT,
   reconciliationCursor,
   refusedBaseTerms,
+  requestBinding,
+  senderKey,
+  signedByItsWallet,
   statusReads,
   verifiedBaseTerms,
 };

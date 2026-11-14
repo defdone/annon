@@ -8,8 +8,15 @@ import { bytes } from '../settle-near/codec.js';
 import { parsePurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import type { RelayLedger } from './ledger.js';
 import { requestHash } from './ledger.js';
-import { enqueue, HOLD, reconciliationCursor, statusReads } from './relay.js';
-import { identity, requestBinding, signedByItsWallet } from './relay-request.js';
+import {
+  enqueue,
+  HOLD,
+  identity,
+  reconciliationCursor,
+  requestBinding,
+  signedByItsWallet,
+  statusReads,
+} from './relay.js';
 import { lookUp, send, senderKey } from './relay-transactions.js';
 import {
   type CheckOptions,

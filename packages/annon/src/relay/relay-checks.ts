@@ -9,9 +9,8 @@ import { identityJson, verifyAuthorization } from '../settle-near/identity.js';
 import { baseNonceV2, parsePurchaseMessage, purchaseId } from '../settle-near/purchase.js';
 import { termsHash } from '../settle-near/terms.js';
 import { checkProtocolFee } from './fees.js';
-import { refusedBaseTerms, verifiedBaseTerms } from './relay.js';
-import { signedByItsWallet } from './relay-request.js';
-import { asRelayError, type CheckOptions, fail, type RelayRequest } from './relay-types.js';
+import { asRelayError, refusedBaseTerms, signedByItsWallet, verifiedBaseTerms } from './relay.js';
+import { type CheckOptions, fail, type RelayRequest } from './relay-types.js';
 import { verifyReservation } from './reservation.js';
 import { admitTerms, checkedDecision, temporary } from './sponsorship.js';
 

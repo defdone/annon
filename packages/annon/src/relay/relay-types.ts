@@ -1,6 +1,6 @@
 /** Relay request, policy, sender and result types with shared errors. */
 
-import { AnnonError, isTransient } from '../errors.js';
+import { AnnonError } from '../errors.js';
 import type { FileInfo } from '../near/rpc.js';
 import type { FileFundingArgs, RegisterArgs, ReopenArgs, SellerArgs } from '../near/texts.js';
 import type { EvmLog } from '../pay/base.js';
@@ -45,22 +45,6 @@ export type RelayErrorCode =
   | 'payment_used'
   | 'bad_header'
   | 'transport';
-
-export class RelayError extends AnnonError {
-  // A plain field, not a parameter property: the relayer runs this file with Node's type
-  // stripping, which has no parameter properties.
-  readonly code: RelayErrorCode;
-  retryAt?: number;
-  constructor(code: RelayErrorCode, message: string = code) {
-    super(code, message);
-    this.code = code;
-    this.name = 'RelayError';
-  }
-}
-
-const fail = (code: RelayErrorCode, message?: string): never => {
-  throw new RelayError(code, message);
-};
 
 export interface RelayPolicy {
   minPrice: bigint;
@@ -120,11 +104,6 @@ export interface CheckOptions extends AdmissionOptions {
   alert?: (type: string) => void;
 }
 
-const asRelayError = (e: unknown): never => {
-  if (e instanceof RelayError) throw e;
-  return fail(isTransient(e) ? 'transport' : 'bad_request', (e as Error).message);
-};
-
 // ---------- sending ----------
 
 export interface Sender {
@@ -148,4 +127,20 @@ export interface RelayResult {
   reason?: string;
 }
 
-export { asRelayError, fail };
+export class RelayError extends AnnonError {
+  // A plain field, not a parameter property: the relayer runs this file with Node's type
+  // stripping, which has no parameter properties.
+  readonly code: RelayErrorCode;
+  retryAt?: number;
+  constructor(code: RelayErrorCode, message: string = code) {
+    super(code, message);
+    this.code = code;
+    this.name = 'RelayError';
+  }
+}
+
+const fail = (code: RelayErrorCode, message?: string): never => {
+  throw new RelayError(code, message);
+};
+
+export { fail };

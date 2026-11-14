@@ -1,12 +1,10 @@
 /** Relay request canonicalization, contract arguments and operation identity. */
 
-import { registerText } from '../near/texts.js';
 import type { EvmLog } from '../pay/base.js';
 import { bytes, exactKeys, uint } from '../settle-near/codec.js';
-import { identityJson, verifyAuthorization } from '../settle-near/identity.js';
 import { buyerKey, parsePurchaseMessage } from '../settle-near/purchase.js';
 import { type SettlementAssets, termsHash } from '../settle-near/terms.js';
-import { fail, type RelayPolicy, type RelayRequest } from './relay-types.js';
+import { fail, type RelayRequest } from './relay-types.js';
 import { parseReservation } from './reservation.js';
 
 export function canonicalRequest(input: unknown, assets?: SettlementAssets): RelayRequest {
@@ -147,45 +145,3 @@ export const contractArgs = (r: RelayRequest): object =>
       : r.method === 'unlock'
         ? { args: r.args }
         : r.args;
-
-/**
- * What makes two requests the same operation. Only a party that could make the request succeed
- * can hold it: wallet signatures are checked against their authoritative identities before
- * anything is held, and an unlock
- * includes the buyer's key, which only the buyer knows before it is sent.
- */
-const identity = (r: RelayRequest) => {
-  if (r.method === 'unlock') return `unlock:${JSON.parse(r.args.purchase).purchase.purchase_id}`;
-  if (r.method === 'claim_key') return `claim:${r.args.purchase_id}:${r.args.grant ?? 0}`;
-  if (r.method === 'reopen')
-    return `reopen:${r.args.purchase_id}:${r.args.fresh_key}:${r.args.nonce}`;
-  if (r.method === 'register') return `register:${r.args.terms.file_id}`;
-  if (r.method === 'fund_file_storage')
-    return `fund_file_storage:${r.args.file_id}:${r.args.nonce}`;
-  return `${r.method}:${r.args.file_id}:${r.args.key ?? ''}`;
-};
-
-const signedByItsWallet = (r: RelayRequest, contract: string, assets?: SettlementAssets) => {
-  if (
-    r.method === 'register' &&
-    !verifyAuthorization(r.args.terms.seller, registerText(contract, r.args, assets), r.auth)
-  )
-    fail('bad_signature');
-};
-
-const quota = (r: RelayRequest, p: RelayPolicy): [string, number] | null =>
-  r.method === 'register'
-    ? [`register:${identityJson(r.args.terms.seller)}`, p.registrationsPerSeller ?? 20]
-    : r.method === 'claim_key'
-      ? [`claim:${r.args.purchase_id}:${r.args.grant ?? 0}`, p.claimsPerGrant ?? 3]
-      : r.method === 'reopen'
-        ? [`reopen:${r.args.purchase_id}`, p.reopensPerWalletFile ?? 10]
-        : null;
-
-const requestBinding = (r: RelayRequest) => {
-  if (r.method !== 'register') return r;
-  const { hostingReservation: _reservation, ...binding } = r;
-  return binding;
-};
-
-export { identity, quota, requestBinding, signedByItsWallet };

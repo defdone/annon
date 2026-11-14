@@ -5,17 +5,8 @@ import { base58, base64 } from '@scure/base';
 import { Account, actions, encodeTransaction, JsonRpcProvider } from 'near-api-js';
 import { RPC_TIMEOUT_MS, type RpcReply, rpcReply } from '../near/rpc.js';
 import { sleep } from '../net/retry.js';
-import { accounts, IN_BLOCK } from './relay.js';
+import { accounts, GAS, inBlock, isObject, lookUp, RESENDS, RETRY_WAIT } from './relay.js';
 import { fail, type RelayResult, type Sender } from './relay-types.js';
-
-/** Gas for every call: `unlock` needs 150 Tgas, MPC's callbacks use the rest; unused gas returns. */
-const GAS = 300_000_000_000_000n;
-
-/** How many more tries after the first send: the same bytes again, or after PENDING a lookup. */
-const RESENDS = 2;
-
-/** The first wait before trying again when NEAR says "later" or "pending"; it grows each try. */
-const RETRY_WAIT = 1_000;
 
 /**
  * The provider near-api-js signs with: it reads the key's nonce and a recent block. Every reply
@@ -37,14 +28,6 @@ function signingProvider(url: string) {
   }) as typeof p.sendJsonRpc;
   return p;
 }
-
-const isObject = (v: unknown): v is object => typeof v === 'object' && v !== null;
-
-const inBlock = (result: unknown) => {
-  const s = (result as { final_execution_status?: unknown } | null | undefined)
-    ?.final_execution_status;
-  return typeof s === 'string' && IN_BLOCK.has(s);
-};
 
 /**
  * What NEAR's error guide (docs.near.org/api/rpc/transactions#error-handling) says to do after an
@@ -75,15 +58,6 @@ function describe(e: NonNullable<RpcReply['error']>) {
     ?.TxExecutionError?.InvalidTxError;
   return JSON.stringify(refused ?? { name, cause, data, message });
 }
-
-/** Ask for FINAL evidence by hash; a lost reply never proves rejection. */
-const lookUp = (url: string, tx: string, accountId: string) =>
-  rpcReply(url, 'tx', { tx_hash: tx, sender_account_id: accountId, wait_until: 'FINAL' }).catch(
-    () => null,
-  );
-
-const senderKey = (o: { nearRpc: string; sender: Sender }) =>
-  `${o.nearRpc}|${o.sender.accountId}|${o.sender.key}`;
 
 /** Signs one function call, no deposit, with the sender's key (one account per key, so near-api-js
  * numbers its nonces locally across calls). */
@@ -220,4 +194,5 @@ async function send(
   }
 }
 
-export { lookUp, send, senderKey, sign };
+export { lookUp, senderKey } from './relay.js';
+export { send, sign };
