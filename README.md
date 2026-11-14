@@ -184,10 +184,13 @@ annon open 0xPURCHASE_ID --output what-we-are-building.pdf
 ```
 
 You see the price and the recipients before you approve. Then you get a purchase ID, a status of
-`accepted`, and the decrypted file. If `status` says `pending`, wait and ask again; never pay a
-second time for the same purchase. For a file without Base terms, `--route base` stops with
-`route_unavailable` before any payment; use `--route 1click --from-chain base` instead. Opening the
-file on another computer: [docs/quickstart.md](docs/quickstart.md#5-open-it-on-another-computer).
+`accepted`, and the decrypted file. Your purchase is saved, encrypted, before you pay. If `status`
+says `pending`, wait and check again; resume the same purchase with `annon status` and `annon open`
+instead of starting a new one. While it is live or accepted, a second `annon buy` of the same file
+is refused with `purchase_open` unless you pass `--force`. To pay with USDC on Base or from another
+chain, follow [Pay on Base](docs/quickstart.md#pay-on-base) or
+[Pay from another chain with 1Click](docs/quickstart.md#pay-from-another-chain-with-1click). Opening
+the file on another computer: [docs/quickstart.md](docs/quickstart.md#5-open-it-on-another-computer).
 
 ### Sell a file
 

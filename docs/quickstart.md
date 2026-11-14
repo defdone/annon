@@ -31,8 +31,8 @@ Create `~/.config/annon/config.json`:
 }
 ```
 
-`maxPrice` is the most a single purchase may cost, in USDC. To pay on Base, add `"baseRpc"` with a
-Base RPC endpoint that has an API key; the public endpoint rate-limits the reads a payment needs.
+`maxPrice` is the most a single purchase may cost, in USDC. To pay on Base, also add `"baseRpc"`
+([Pay on Base](#pay-on-base)).
 
 Create the backup secret that encrypts your local purchase records, and keep it outside any
 repository:
@@ -56,39 +56,78 @@ Every payment is approved in the wallet.
 
 ## 4. Buy and open
 
-Check the file, buy it, wait until the purchase is accepted, and open it:
+Check the file, buy it, wait until the purchase is accepted, and open it. Pick the path that matches
+where your money is. Each path starts with `login`; skip it if you already signed in with that
+wallet in step 3. Login remembers one wallet, so sign in again to switch.
+
+- `--trust-contract` records once that you trust this contract to release keys.
+- `buy` shows the price, the recipients and the route, and asks before it pays. It prints the
+  purchase ID.
+- Your purchase is saved, encrypted, before you pay. If `status` says `pending`, or a command stops
+  with `settlement_pending` (exit code 4), wait and check again; resume the same purchase with
+  `annon status` and `annon open` instead of starting a new one. While it is live or accepted, a
+  second `annon buy` of the same file is refused with `purchase_open` unless you pass `--force`.
+
+### Pay on NEAR
+
+You need a NEAR wallet with USDC on NEAR and a little NEAR for gas.
 
 ```sh
+annon login --wallet near
 annon verify https://demo.annon.dev/f/what-we-are-building --trust-contract
 annon buy https://demo.annon.dev/f/what-we-are-building --route near
 annon status 0xPURCHASE_ID
 annon open 0xPURCHASE_ID --output what-we-are-building.pdf
 ```
 
-- `--trust-contract` records once that you trust this contract to release keys.
-- `buy` shows the price, the recipients and the route, and asks before it pays. It prints the
-  purchase ID.
-- If `status` says `pending`, or a command stops with `settlement_pending` (exit code 4), wait and
-  ask again. A Base payment must reach Safe finality before NEAR can verify it. Poll `status` and
-  honor `retryAfterSeconds`.
-- **Never pay a second time for the same purchase.** Resume the existing purchase with `status` and
-  `open`. A saved live or accepted purchase blocks another buy with `purchase_open`. Only an explicit
-  `--force` creates another purchase despite that saved purchase.
+You approve the USDC transfer in your wallet, `status` says `accepted`, and `open` writes the
+decrypted file.
 
-What you need for each route:
+### Pay on Base
 
-| Route | Command | You need |
-|---|---|---|
-| `near` | `annon buy URL --route near` | A NEAR wallet with USDC on NEAR and a little NEAR for gas |
-| `base` | `annon buy URL --route base` | An EVM wallet with USDC on Base. No ETH: you sign an authorization and the host submits it |
-| `1click` | `annon buy URL --route 1click --from-chain base` | A supported token on the source chain, plus that chain's gas. The quote includes the swap fees |
+You need an EVM wallet with USDC on Base. No ETH: you sign a USDC authorization and the host submits
+it. First add `"baseRpc"` to your config, with a Base RPC endpoint that has an API key: the CLI reads
+the Base payment through it, and the public endpoint rate-limits those reads.
 
-`base` works only for a file whose on-chain terms include a Base payee. For any other file the CLI
-stops with `route_unavailable` before any wallet or payment step. Pay that file with `1click` and
-Base as the source chain, as in the last row. Source-chain refunds go to your EVM wallet's address;
-with another wallet, add `--refund-to` with an address on the source chain. For 1Click, `buy`
-returns deposit instructions: send
-exactly that amount from your own wallet before `depositBefore`, then check `status`.
+```sh
+annon login --wallet evm
+annon verify https://host.example/f/FILE --trust-contract
+annon buy https://host.example/f/FILE --route base
+annon status 0xPURCHASE_ID
+annon open 0xPURCHASE_ID --output file.pdf
+```
+
+`status` says `pending` until the payment reaches Safe finality on Base and NEAR has verified it. Run
+it again after `retryAfterSeconds` until it says `accepted`, then `open` writes the decrypted file.
+
+This route works only for a file whose on-chain terms include a Base payee; only files from EVM
+sellers can have one. For any other file, `buy --route base` stops with
+`route_unavailable` before any wallet or payment step; pay it with 1Click from Base instead.
+
+### Pay from another chain with 1Click
+
+You need a supported token on the source chain, plus that chain's gas. The quote includes the swap
+fees.
+
+```sh
+annon login --wallet evm
+annon verify https://demo.annon.dev/f/what-we-are-building --trust-contract
+annon buy https://demo.annon.dev/f/what-we-are-building --route 1click --from-chain base
+annon status 0xPURCHASE_ID
+annon open 0xPURCHASE_ID --output what-we-are-building.pdf
+```
+
+`buy` returns deposit instructions: an address, an amount in the token's base units, the asset, a
+memo if one is needed, and `depositBefore`. Send exactly that amount, with the memo, from your own
+wallet before `depositBefore`. Then run `status` until it says `accepted`; a 1Click `SUCCESS` alone
+is not acceptance. `open` writes the decrypted file.
+
+For another chain, change `--from-chain` (for example `arbitrum`, `ethereum`, `polygon` or
+`solana`). Without `--from-asset` the CLI picks that chain's USDC; for any other token pass
+`--from-asset` with its exact 1Click `nep141:` asset ID. Source-chain refunds go to your signed-in
+wallet when it is on the same kind of chain. Otherwise, or to get refunds at the wallet you pay
+from, add `--refund-to` with an address on the source chain. Supported chains and options:
+[CLI.md](../packages/annon/CLI.md).
 
 ## 5. Open it on another computer
 
