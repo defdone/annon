@@ -1,6 +1,6 @@
 {
   "name": "@defdone/annon-mcp",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "description": "Local stdio MCP tools for selling, buying, opening and verifying Annon files.",
   "license": "Apache-2.0",
   "homepage": "https://annon.dev",
