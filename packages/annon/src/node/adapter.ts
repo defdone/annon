@@ -4,6 +4,7 @@ import { createCoreAdapter, type Dependencies } from './core-adapter.js';
 
 import { identityJson, parseIdentity } from '../settle-near/identity.js';
 import { agentPolicy, configPath, initAgent, savePublicConfig } from './agent.js';
+import { initBackupSecret, initPolicy } from './backup-secret-init.js';
 import { type BrowserSession, startBrowserSession } from './browser-login.js';
 import type { Input } from './cli.js';
 import { loadConfig } from './config.js';
@@ -27,9 +28,16 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
         'Signer and credential references can only be set by init.',
         2,
       );
-    const agent = await agentPolicy(o, env, d.agent);
+    const agent = await (o.command === 'init' && !o.agent ? initPolicy : agentPolicy)(
+      o,
+      env,
+      d.agent,
+    );
     if (isDiscovery(o)) return discoverShops(o, env, agent, d.fetch);
-    if (o.command === 'init') return initAgent(o, env, d.keychain ?? osKeychain);
+    if (o.command === 'init')
+      return o.agent
+        ? initAgent(o, env, d.keychain ?? osKeychain)
+        : initBackupSecret(o, env, d.notify);
     const c = await loadConfig(o, env, o.command === 'login', d.agent);
     if (agent || c.agent) o = await confinePaths(o, c.workDir as string);
     if (c.signer) {

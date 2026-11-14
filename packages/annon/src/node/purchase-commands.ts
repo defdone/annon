@@ -26,11 +26,11 @@ import { retryGate } from './retry-gate.js';
 import { readBackupSecret } from './wallets.js';
 
 /**
- * `status`, first step: a purchase already accepted on chain, or the pending answer when no
- * backup secret is configured. Returns nothing when the saved record has to be checked.
+ * `status`, first step: a purchase already accepted on chain. Returns nothing when the saved
+ * record has to be checked; a missing backup secret then reports the pending setup answer.
  */
 async function statusOnChain(ctx: RequestContext): Promise<Record<string, unknown> | undefined> {
-  const { c, d, env, o, paymentDetails, pendingSetup } = ctx;
+  const { c, d, env, o, paymentDetails } = ctx;
   if (!o.target || !isId(o.target)) throw usage();
   if (d.agent) await retryGate({ ...c, purchaseId: o.target }).check();
   const p = await (d.purchase ?? getPurchase)(c.nearRpc, c.contractId, o.target);
@@ -48,8 +48,6 @@ async function statusOnChain(ctx: RequestContext): Promise<Record<string, unknow
         ).load(purchaseKey(o.target as string)),
       )),
     };
-  if (!o.backupSecretFile && !env.ANNON_BACKUP_SECRET_FILE && !env.ANNON_BACKUP_SECRET)
-    return pendingSetup(o.target);
 }
 
 /** `status` from the saved purchase record: accepted, or still pending with a retry delay. */

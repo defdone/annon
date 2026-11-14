@@ -41,6 +41,8 @@ export interface Config extends DiscoveryConfig {
   listingStorage?: string;
   maxProtocolFee?: { fixed: string; bps: number };
 }
+/** Human default for saved records and backups; agent and explicit settings override it. */
+export const defaultStateDir = () => join(homedir(), '.local', 'share', 'annon');
 export async function loadConfig(
   o: Input,
   env: Environment,
@@ -85,7 +87,7 @@ export async function loadConfig(
         o.stateDir ??
         (agent ? undefined : env.ANNON_STATE_DIR) ??
         file.stateDir ??
-        join(homedir(), '.local', 'share', 'annon'),
+        defaultStateDir(),
     };
     Object.assign(c, validateDiscoveryConfig(file));
     const workDir = (env.ANNON_AGENT === 'true' ? env.ANNON_WORK_DIR : undefined) ?? file.workDir;

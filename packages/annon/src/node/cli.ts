@@ -1,6 +1,7 @@
 import { parseArgs } from 'node:util';
 import type { BuyRoute } from '../routes.js';
 import { publicError, usage } from './errors.js';
+import { version } from './version.js';
 
 export type Command =
   | 'shops'
@@ -131,6 +132,7 @@ const perCommand: Record<Command, string[]> = {
   verify: [],
   status: [],
 };
+const bareInit = ['json', 'config', 'stateDir', 'backupSecretFile'];
 export function parseCli(argv: string[]): Input {
   try {
     const keys = [...new Set([...common, ...Object.values(perCommand).flat()])];
@@ -203,7 +205,13 @@ export function parseCli(argv: string[]): Input {
           throw usage();
       } else if (!values.price || !values.split) throw usage();
     }
-    if (cmd === 'init' && values.agent !== true) throw usage();
+    // Bare init only sets up the backup secret; signer and deployment options need --agent.
+    if (
+      cmd === 'init' &&
+      values.agent !== true &&
+      Object.keys(values).some((k) => !bareInit.includes(k))
+    )
+      throw usage();
     if (cmd === 'recover' && !values.recovery) throw usage();
     if (values.route && !['near', 'base', '1click'].includes(String(values.route))) throw usage();
     if (values.wallet && !['evm', 'solana', 'near'].includes(String(values.wallet))) throw usage();
@@ -217,10 +225,12 @@ export function parseCli(argv: string[]): Input {
     throw usage();
   }
 }
+const versionFlags = ['--version', '-v'];
 const HELP = `annon <command> [options]
 shops [--search <q>] [--limit <n>] [--offset <n>]
 shop add <url> [--id <alias>]
 catalog [--shop <id>] [--search <q>] [--limit <n>] [--offset <n>]
+init [--backup-secret-file <file>] [--state-dir <dir>] [--config <file>]
 login [--wallet evm|near] [--no-open]
 init --agent --daily-budget <USDC> [--recovery <kind:id>] [--key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> (--credential-env <name> | --credential-keychain <name>)]
 share <file> --price <USDC> [--shop <id>] [--title <title>] [--description <text>] [--listing-storage <NEAR>] [--storage-budget <NEAR>]
@@ -239,8 +249,10 @@ Common: --json --config <file> --contract-id <account> --near-rpc <url> --base-r
 --network <near:mainnet> --state-dir <dir> --relayer <url> --trust-contract
 --wallet evm|solana|near --evm-key-file <file> --solana-key-file <file> --near-key-file <file>
 --near-account <account> --near-public-key <ed25519:key> --backup-secret-file <file>
-Secrets: env ANNON_EVM_PRIVATE_KEY, ANNON_SOLANA_KEYPAIR, ANNON_NEAR_CREDENTIALS,
-ANNON_BACKUP_SECRET (64 hex); or explicitly named files. See packages/annon/CLI.md.
+Backup secret: run init once; it creates ~/.config/annon/backup-secret (owner-only) and never
+overwrites. --backup-secret-file or ANNON_BACKUP_SECRET_FILE, then ANNON_BACKUP_SECRET, override it.
+Secrets: env ANNON_EVM_PRIVATE_KEY, ANNON_SOLANA_KEYPAIR, ANNON_NEAR_CREDENTIALS; or explicitly
+named files. See packages/annon/CLI.md. --version prints the installed version.
 Exit: 0 success (buy may need deposit), 1 operation failed, 2 arguments/config, 3 trust required, 4 purchase pending.
 `;
 export async function runCli(
@@ -251,6 +263,14 @@ export async function runCli(
   const json = argv.includes('--json') || argv.includes('--json=true');
   if (argv.length === 0 || argv.includes('--help')) {
     write(HELP);
+    return 0;
+  }
+  // Answered before any config, agent policy, wallet, network or backup-secret step.
+  if (
+    argv.some((a) => versionFlags.includes(a)) &&
+    argv.every((a) => [...versionFlags, '--json'].includes(a))
+  ) {
+    write(json ? JSON.stringify({ ok: true, result: { version } }) : version);
     return 0;
   }
   try {
