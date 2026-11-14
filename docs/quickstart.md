@@ -6,7 +6,7 @@ selling see [selling.md](selling.md), for agents see [agents.md](agents.md). Eve
 
 ## 1. Install
 
-You need Node.js 22.18 or newer.
+You need Node.js 22.22.2 or newer.
 
 ```sh
 npm install -g @defdone/annon@alpha

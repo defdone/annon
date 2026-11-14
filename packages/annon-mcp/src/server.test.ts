@@ -42,6 +42,19 @@ import { must, purchase, terms } from '../../annon/test/fixtures.js';
 import { createServer } from './server.js';
 
 const directories: string[] = [];
+
+// Synthetic secrets, plaintext and injected failure messages that output must never carry.
+// Matched by value, not by the word "private", which also appears in macOS temp paths.
+const secretMarks = [
+  /private (purchased content|\w+ failure)/,
+  /(?:42){32}/i,
+  /(?:ab){32}/i,
+  /(?:0[368]){32}/,
+];
+function expectNoSecrets(text: string, extra: string[] = []) {
+  for (const mark of secretMarks) expect(text).not.toMatch(mark);
+  for (const value of extra) expect(text).not.toContain(value);
+}
 afterEach(async () => {
   for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true });
   vi.restoreAllMocks();
@@ -811,7 +824,7 @@ it.each(['near', 'base', '1click'] as const)(
                 ([, init]) => init?.headers && 'PAYMENT-SIGNATURE' in init.headers,
               ),
             ).toBe(true);
-          expect(JSON.stringify(result)).not.toContain('private');
+          expectNoSecrets(JSON.stringify(result), [h.saved.buyerSecret]);
           expect(
             await fileStore<BudgetRecord>(join(h.dir, 'budgets')).load('agent:USDC'),
           ).toMatchObject({ daily: '200000', hourly: '200000' });
@@ -825,6 +838,24 @@ it.each(['near', 'base', '1click'] as const)(
     }
   },
 );
+
+it('returns short usage instructions in the initialize result', async () => {
+  const connection = await connect(async () => ({}));
+  try {
+    const text = must(connection.client.getInstructions());
+    const lines = text.split('\n');
+    expect(lines.length).toBeGreaterThanOrEqual(3);
+    expect(lines.length).toBeLessThanOrEqual(5);
+    const order = ['annon_catalog', 'annon_buy', 'annon_status', 'annon_open'].map((tool) =>
+      text.indexOf(tool),
+    );
+    expect(order.every((at, i) => at >= 0 && (i === 0 || at > must(order[i - 1])))).toBe(true);
+    expect(text).toContain('annon_verify');
+    expect(text).toContain('docs/agents.md');
+  } finally {
+    await connection.close();
+  }
+});
 
 it('creates the production MCP adapter in agent mode', async () => {
   const factory = vi.spyOn(adapterModule, 'createAdapter').mockReturnValue(async () => ({}));
@@ -2187,7 +2218,7 @@ it.each(['proof', 'cutoff', 'storage', 'review'])(
         ),
       ).toBe(1);
       expect(output.join('')).not.toContain('deposit-address');
-      expect(output.join('')).not.toContain('private');
+      expectNoSecrets(output.join(''));
       if (failure === 'cutoff')
         expect(JSON.parse(must(output[0])).error.code).toBe('quote_expired');
       expect(h.notify).not.toHaveBeenCalled();

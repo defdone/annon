@@ -47,6 +47,7 @@ const rulesLine = (shop: { name: string } | undefined, rules: ShopRules) =>
 export function catalogText(
   input: Input,
   page: Page<CatalogEntry> & { shop?: { manifest: string; name: string }; rules?: ShopRules },
+  session = false,
 ): string {
   if (page.items.length === 0) return page.total === 0 ? 'No files.' : 'No files on this page.';
   const first = rowNumber(input, 0);
@@ -66,6 +67,6 @@ export function catalogText(
     ]),
     ...(page.rules ? [rulesLine(page.shop, page.rules)] : []),
     ...more(page),
-    `Buy a row with: annon buy <#>${shop}${input.search === undefined ? '' : ` --search ${JSON.stringify(input.search)}`}`,
+    `Buy a row with: ${session ? '' : 'annon '}buy <#>${shop}${input.search === undefined ? '' : ` --search ${JSON.stringify(input.search)}`}`,
   ].join('\n');
 }

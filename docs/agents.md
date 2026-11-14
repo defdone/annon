@@ -22,16 +22,36 @@ Create a working directory and a configuration file, for example `/absolute/anno
   "stateDir": "/absolute/private/annon-state",
   "trustContract": true,
   "maxPrice": "0.20",
+  "dailyBudget": "1",
   "workDir": "/absolute/annon-work",
+  "allowedResources": ["https://demo.annon.dev/f/*"],
   "origins": {
     "base-usdc": {
       "fromChain": "base",
       "fromAsset": "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near",
       "usdcDecimals": 6
     }
-  }
+  },
+  "shops": [
+    {
+      "id": "demo",
+      "manifest": "https://annon.dev/.well-known/annon-shop.json",
+      "profile": {
+        "network": "near:mainnet",
+        "contract": "v1.annon.defdone.near",
+        "nearRpc": "https://rpc.mainnet.fastnear.com",
+        "baseRpc": "https://your-base-rpc-with-api-key.example",
+        "relayer": "https://relayer.mainnet.annon.dev",
+        "host": "https://demo.annon.dev"
+      }
+    }
+  ],
+  "defaultShop": "demo"
 }
 ```
+
+The `shops` block is the demo shop from [quickstart.md](quickstart.md#2-configure), with the same
+`baseRpc` in its `profile` as in the configuration. `dailyBudget` is needed for buying.
 
 Every agent origin needs `usdcDecimals` for a USDC source, or `maxSourceAmount` in source base units. Without one, configuration fails with `origin_not_allowed`.
 
@@ -43,7 +63,7 @@ or point it at that file: a missing file fails without falling back:
 
 ```sh
 ANNON_CONFIG=/absolute/annon-agent.json annon init
-ANNON_CONFIG=/absolute/annon-agent.json annon init --agent --wallet evm --recovery evm:0xAGENT_ADDRESS --evm-key-file /absolute/private/agent-evm.key --daily-budget 2
+ANNON_CONFIG=/absolute/annon-agent.json annon init --agent --wallet evm --recovery evm:0xAGENT_ADDRESS --evm-key-file /absolute/private/agent-evm.key --daily-budget 1
 ```
 
 | Setting | What it limits |

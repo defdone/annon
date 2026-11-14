@@ -2,8 +2,8 @@
 
 ## Setup
 
-- Node 22 or newer (CI runs 26), pnpm 12 (`npm i -g pnpm@12`; the exact version is pinned in `package.json`)
-- Rust from `rust-toolchain.toml`, for the contract
+- Node 22.22.2 or newer, on Node 23 use 23.6 or newer (CI runs 26), pnpm 12 (`npm i -g pnpm@12`; the exact version is pinned in `package.json`)
+- Rust from `rust-toolchain.toml`, for the contract: run `rustup toolchain install` in the repository
 
 ```sh
 pnpm install

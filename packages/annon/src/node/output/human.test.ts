@@ -386,3 +386,42 @@ it('a human error is one readable line with its code, facts and wait; --json kee
   expect(await runCli(['shell'], fail, (l) => lines.push(l))).toBe(2);
   expect(JSON.parse(lines.join('')).error.code).toBe('invalid_arguments');
 });
+
+it('a missing wallet shows a person the sign-in path; JSON, pipes and agents keep the message', async () => {
+  const message =
+    'Select a wallet and provide its key through the documented environment variable or a named key file. Check the recovery identity matches.';
+  const fail = async () => {
+    throw new AdapterError('credentials_required', message, 2);
+  };
+  const run = async (argv: string[], options: Parameters<typeof runCli>[3]) => {
+    const lines: string[] = [];
+    const exit = await runCli(argv, fail, (l) => lines.push(l), options);
+    return { exit, text: lines.join('\n') };
+  };
+  const error = { code: 'credentials_required', message, exitCode: 2 };
+  const person = await run(['buy', '1'], { human: true });
+  expect(person.exit).toBe(2);
+  expect(person.text).toBe(
+    `Error: ${message} (credentials_required)\nSign in with annon login --wallet near (or evm) to approve payments in your browser, or configure a key as in the docs.`,
+  );
+  const session = await run(['buy', '1'], { human: true, session: true });
+  expect(session.text.split('\n')[1]).toBe(
+    'Sign in with login --wallet near (or evm) to approve payments in your browser, or configure a key as in the docs.',
+  );
+  // --json and the non-terminal or agent output (human off) stay byte for byte as before.
+  expect((await run(['buy', '1', '--json'], { human: true })).text).toBe(
+    JSON.stringify({ ok: false, error }),
+  );
+  expect((await run(['buy', '1'], {})).text).toBe(JSON.stringify({ ok: false, error }, null, 2));
+});
+
+it('inside the session the catalog footer names the command without the annon prefix', async () => {
+  const lines: string[] = [];
+  await runCli(
+    ['catalog', '--shop', 'demo'],
+    async () => ({ items: [entry('Quarterly report')], total: 1, nextOffset: null }),
+    (l) => lines.push(l),
+    { human: true, session: true },
+  );
+  expect(lines.join('\n').split('\n').at(-1)).toBe('Buy a row with: buy <#> --shop demo');
+});

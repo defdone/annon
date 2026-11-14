@@ -198,7 +198,7 @@ shop add <url> [--id <alias>]
 catalog [--shop <id>] [--search <q>] [--limit <n>] [--offset <n>]
 init [--deployment defdone] [--backup-secret-file <file>] [--state-dir <dir>] [--config <file>]
 login [--wallet evm|near] [--no-open]
-init --agent --daily-budget <USDC> [--recovery <kind:id>] [--key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> (--credential-env <name> | --credential-keychain <name>)]
+init --agent --daily-budget <USDC> [--wallet evm|near|solana] [--recovery <kind:id>] [--evm-key-file <file> | --near-key-file <file> | --solana-key-file <file> | --key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> (--credential-env <name> | --credential-keychain <name>)]
 share <file> --price <USDC> [--shop <id>] [--title <title>] [--description <text>] [--listing-storage <NEAR>] [--storage-budget <NEAR>]
 share <file> --resume <file-id> [--shop <id>]
 sell <file> --resume <file-id> [--output <PAY2>]
@@ -227,6 +227,8 @@ Exit: 0 success (buy may need deposit), 1 operation failed, 2 arguments/config, 
 export interface RunOptions extends BuyFollow {
   /** Readable text in place of the JSON envelope. `--json` always wins. */
   human?: boolean;
+  /** Inside the interactive session, where commands are typed without the `annon` prefix. */
+  session?: boolean;
 }
 type Result = Record<string, unknown> | undefined;
 /** 4: not settled. A pending status, or a buy whose payment may be on chain or is not accepted yet. */
@@ -288,14 +290,14 @@ export async function runCli(
       );
     const input = parseCli(argv);
     const result = await buyFlow(input, execute, human, options);
-    if (human) write(humanResult(input, result as Result));
+    if (human) write(humanResult(input, result as Result, options.session));
     else writeJson(input, result, json, write);
     return exitCode(input, result as Result);
   } catch (error) {
     const safe = publicError(error);
     write(
       human
-        ? humanError(safe)
+        ? humanError(safe, options.session)
         : JSON.stringify({ ok: false, error: safe }, null, json ? undefined : 2),
     );
     return safe.exitCode;

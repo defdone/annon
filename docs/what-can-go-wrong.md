@@ -17,6 +17,22 @@ Three rules cover most cases:
 Exit codes: 1 other failure, 2 invalid input or configuration, 3 human approval or contract trust
 needed, 4 pending or uncertain.
 
+## Setup
+
+These stop a command before anything is read from the chain or paid. All exit with code 2.
+
+- `credentials_required`: no wallet is selected, or its key is missing. A person signs in with
+  `annon login --wallet near` (or `--wallet evm`) and approves each payment in the browser. For an
+  agent, the owner runs `annon init --agent` once with a key reference, a recovery identity that
+  matches the key and a daily budget, as in [agents.md](agents.md#1-what-the-owner-sets-up).
+- `signer_required`: `annon init --agent` got no key reference or more than one, or a remote signer
+  without exactly one credential reference. The owner runs it again with exactly one of
+  `--evm-key-file`, `--near-key-file`, `--solana-key-file`, `--key-env`, `--keychain-entry`,
+  `--new-key` or `--signer` (`annon --help` lists them). In a browser shop it means no wallet is
+  connected: connect one and try again.
+- `invalid_arguments`: a command, option or value is not valid. Check the command with
+  `annon --help` or [CLI.md](../packages/annon/CLI.md); for MCP, check the tool's input schema.
+
 ## Before you pay
 
 ### The quote or the purchase expired
