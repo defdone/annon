@@ -1,9 +1,9 @@
 /** Resolves the 1Click source chain, asset and refund address for a cross-chain purchase. */
 import { type Origin, originFamily } from '../oneclick/oneclick.js';
 import { bytes } from '../settle-near/codec.js';
+import { fail } from './adapter-checks.js';
 import type { Input } from './cli.js';
 import type { Config } from './config.js';
-import { fail } from './fail.js';
 import { response } from './offers.js';
 import type { SourceAsset } from './payment-terms.js';
 import type { Environment, LocalWallet } from './wallets.js';

@@ -1,4 +1,8 @@
+import { AnnonError, toPublicError } from '../errors.js';
+import type { BuyRoute } from '../routes.js';
+import { HostedSelling, type ShareHosting, type ShareOptions, shareSize } from './sharing.js';
 /** Sell, buy, open, recover and stop, using the single purchase/grant settlement model. */
+
 import { DownloadError } from '../download/download.js';
 import {
   concat,
@@ -18,7 +22,6 @@ import {
   withReplay,
 } from '../envelope/replay.js';
 import { SourceChangedError } from '../envelope/stream.js';
-import { AnnonError } from '../errors.js';
 import { fileAppId, keyFromSecret, oneTimeKey, openAnswer } from '../keys/near-ckd.js';
 import { MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES } from '../limits.js';
 import {
@@ -72,7 +75,6 @@ import {
   type ProtocolFee,
   protocolFeeAboveMax,
 } from '../relay/fees.js';
-import type { BuyRoute } from '../routes.js';
 import { account, bytes, compare, hex, network, usdc } from '../settle-near/codec.js';
 import {
   type Authorization,
@@ -92,20 +94,13 @@ import {
 } from '../settle-near/purchase.js';
 import { type Terms, termsHash } from '../settle-near/terms.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
-import {
-  type EvmWallet,
-  FileFundingRefused,
-  fundFileStorage,
-  type IdentityWallet,
-  type NearWallet,
-} from '../wallet/wallet.js';
+import type { EvmWallet, IdentityWallet, NearWallet } from '../wallet/wallet.js';
+import { FileFundingRefused, fundFileStorage } from '../wallet/wallet.js';
+
 import type { AnnonOptions, Bought, BuyOptions, SellOptions } from './annon-types.js';
-import { SellError } from './sell-error.js';
-import { HostedSelling, type ShareHosting, type ShareOptions, shareSize } from './sharing.js';
 
 export type { BuyRoute } from '../routes.js';
 export type { AnnonOptions, Bought, BuyOptions, SellOptions } from './annon-types.js';
-export { SellError } from './sell-error.js';
 
 const asNear = (w: IdentityWallet): NearWallet => {
   if (w.identity.kind !== 'near' || !('call' in w) || typeof w.call !== 'function')
@@ -122,6 +117,30 @@ const listing = (fileId: string, f: FileInfo): Listing => ({
   seller: f.seller,
   ...(f.headerHash ? { publishedHeaderHash: f.headerHash } : {}),
 });
+export class SellError extends AnnonError {
+  readonly txHash?: string;
+  readonly retryAfterSeconds?: number;
+  constructor(
+    readonly fileId: string,
+    options?: ErrorOptions,
+  ) {
+    const cause = options?.cause;
+    const code =
+      cause instanceof AnnonError || cause instanceof SourceChangedError
+        ? cause.code
+        : 'sell_incomplete';
+    super(
+      code,
+      cause instanceof Error ? cause.message : 'Sell incomplete; resume with fileId.',
+      options,
+    );
+    this.name = 'SellError';
+    const safe = toPublicError(cause);
+    if (safe.retryAfterSeconds !== undefined) this.retryAfterSeconds = safe.retryAfterSeconds;
+    if (cause instanceof AnnonError && 'txHash' in cause && typeof cause.txHash === 'string')
+      this.txHash = cause.txHash;
+  }
+}
 export class Annon {
   readonly store: Store<PurchaseRecord>;
   readonly hosted: HostedSelling;

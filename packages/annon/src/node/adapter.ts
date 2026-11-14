@@ -1,10 +1,12 @@
 /** Node I/O around the SDK. Settlement, commitments, encryption and proofs stay in the SDK. */
+import { createCoreAdapter, type Dependencies } from './core-adapter.js';
+// core-adapter.js loads first: it imports the SDK modules in the order this file did, so they initialize as before.
+
 import { identityJson, parseIdentity } from '../settle-near/identity.js';
 import { agentPolicy, configPath, initAgent, savePublicConfig } from './agent.js';
 import { type BrowserSession, startBrowserSession } from './browser-login.js';
 import type { Input } from './cli.js';
 import { loadConfig } from './config.js';
-import { createCoreAdapter, type Dependencies } from './core-adapter.js';
 import { AdapterError } from './errors.js';
 import { osKeychain } from './keychain.js';
 import { confinePaths } from './paths.js';

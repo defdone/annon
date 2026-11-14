@@ -6,6 +6,7 @@ import { parseReservation } from '../relay/reservation.js';
 import { bytes } from '../settle-near/codec.js';
 import { type Identity, identityJson } from '../settle-near/identity.js';
 import { type Terms, termsHash } from '../settle-near/terms.js';
+
 import type { ShareStep } from './sharing-types.js';
 
 const assets = (t: Terms) => ({
@@ -161,5 +162,4 @@ export function validateHostedRecord(job: SellRecord): void {
   if (!!job.published !== (h.result !== null)) throw new Error('Invalid completion.');
   if (h.header !== null) bytes(h.header, (h.header.length - 2) / 2);
 }
-
 export { assets, salt };

@@ -5,9 +5,9 @@ import { sameResource } from '../download/proof.js';
 import { MAX_HEADER, parseHeader } from '../envelope/pay2.js';
 import { discover, type PaymentRequired, readPaymentRequired } from '../pay/x402.js';
 import { hex } from '../settle-near/codec.js';
+import { fail } from './adapter-checks.js';
 import type { Config } from './config.js';
 import { usage } from './errors.js';
-import { fail } from './fail.js';
 
 const requestOptions = { redirect: 'error', credentials: 'omit', cache: 'no-store' } as const;
 async function response(url: string, fetcher: typeof fetch, headers?: Record<string, string>) {

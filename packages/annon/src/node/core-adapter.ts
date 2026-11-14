@@ -1,8 +1,10 @@
 /** Runs one CLI command against the SDK once config, trust and signer are resolved. */
+// The imports keep node/adapter.ts's original order, bare ones included, so modules initialize as before.
 import { mkdir, readdir, readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { Annon, type AnnonOptions } from '../api/annon.js';
 import { download, secureUrl } from '../download/download.js';
+import '../download/proof.js';
 import { inspect, inspectHeader, MAX_HEADER, parseHeader } from '../envelope/pay2.js';
 import { AnnonError, type AnnonErrorCode, isAnnonErrorCode, isTransient } from '../errors.js';
 import {
@@ -25,23 +27,25 @@ import {
 } from '../pay/backup.js';
 import { type PaymentSummary, type PurchaseRecord, purchaseKey } from '../pay/purchase.js';
 import { fileStore } from '../pay/store-node.js';
+import '../pay/x402.js';
 import { checkBaseSponsorship } from '../relay/capabilities.js';
 import { type ProtocolFee, protocolFeeAboveMax } from '../relay/fees.js';
 import { bytes, hex } from '../settle-near/codec.js';
 import { identityJson } from '../settle-near/identity.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
-import { fundFileStorage, type NearWallet } from '../wallet/wallet.js';
-import { amount, nearAmount } from './amounts.js';
+import type { NearWallet } from '../wallet/wallet.js';
+import { fundFileStorage } from '../wallet/wallet.js';
+import './agent.js';
+import './browser-login.js';
 import type { startBrowserSession } from './browser-login.js';
 import { type BudgetRecord, reserveSpend } from './budget.js';
 import type { Input } from './cli.js';
-import { type Config, loadConfig, type TrustPrompt, trustContract } from './config.js';
+import { loadConfig, type TrustPrompt, trustContract } from './config.js';
 import { AdapterError, publicError, usage } from './errors.js';
-import { fail } from './fail.js';
 import { fileSource, newOutput, withOutput, withSpool, writeBackup, writeStream } from './io.js';
+import './keychain.js';
 import type { Keychain } from './keychain.js';
-import { offer, requestOptions, resourceHeader, response } from './offers.js';
-import { originFor } from './origin.js';
+import './paths.js';
 import {
   humanPaymentTerms,
   quotedSource,
@@ -54,6 +58,8 @@ import { resourceAllowed } from './resources.js';
 import { retryGate } from './retry-gate.js';
 import { shareHost } from './sharing.js';
 import { selectedShopRules } from './shops.js';
+import './signer-wallet.js';
+import './signing.js';
 import {
   type Environment,
   identity,
@@ -61,6 +67,13 @@ import {
   loadWallet,
   readBackupSecret,
 } from './wallets.js';
+
+// Modules split out of the adapter load after its original imports, so initialization order is unchanged.
+
+import { backupPath, fail, isId } from './adapter-checks.js';
+import { amount, nearAmount } from './amounts.js';
+import { offer, requestOptions, resourceHeader, response } from './offers.js';
+import { originFor } from './origin.js';
 
 export interface Dependencies {
   /** Server-owned policy; never taken from tool arguments. */
@@ -93,7 +106,6 @@ export interface Dependencies {
   notify?: (message: string) => void;
   wait?: (ms: number) => Promise<void>;
 }
-const isId = (id: string) => /^0x[0-9a-f]{64}$/.test(id);
 interface Resource {
   id: string;
   revision: number;
@@ -101,10 +113,6 @@ interface Resource {
   header: string;
   url?: string;
 }
-const backupPath = (c: Config, id: string) => {
-  if (!/^(recovery:|sell:|seller-key:)?0x[0-9a-f]{64}(:revision:[0-9]+)?$/.test(id)) throw usage();
-  return join(c.stateDir, 'backups', `${id.replaceAll(':', '-')}.json`);
-};
 function createCoreAdapter(env: Environment = process.env, d: Dependencies = {}) {
   const fetcher = d.fetch ?? globalThis.fetch;
   const wait = d.wait ?? sleep;

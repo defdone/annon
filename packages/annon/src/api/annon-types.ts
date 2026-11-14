@@ -1,4 +1,5 @@
 /** Options and results of the Annon client: construction, sell and buy. */
+
 import type { SellData } from '../envelope/replay.js';
 import type { Deposit, OneClick, OneClickQuote, Origin } from '../oneclick/oneclick.js';
 import type { EncryptedRecord } from '../pay/backup.js';
@@ -12,7 +13,7 @@ import type { BuyRoute } from '../routes.js';
 import type { Identity } from '../settle-near/identity.js';
 import type { Terms } from '../settle-near/terms.js';
 import type { IdentityWallet, NearWallet } from '../wallet/wallet.js';
-import type { ShareHosting, ShareOptions } from './sharing-types.js';
+import type { ShareHosting, ShareOptions } from './sharing.js';
 
 export interface AnnonOptions {
   relayer?: string;

@@ -25,6 +25,8 @@ import {
   type ProtocolFee,
   protocolFeeAboveMax,
 } from '../relay/fees.js';
+// Bare import: relay/reservation still initializes at its original place in this list.
+import '../relay/reservation.js';
 import { bytes, compare, hex } from '../settle-near/codec.js';
 import {
   encodeIdentity,
@@ -36,7 +38,10 @@ import {
 import { registerTextV2, type Terms, termsHash } from '../settle-near/terms.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
 import type { IdentityWallet, NearWallet } from '../wallet/wallet.js';
-import type { AnnonOptions } from './annon-types.js';
+import type { AnnonOptions } from './annon.js';
+
+// Modules split out of this file load after its original imports, so initialization order is unchanged.
+
 import { assets, salt, shareSteps, validateHostedRecord } from './hosted-record.js';
 import type {
   HostedCheckpoint,
