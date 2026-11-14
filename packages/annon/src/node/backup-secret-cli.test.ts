@@ -47,6 +47,13 @@ describe('annon init', () => {
         result: {
           configured: true,
           backupSecret: { source: 'default-file', path: defaultBackupSecretPath(), created: true },
+          // Added by the config step; without a terminal or --deployment it writes nothing.
+          config: {
+            path: homeConfig(),
+            state: 'none',
+            howTo:
+              'Add one with annon init --deployment defdone, or write your own: https://github.com/defdone/annon/blob/master/docs/quickstart.md#2-configure',
+          },
         },
       }),
     ]);

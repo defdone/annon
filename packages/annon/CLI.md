@@ -35,8 +35,10 @@ session keeps no wallet, config or secret between commands.
 Without a terminal, with any argument such as `--json`, or in agent mode no session starts:
 `annon` prints the help and `annon shell` fails with `invalid_arguments`.
 
-Create a public configuration file and name it with `--config /path/config.json` or
-`ANNON_CONFIG`. The default is `~/.config/annon/config.json`:
+The CLI reads a public configuration file named with `--config /path/config.json` or
+`ANNON_CONFIG`. The default is `~/.config/annon/config.json`. `annon init --deployment defdone`
+writes one for the deployment run by defdone when none exists ([init](#init-and-the-configuration)).
+For any other deployment, write it yourself:
 
 ```json
 {
@@ -95,6 +97,34 @@ lose recovery rights: the same recovery wallet can create a fresh grant on a new
 a new backup secret ([Loss](#backup-secret) explains when `init` creates one). Keys, signed payment
 payloads and decrypted file contents are never returned in CLI/MCP results. Plaintext is written only to the explicitly named output.
 
+### Init and the configuration
+
+Bare `annon init` sets up the configuration first, then the backup secret below. It never changes
+an existing file at the configuration path (`--config`, then `ANNON_CONFIG`, then
+`~/.config/annon/config.json`) and reports it as kept. With nothing there:
+
+- `--deployment defdone` writes the preset for the deployment run by defdone without asking: the
+  configuration in [docs/quickstart.md](../../docs/quickstart.md#2-configure), with `stateDir` set
+  to the absolute path of `~/.local/share/annon`. `defdone` is the only accepted value; anything
+  else fails with `invalid_arguments` (exit 2) before anything is written.
+- In a terminal without the flag (and without `--json`), init asks once:
+  `Use the Annon deployment run by defdone (contract v1.annon.defdone.near, relayer relayer.mainnet.annon.dev, demo shop)? [Y/n]`.
+  Enter or yes writes the preset; any other answer writes nothing.
+- Otherwise no configuration is written. The result says how to add one.
+
+The file is written with mode 0600 to an exclusive temporary file, synced, and published with a
+hard link, so it never appears half-written and never replaces anything. A missing directory is
+created with mode 0700. A symlink, directory or other non-regular file at the path is refused, not
+followed, with `invalid_config` (exit 2), before the backup secret step.
+
+The result adds `config` beside `backupSecret`: `{"path": ..., "state": "created", "deployment": "defdone"}`,
+`{"path": ..., "state": "kept"}`, or `{"path": ..., "state": "none", "howTo": ...}`. In a terminal
+init prints one line for the configuration, one for the backup secret, and
+`Next: annon login --wallet near`.
+
+`init --agent` is unchanged: it saves signer settings only and refuses `--deployment`. Agent mode
+refuses bare `init` as before.
+
 ### Backup secret
 
 Run `annon init` once, before buying, selling or enabling agent mode. It creates
@@ -125,10 +155,10 @@ unreadable or malformed fails with `backup_secret_required` (exit 2); there is n
 later source, the default file or a new secret. `annon init` with an explicit source only validates
 it and never writes, creates or changes that file. Commands other than `init` read the secret but
 never create it, and agent mode and MCP never create it. Bare `init` accepts only `--json`,
-`--config`, `--state-dir` and `--backup-secret-file`; signer options need `--agent`.
+`--config`, `--state-dir`, `--backup-secret-file` and `--deployment`; signer options need `--agent`.
 
 Output: stdout carries the usual single JSON result, for example
-`{"ok":true,"result":{"configured":true,"backupSecret":{"source":"default-file","path":"/home/me/.config/annon/backup-secret","created":true}}}`.
+`{"ok":true,"result":{"configured":true,"backupSecret":{"source":"default-file","path":"/home/me/.config/annon/backup-secret","created":true},"config":{"path":"/home/me/.config/annon/config.json","state":"kept"}}}`.
 `source` is `default-file`, `flag-file`, `env-file` or `env`; `path` is shown for files only. The
 one-time creation notice goes to stderr, also with `--json`. The secret itself is never printed, in
 results, errors or notices.

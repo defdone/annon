@@ -22,9 +22,27 @@ function shareText(r: Result): string {
   ].join('\n');
 }
 
+/** Bare init: the config and the secret, created or kept, and the next step. */
+function initText(r: Result): string {
+  const config = r.config as { path: string; state: string; howTo?: string };
+  const secret = r.backupSecret as { path?: string; created: boolean };
+  const path = cleanText(config.path);
+  return [
+    config.state === 'created'
+      ? `Config created (defdone deployment): ${path}`
+      : config.state === 'kept'
+        ? `Config kept: ${path} (existing file, not changed)`
+        : `No config written. ${config.howTo}`,
+    `Backup secret ${secret.created ? 'created' : 'checked'}: ${cleanText(secret.path ?? 'ANNON_BACKUP_SECRET')}`,
+    'Next: annon login --wallet near',
+  ].join('\n');
+}
+
 export function humanResult(input: Input, result: Result | undefined): string {
   const r = result ?? {};
   switch (input.command) {
+    case 'init':
+      return input.agent ? fields(r) : initText(r);
     case 'login':
       return loginText(r);
     case 'shops':

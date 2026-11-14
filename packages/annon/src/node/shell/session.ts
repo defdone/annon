@@ -26,7 +26,7 @@ export interface SessionOptions {
   terminal?: boolean;
   welcome: string;
   /** Builds the adapter with the session's prompt and notices. */
-  adapter: (hooks: Pick<Dependencies, 'prompt' | 'notify'>) => Execute;
+  adapter: (hooks: Pick<Dependencies, 'prompt' | 'ask' | 'notify'>) => Execute;
   wait?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
@@ -89,6 +89,7 @@ export function createSession(o: SessionOptions) {
 
   const adapter = o.adapter({
     prompt: async (message) => (await ask(message))?.toLowerCase() === 'yes',
+    ask,
     notify: say,
   });
   /** The adapter call of a session line, with a row number of the listing on screen filled in. */
