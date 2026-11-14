@@ -1,9 +1,9 @@
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
+import { hexDigits as toHex } from '../bytes.js';
 
 const utf8 = new TextEncoder();
 const concat = (...parts: Uint8Array[]) => Uint8Array.from(parts.flatMap((p) => Array.from(p)));
-const toHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 
 /**
  * Whether `sig` (r ‖ s ‖ v, low s, v 27 or 28) is `address` signing `text` with EIP-191.

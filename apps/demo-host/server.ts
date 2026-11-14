@@ -11,11 +11,13 @@
  *
  * Settings: apps/demo-host/README.md.
  */
+
 import { createReadStream } from 'node:fs';
 import { open, readFile, stat, statfs, unlink } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
+import { prefixedHex as hex } from '../../packages/annon/src/bytes.ts';
 import {
   type FileHostOptions,
   type HostResponse,
@@ -29,7 +31,7 @@ import {
   hasContentType,
   preflight,
 } from '../../packages/annon/src/download/http.ts';
-import { sha256 } from '../../packages/annon/src/envelope/pay2.ts';
+import { MAX_HEADER, sha256 } from '../../packages/annon/src/envelope/pay2.ts';
 import { isTransient } from '../../packages/annon/src/errors.ts';
 import { type FileInfo, getFile } from '../../packages/annon/src/near/rpc.ts';
 import { clientKey, fixedWindowLimiter } from '../../packages/annon/src/net/ip.ts';
@@ -106,9 +108,6 @@ type Serve = (
 ) => Promise<HostResponse>;
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
-/** The client reads at most this much header (PAY2 fixed part plus the hash table). */
-const MAX_HEADER = 65_536;
-const hex = (b: Uint8Array) => `0x${Buffer.from(b).toString('hex')}`;
 const esc = (s: string) =>
   s.replace(
     /[&<>"']/g,
@@ -155,6 +154,7 @@ export async function loadFiles(
       const fixed = Buffer.alloc(12);
       await fh.read(fixed, 0, 12, 0);
       const len = fixed.readUInt32BE(8);
+      // The client caps the PAY2 header, including the fixed part and hash table.
       if (len < 65 || len > size || len > (limits.maxHeaderBytes ?? MAX_HEADER))
         throw new Error(`bad header length in ${name}`);
       const header = new Uint8Array(len);

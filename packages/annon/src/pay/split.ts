@@ -10,7 +10,9 @@
  * factory made it with these terms and nobody ever controlled it (no left-over USDC approvals from a
  * former owner). Code that merely answers `splitHash()` and `owner()` correctly does not pass.
  */
+
 import { keccak_256 } from '@noble/hashes/sha3.js';
+import { concatParts as concat } from '../bytes.js';
 import { fail, getCode, head, PayError, viewWord } from './base.js';
 import { addressWord, fromHex, toHex, word } from './eip3009.js';
 
@@ -23,16 +25,6 @@ export interface Split {
   /** Reward to the distributor the `distribute` caller names, in millionths (at most 65 535, 6.5535%). */
   distributionIncentive: number;
 }
-
-const concat = (parts: Uint8Array[]) => {
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let at = 0;
-  for (const p of parts) {
-    out.set(p, at);
-    at += p.length;
-  }
-  return out;
-};
 
 /** `abi.encode(split)`: the struct as one dynamic tuple (offset, then head, then the two arrays). */
 export function encodeSplit(s: Split): Uint8Array {

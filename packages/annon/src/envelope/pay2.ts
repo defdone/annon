@@ -1,3 +1,4 @@
+import { concatParts } from '../bytes.js';
 import { AnnonError } from '../errors.js';
 import { account } from '../settle-near/codec.js';
 /**
@@ -92,13 +93,7 @@ const subtle = globalThis.crypto.subtle;
 const utf8 = new TextEncoder();
 
 export function concat(...parts: Uint8Array[]): Bytes {
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let at = 0;
-  for (const p of parts) {
-    out.set(p, at);
-    at += p.length;
-  }
-  return out;
+  return concatParts(parts);
 }
 
 export function int(value: number, bytes: 1 | 2 | 4 | 8): Bytes {

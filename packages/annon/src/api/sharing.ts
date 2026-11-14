@@ -12,7 +12,7 @@ import {
 } from '../download/upload.js';
 import { sha256 } from '../envelope/pay2.js';
 import { type PreparedSeal, prepareSeal, type SellData } from '../envelope/replay.js';
-import { AnnonError } from '../errors.js';
+import { AnnonError, present } from '../errors.js';
 import { keyFromSecret, oneTimeKey } from '../keys/near-ckd.js';
 import { MAX_PLAINTEXT_BYTES } from '../limits.js';
 import { readOutcome, txOutcome, view } from '../near/rpc.js';
@@ -64,10 +64,6 @@ export type {
   ShareStep,
 } from './sharing-types.js';
 
-function present<T>(value: T | null | undefined): T {
-  if (value === null || value === undefined) throw new AnnonError('invalid_record');
-  return value;
-}
 export function shareSize(data: SellData): number {
   const size = data instanceof Uint8Array ? data.length : data.size;
   if (!Number.isSafeInteger(size) || size < 0) throw new AnnonError('invalid_arguments');
@@ -1018,7 +1014,7 @@ export class HostedSelling {
     await update(
       { published: true, fileKey: null, sellerSecret: null, ckdSecret: null },
       {
-        result: { ...published, expiresAt: published.expiresAt },
+        result: published,
         completed: [...(job.hosting?.steps ?? [])],
         pending: null,
       },

@@ -6,7 +6,7 @@ import {
   type UploadIntent,
   uploadText,
 } from '../download/upload.js';
-import { AnnonError } from '../errors.js';
+import { AnnonError, present } from '../errors.js';
 import {
   type NearMessage,
   type NearSignedMessage,
@@ -24,11 +24,6 @@ import {
   type NearWallet,
   nearSelectorWallet,
 } from '../wallet/wallet.js';
-
-function present<T>(value: T | null | undefined): T {
-  if (value === null || value === undefined) throw new AnnonError('invalid_response');
-  return value;
-}
 
 export type BrowserWalletErrorCode =
   | 'rejected'
@@ -338,7 +333,7 @@ export async function signNearUpload(
       recipient: intent.hostOrigin,
       nonce: bytes(intent.nonce, 32),
     };
-    const result = await present(provider.signMessage).call(provider, {
+    const result = await present(provider.signMessage, 'invalid_response').call(provider, {
       ...payload,
       nonce: payload.nonce.slice(),
     });
@@ -346,9 +341,9 @@ export async function signNearUpload(
     await selected();
     return {
       kind: 'near',
-      accountId: present(result).accountId,
-      publicKey: present(result).publicKey,
-      signature: present(result).signature,
+      accountId: present(result, 'invalid_response').accountId,
+      publicKey: present(result, 'invalid_response').publicKey,
+      signature: present(result, 'invalid_response').signature,
     };
   });
 }

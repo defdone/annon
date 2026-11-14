@@ -2,8 +2,10 @@
  * EIP-3009 on Base USDC: the authorization a buyer signs, its EIP-712 digest, the checks on the
  * signature a wallet sends back. Nonces as in `specs/nonce.md`.
  */
+
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
+import { concatParts, prefixedHex } from '../bytes.js';
 
 export const BASE_CHAIN_ID = 8453;
 
@@ -39,17 +41,8 @@ export const typedData = (usdc: string, a: Authorization) => ({
 export type TypedData = ReturnType<typeof typedData>;
 
 const utf8 = new TextEncoder();
-const concat = (...parts: Uint8Array[]) => {
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let at = 0;
-  for (const p of parts) {
-    out.set(p, at);
-    at += p.length;
-  }
-  return out;
-};
-export const toHex = (b: Uint8Array) =>
-  `0x${Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')}`;
+const concat = (...parts: Uint8Array[]) => concatParts(parts);
+export const toHex = (b: Uint8Array) => prefixedHex(b);
 export function fromHex(s: string, bytes: number, name: string): Uint8Array {
   if (!new RegExp(`^0x[0-9a-fA-F]{${2 * bytes}}$`).test(s)) {
     throw new TypeError(`${name} must be 0x and ${bytes} bytes of hex`);

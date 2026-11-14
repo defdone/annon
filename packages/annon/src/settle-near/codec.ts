@@ -1,18 +1,11 @@
 /** Small bounded Borsh primitives; all integers here are little-endian. */
+
 import { sha256 } from '@noble/hashes/sha2.js';
+import { concatParts, prefixedHex } from '../bytes.js';
 
 export const utf8 = new TextEncoder();
-export const concat = (...parts: Uint8Array[]) => {
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let at = 0;
-  for (const p of parts) {
-    out.set(p, at);
-    at += p.length;
-  }
-  return out;
-};
-export const hex = (b: Uint8Array): string =>
-  `0x${Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('')}`;
+export const concat = (...parts: Uint8Array[]) => concatParts(parts);
+export const hex = (b: Uint8Array): string => prefixedHex(b);
 export function bytes(s: string, length: number): Uint8Array<ArrayBuffer> {
   if (typeof s !== 'string' || !new RegExp(`^0x[0-9a-f]{${length * 2}}$`).test(s))
     throw new TypeError(`expected canonical ${length}-byte hex`);

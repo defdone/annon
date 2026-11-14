@@ -1,12 +1,7 @@
-import { AnnonError, type AnnonErrorCode, toPublicError } from '../errors.js';
+import { AnnonError, type AnnonErrorCode, present, toPublicError } from '../errors.js';
 import { MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES } from '../limits.js';
 import { account, bytes, exactKeys } from '../settle-near/codec.js';
 import { type Terms, termsHash } from '../settle-near/terms.js';
-
-function present<T>(value: T | null | undefined): T {
-  if (value === null || value === undefined) throw new AnnonError('invalid_record');
-  return value;
-}
 
 export interface ShopRules {
   text: string;

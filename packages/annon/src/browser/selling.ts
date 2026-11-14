@@ -3,7 +3,7 @@ import { Annon, type AnnonOptions } from '../api/annon.js';
 import type { ShareOptions, ShareQuote, ShareStep } from '../api/sharing.js';
 import type { UploadAuth, UploadIntent } from '../download/upload.js';
 import { blobSource, type Spool } from '../envelope/replay.js';
-import { AnnonError } from '../errors.js';
+import { AnnonError, present } from '../errors.js';
 import { exportSell, importSell, newBackupSecret, type SellRecord } from '../pay/backup.js';
 import { indexedDbStore, type Store, type Versioned } from '../pay/store.js';
 import type { BuyRoute } from '../routes.js';
@@ -16,11 +16,6 @@ import {
 } from '../settle-near/identity.js';
 import type { IdentityWallet } from '../wallet/wallet.js';
 import { browserPurchaseStorage } from './purchases.js';
-
-function present<T>(value: T | null | undefined): T {
-  if (value === null || value === undefined) throw new AnnonError('invalid_record');
-  return value;
-}
 
 export interface SellerConnection {
   readonly id: string;

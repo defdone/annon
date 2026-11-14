@@ -332,3 +332,11 @@ export function toPublicError(error: unknown): PublicError {
     ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
   };
 }
+
+export function present<T>(
+  value: T | null | undefined,
+  code: AnnonErrorCode = 'invalid_record',
+): T {
+  if (value === null || value === undefined) throw new AnnonError(code);
+  return value;
+}

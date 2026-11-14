@@ -1,4 +1,5 @@
 /** Durable encrypted upload admission and atomic publication. */
+
 import { createHash, createPrivateKey, randomBytes, sign } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, readdir, rename, stat, unlink } from 'node:fs/promises';
@@ -26,6 +27,7 @@ import {
 } from '../../packages/annon/src/envelope/pay2.ts';
 import { AnnonError, type AnnonErrorCode } from '../../packages/annon/src/errors.ts';
 import type { FileInfo } from '../../packages/annon/src/near/rpc.ts';
+import { syncDir } from '../../packages/annon/src/node/sync-dir.ts';
 import { hostedSplitSalt } from '../../packages/annon/src/pay/split.ts';
 import type { Versioned } from '../../packages/annon/src/pay/store.ts';
 import { fileStore } from '../../packages/annon/src/pay/store-node.ts';
@@ -123,14 +125,6 @@ const remove = async (path: string) =>
   unlink(path).catch((error) => {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   });
-async function syncDir(dir: string) {
-  const file = await open(dir, 'r');
-  try {
-    await file.sync();
-  } finally {
-    await file.close();
-  }
-}
 
 export async function uploadService(o: Options) {
   if (o.signingKey.length !== 32) throw new TypeError('Invalid reservation signing key.');

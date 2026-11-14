@@ -1,8 +1,10 @@
 /** Atomic, synced records with per-key CAS locks and exclusive service-directory ownership. */
+
 import { createHash, randomBytes } from 'node:crypto';
 import { link, mkdir, open, readdir, readFile, rename, rmdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { sleep } from '../net/retry.js';
+import { syncDir } from '../node/sync-dir.js';
 import { checkNext, holds, type Store, type Versioned } from './store.js';
 
 const alive = (pid: number) => {
@@ -41,15 +43,6 @@ const ownerOf = (text: string): LockOwner => {
 };
 const ownerAlive = async (o: LockOwner) =>
   alive(o.pid) && (!o.started || o.started === (await started(o.pid)));
-
-async function syncDir(dir: string) {
-  const d = await open(dir, 'r');
-  try {
-    await d.sync();
-  } finally {
-    await d.close();
-  }
-}
 
 export function fileStore<T extends Versioned>(
   dir: string,
