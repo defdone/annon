@@ -416,3 +416,69 @@ it('A2 a human refusal stops share before backup or signing', async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+it('a sponsored share registration checks the outcome against the contract call only', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { createAdapter } = await import('./adapter.js');
+  const { Annon } = await import('../api/annon.js');
+  const rpc = await import('../near/rpc.js');
+  const dir = await mkdtemp(join(tmpdir(), 'annon-share-outcome-'));
+  try {
+    const path = join(dir, 'config.json'),
+      file = join(dir, 'file.txt');
+    await writeFile(file, 'file');
+    await writeFile(path, JSON.stringify({ ...config, stateDir: dir, trustContract: true }));
+    const outcome = vi
+      .spyOn(rpc, 'txOutcome')
+      .mockResolvedValue({ state: 'done', value: 'registered' } as never);
+    const contractArgs = { file_id: `0x${'11'.repeat(32)}` };
+    const auth = { kind: 'evm', signature: `0x${'22'.repeat(65)}` };
+    const hostingReservation = { uploadId: 'synthetic-upload' };
+    const relayed: unknown[] = [];
+    let value: unknown;
+    const adapter = createAdapter(
+      { ANNON_CONFIG: path, ANNON_BACKUP_SECRET: '09'.repeat(32) },
+      {
+        fetch: async (url, init) => {
+          if (!String(url).endsWith('/v1/relay')) return Response.json(manifest);
+          relayed.push(JSON.parse(String(init?.body)));
+          return Response.json({
+            txHash: 'synthetic-register-transaction',
+            signer: 'relay.synthetic.near',
+          });
+        },
+        wallet: async () => ({
+          identity: { kind: 'evm', id: `0x${'11'.repeat(20)}` },
+          authorize: vi.fn(),
+        }),
+        sdk: (options) => {
+          const sdk = new Annon(options);
+          vi.spyOn(sdk, 'share').mockImplementation(async () => {
+            value = await must(options.send)('register', {
+              args: contractArgs,
+              auth,
+              hostingReservation,
+              baseSplit: { kind: 'push', salt: `0x${'00'.repeat(32)}` },
+            });
+            throw new Error('STOP_AFTER_REGISTER');
+          });
+          return sdk;
+        },
+      },
+    );
+    await adapter({ command: 'share', target: file, price: '0.10', json: true }).catch(() => {});
+    expect(value).toBe('registered');
+    expect(relayed).toHaveLength(1);
+    expect(relayed[0]).toMatchObject({ method: 'register', hostingReservation });
+    expect(outcome).toHaveBeenCalledTimes(1);
+    expect(outcome.mock.calls[0]?.[5]).toEqual({
+      method: 'register',
+      args: { args: contractArgs, auth },
+    });
+  } finally {
+    vi.restoreAllMocks();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -220,7 +220,30 @@ it.each(['evm', 'solana', 'near'] as const)(
       };
       expect(a.hostingReservation).toEqual(reservation);
       registered = a.args.terms;
-      return answer(registered.file_id, a.args.seller_key);
+      const value = answer(registered.file_id, a.args.seller_key);
+      if (kind !== 'solana') return value;
+      // Solana's transport returns the full NEAR outcome, as a relayer transport may.
+      const json = (v: unknown) => base64.encode(new TextEncoder().encode(JSON.stringify(v)));
+      return {
+        transaction: {
+          hash: 'synthetic-sponsored-register',
+          signer_id: 'relay.synthetic.near',
+          receiver_id: fixture.contract,
+          actions: [
+            {
+              FunctionCall: {
+                method_name: method,
+                args: json({
+                  args: { ...a.args, file_budget: '41000000000000000000000' },
+                  auth: (envelope as { auth: unknown }).auth,
+                }),
+              },
+            },
+          ],
+        },
+        status: { SuccessValue: json(value) },
+        receipts_outcome: [],
+      };
     });
     const controllerOptions = {
       network: fixture.network,

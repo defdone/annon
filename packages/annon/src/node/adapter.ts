@@ -478,7 +478,13 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     const send: NonNullable<AnnonOptions['send']> = async (method, args, owner) => {
       if (method === 'unlock' && !c.baseRpc)
         return fail('base_rpc_required', 'Configure baseRpc before resuming a Base purchase.', 2);
-      const { baseSplit: _baseSplit, ...envelope } = args as Record<string, unknown>;
+      // The relayer gets the full request; the contract call, and so the outcome check, never
+      // carries the relayer-only fields.
+      const {
+        baseSplit: _baseSplit,
+        hostingReservation: _hostingReservation,
+        ...envelope
+      } = args as Record<string, unknown>;
       const funding = envelope.args as { file_id: string; amount: string };
       const wireArgs =
         method === 'fund_file_storage'

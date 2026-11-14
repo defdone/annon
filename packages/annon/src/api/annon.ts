@@ -313,7 +313,12 @@ export class Annon {
                 amount: (args as { args: { amount: string } }).args.amount,
               }
             : method === 'register'
-              ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'baseSplit'))
+              ? // Relayer-only fields never reach the contract call.
+                Object.fromEntries(
+                  Object.entries(args).filter(
+                    ([key]) => key !== 'baseSplit' && key !== 'hostingReservation',
+                  ),
+                )
               : args,
       });
       if (outcome.state === 'released') return outcome.answer;
