@@ -19,7 +19,7 @@ needed, 4 pending or uncertain.
 
 ## Setup
 
-These stop a command before anything is read from the chain or paid. All exit with code 2.
+These errors report invalid input or missing configuration. All exit with code 2.
 
 - `credentials_required`: no wallet is selected, or its key is missing. A person signs in with
   `annon login --wallet near` (or `--wallet evm`) and approves each payment in the browser. For an
