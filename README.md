@@ -331,8 +331,7 @@ and container tests of the relayer and the demo host.
 
 ## Project status
 
-Annon is an alpha. We built it during the hackathon and ran the main paths on mainnet with our own
-small funds: buying over NEAR, Base and 1Click, selling from the browser and from the CLI, and stopping a
+Annon is an alpha. We ran the main paths on mainnet with our own small funds: buying over NEAR, Base and 1Click, selling from the browser and from the CLI, and stopping a
 listing. Not every edge case is tested as deeply as we want, and some steps
 still take more clicks than they should. We know where: the open items are in
 [ROADMAP.md](ROADMAP.md) and [docs/what-can-go-wrong.md](docs/what-can-go-wrong.md). Use small
