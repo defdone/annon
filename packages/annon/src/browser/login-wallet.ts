@@ -180,7 +180,7 @@ export function pageWallets(callbacks: {
       await callbacks.sending(q.id);
     } catch {
       throw new Refusal(
-        'The CLI did not accept this send, so nothing was sent. Return to the terminal.',
+        'This page did not call the wallet, because the CLI did not accept the send. Another page may already have sent it: check the terminal before paying.',
       );
     }
     let hash: unknown;

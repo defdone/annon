@@ -247,7 +247,7 @@ it('the wallet is never called when the CLI does not acknowledge the send start'
   expect(opened).toEqual(['/connect/testnet/login']);
   expect(results).toEqual([]);
   expect(statuses[1]).toBe(
-    'The CLI did not accept this send, so nothing was sent. Return to the terminal.',
+    'This page did not call the wallet, because the CLI did not accept the send. Another page may already have sent it: check the terminal before paying.',
   );
   expect(elements.get('approve')?.disabled).toBe(true);
 });

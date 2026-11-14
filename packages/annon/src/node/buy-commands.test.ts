@@ -29,7 +29,7 @@ import { hex } from '../settle-near/codec.js';
 import { NEAR_USDC } from '../settle-near/terms.js';
 import { createAdapter, type Dependencies } from './adapter.js';
 import type { BudgetRecord } from './budget.js';
-import type { Input } from './cli.js';
+import { type Input, runCli } from './cli.js';
 import { publicError } from './errors.js';
 import type { PurchaseGuard } from './purchase-guard.js';
 
@@ -253,7 +253,10 @@ it.each([
         ...('uncertain' in extra ? { txHash: extra.uncertain.txHash } : {}),
         backup: join(h.ws.dir, 'backups', `${record.id}.json`),
         ...('instructions' in extra ? { instructions: extra.instructions } : {}),
-        next,
+        next:
+          state === 'uncertain'
+            ? `The wallet may have sent this payment. Do not pay again. Run annon status ${record.id} until it is accepted.`
+            : next,
       });
       expect(h.buy).toHaveBeenCalledTimes(1);
       const options = h.buy.mock.calls[0]?.[0];
@@ -686,6 +689,39 @@ it.each([
       const error = await h.run(h.input()).catch((e) => e);
       expect(publicError(error)).toMatchObject({ code: 'purchase_open', exitCode: 2 });
       expect(h.buy).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.ws.remove();
+    }
+  },
+);
+
+it.each([true, false])(
+  'an uncertain buy exits 4 with its saved purchase (json %s), and only --force passes the guard',
+  async (json) => {
+    const h = await harness({ config: { signer: { mode: 'browser', identity: buyer } } });
+    const record = purchaseRecord({ headerHash: h.sealed.headerHash, expiresAt: '1000' });
+    const uncertain: PurchaseRecord = { ...record, nearSubmission: { state: 'uncertain' } };
+    h.buy.mockImplementationOnce(saving(uncertain, { uncertain: { purchaseId: uncertain.id } }));
+    const output: string[] = [];
+    try {
+      const exit = await runCli(
+        ['buy', h.offerPath, '--url', url, ...(json ? ['--json'] : [])],
+        h.run,
+        (s) => output.push(s),
+      );
+      expect(exit).toBe(4);
+      const body = JSON.parse(output[output.length - 1] ?? '');
+      expect(body.ok).toBe(true);
+      expect(body.result).toMatchObject({
+        purchaseId: record.id,
+        state: 'uncertain',
+        next: `The wallet may have sent this payment. Do not pay again. Run annon status ${record.id} until it is accepted.`,
+      });
+      expect(body.result).not.toHaveProperty('txHash');
+      const blocked = await h.run(h.input()).catch((e) => e);
+      expect(publicError(blocked)).toMatchObject({ code: 'purchase_open', exitCode: 2 });
+      await expect(h.run(h.input({ force: true }))).resolves.toMatchObject({ state: 'submitted' });
+      expect(h.buy).toHaveBeenCalledTimes(2);
     } finally {
       await h.ws.remove();
     }

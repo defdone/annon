@@ -4,6 +4,7 @@
  * or a wallet.
  */
 
+import { base58 } from '@scure/base';
 import { clock, record } from '../browser/login-format.js';
 import { isWalletFailure, type WalletFailure } from '../browser/login-status.js';
 import { parsePurchaseMessage, purchaseId } from '../settle-near/purchase.js';
@@ -65,8 +66,24 @@ export function requestPurchase(action: unknown): string | undefined {
   }
 }
 
-/** The line and error when a send may have reached the chain. The CLI never pays again by itself. */
-export function sendUncertain(action: unknown): { line: string; error: TransactionUncertain } {
+/** A NEAR transaction hash as wallets return it: base58 of 32 bytes. Anything else is not evidence. */
+export function usableHash(v: unknown): string | undefined {
+  if (typeof v !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v)) return undefined;
+  try {
+    return base58.decode(v).length === 32 ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The line and error when a send may have reached the chain, keeping a usable hash when the
+ * wallet returned one. The CLI never pays again by itself.
+ */
+export function sendUncertain(
+  action: unknown,
+  txHash?: string,
+): { line: string; error: TransactionUncertain } {
   const purchase = requestPurchase(action);
   return {
     line: `The wallet may have sent the transaction. Do not pay again. ${
@@ -74,6 +91,6 @@ export function sendUncertain(action: unknown): { line: string; error: Transacti
         ? `Run annon status ${purchase} to check it.`
         : 'Check the transaction in your wallet before you run the command again.'
     }`,
-    error: new TransactionUncertain(undefined, purchase),
+    error: new TransactionUncertain(txHash, purchase),
   };
 }

@@ -329,8 +329,10 @@ Technical details. While a request waits, the terminal prints its expiry on stde
   `transaction_uncertain` and the terminal says: "The wallet may have sent the transaction. Do not
   pay again. Run annon status <purchase id> to check it." The page records the send start with
   the CLI before it calls the wallet, so a reloaded page or the request's expiry cannot turn it
-  into a retryable failure. The saved purchase blocks a plain `annon buy` of the same file
-  (`purchase_open`) until it is accepted or you choose `--force` (see CLI.md).
+  into a retryable failure, and a result the CLI cannot verify after that point also ends as
+  uncertain. `annon buy` exits 4, `annon status` reports `submission: "uncertain"`, and the saved
+  purchase blocks a plain `annon buy` of the same file (`purchase_open`). `--force` overrides it
+  only after you have reconciled the first attempt (see CLI.md).
 - The page reports only a fixed reason name (`window_closed`, `popup_blocked`, `rejected`,
   `wallet_error`, `refused`, `send_uncertain`, `send_started` or `cancelled`) to the CLI, which
   prints its own line for it. Cancel ends the request at once; an expired request fails with the

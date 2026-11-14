@@ -13,6 +13,7 @@ import {
   isPageReport,
   openingLine,
   sendUncertain,
+  usableHash,
   waitingLine,
 } from './approval-status.js';
 import { LOGIN_PAGE_CSS, LOGIN_PAGE_HTML } from './login-page.js';
@@ -93,11 +94,15 @@ export async function startBrowserSession(o: {
     sending?: boolean;
   };
   /** Ends a request whose transaction may be on chain, with the CLI's own warning. */
-  const uncertain = (p: Pending) => {
-    const { line, error } = sendUncertain(p.action);
+  const uncertain = (p: Pending, txHash?: string) => {
+    const { line, error } = sendUncertain(p.action, txHash);
     notify(line);
     return error;
   };
+  /** A transaction request whose send started, or that returned transaction evidence at all. */
+  const sent = (p: Pending) =>
+    p.sending === true ||
+    (p.action as { operation?: unknown }).operation === 'near.signTransaction';
   let pending: Pending | undefined;
   const server = createServer((req, res) => {
     void (async () => {
@@ -157,7 +162,8 @@ export async function startBrowserSession(o: {
             pending = undefined;
             armIdle();
             p.reject(p.sending || b.reason === 'send_uncertain' ? uncertain(p) : cancelledError());
-          } else if (p.failure !== b.reason) {
+          } else if (!p.sending && p.failure !== b.reason) {
+            // After a send started no failure can be retried, so none is announced as one.
             p.failure = b.reason;
             notify(failureLine(b.reason, p.action.expiresAt - Date.now()));
           }
@@ -197,8 +203,19 @@ export async function startBrowserSession(o: {
             pending = undefined;
             armIdle();
           }
+          // After a send, a result that cannot be verified is never evidence of success or of
+          // failure: the request ends as uncertain, with any usable hash, so it stays saved.
           p.reject(
-            error instanceof TransactionUncertain ? error : new Error('wallet result rejected'),
+            sent(p)
+              ? uncertain(
+                  p,
+                  usableHash(
+                    error instanceof TransactionUncertain ? error.txHash : b?.result?.txHash,
+                  ),
+                )
+              : error instanceof TransactionUncertain
+                ? error
+                : new Error('wallet result rejected'),
           );
           complete(400);
           send(400, '{}');

@@ -4,6 +4,7 @@ import { send } from '../../test/login-http.js';
 import { toPublicError } from '../errors.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
 import { startBrowserSession } from './browser-login.js';
+import { signingRequest, verifySigningResult } from './signing.js';
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
@@ -272,6 +273,126 @@ describe('a send the wallet may have broadcast', () => {
       // The page that sent can still deliver the transaction hash it received.
       expect((await send(s.url, '/api/result', headers, { id: 'a', result: {} })).status).toBe(200);
       expect(await pending).toBeUndefined();
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('after a send start, a result the verifier cannot confirm ends as uncertain and keeps a usable hash', async () => {
+    const hash = '11111111111111111111111111111111';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        return Response.json({
+          jsonrpc: '2.0',
+          id: body.id,
+          error: { name: 'REQUEST_VALIDATION_ERROR' },
+        });
+      }),
+    );
+    const { s, notify, headers, report, outcome } = await session();
+    try {
+      const q = signingRequest(
+        'near.signTransaction',
+        'near:mainnet',
+        'buyer.near',
+        payment('x').payload,
+      );
+      const pending = outcome(
+        s.request(q, (r) => verifySigningResult(q, r as { txHash: string }, 'https://rpc.invalid')),
+      );
+      expect(await report(q.id, 'send_started')).toBe(200);
+      expect(
+        (await send(s.url, '/api/result', headers, { id: q.id, result: { txHash: hash } })).status,
+      ).toBe(400);
+      const error = await pending;
+      expect(error).toMatchObject({
+        code: 'transaction_uncertain',
+        txHash: hash,
+        purchaseId: record.id,
+      });
+      expect(toPublicError(error)).toMatchObject({
+        code: 'transaction_uncertain',
+        exitCode: 4,
+        txHash: hash,
+      });
+      expect(notify).toHaveBeenLastCalledWith(line);
+      // Verify-once still holds: the same result is answered from the first outcome, never re-verified.
+      expect(
+        (await send(s.url, '/api/result', headers, { id: q.id, result: { txHash: hash } })).status,
+      ).toBe(400);
+    } finally {
+      vi.unstubAllGlobals();
+      await s.close();
+    }
+  });
+
+  it.each([
+    ['a malformed result', {}, async () => {}],
+    ['a hash that is not one', { txHash: '<script>x</script>' }, async () => {}],
+    [
+      'a verifier exception',
+      { txHash: '11111111111111111111111111111111' },
+      async () => {
+        throw new TypeError('boom');
+      },
+    ],
+  ])(
+    'after a send start, %s ends as uncertain without inventing a hash',
+    async (_, result, fail) => {
+      const { s, headers, report, outcome } = await session();
+      try {
+        const verify = vi.fn(async (r: unknown) => {
+          await fail();
+          if (
+            !(r as { txHash?: unknown }).txHash ||
+            String((r as { txHash: string }).txHash).includes('<')
+          )
+            throw new Error('bad evidence');
+        });
+        const pending = outcome(s.request(payment('a'), verify));
+        expect(await report('a', 'send_started')).toBe(200);
+        await send(s.url, '/api/result', headers, { id: 'a', result });
+        const error = (await pending) as TransactionUncertain;
+        expect(error).toBeInstanceOf(TransactionUncertain);
+        expect(error.purchaseId).toBe(record.id);
+        if (_ === 'a verifier exception')
+          expect(error.txHash).toBe('11111111111111111111111111111111');
+        else expect(error.txHash).toBeUndefined();
+        expect(verify).toHaveBeenCalledTimes(1);
+      } finally {
+        await s.close();
+      }
+    },
+  );
+
+  it('after a send start, a retryable-shaped report never promises another approval', async () => {
+    const { s, notify, report, outcome } = await session();
+    try {
+      const pending = outcome(s.request(payment('a', Date.now() + 300), async () => {}));
+      await report('a', 'send_started');
+      expect(await report('a', 'window_closed')).toBe(200);
+      expect(await pending).toMatchObject({ code: 'transaction_uncertain' });
+      expect(notify.mock.calls.flat().join('\n')).not.toMatch(/try again|closed before signing/);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it('a signature that fails verification is not mistaken for a sent transaction', async () => {
+    const { s, headers, outcome } = await session();
+    try {
+      const login = { id: 'm', expiresAt: Date.now() + 5000, operation: 'near.nep413' };
+      const pending = outcome(
+        s.request(login, async () => {
+          throw new Error('signature mismatch');
+        }),
+      );
+      await send(s.url, '/api/result', headers, { id: 'm', result: {} });
+      const error = await pending;
+      expect(error).not.toBeInstanceOf(TransactionUncertain);
+      expect(toPublicError(error)).toMatchObject({ code: 'operation_failed' });
     } finally {
       await s.close();
     }

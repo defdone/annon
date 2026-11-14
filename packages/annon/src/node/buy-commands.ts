@@ -349,7 +349,9 @@ async function buy(
       backup: backupPath(c, bought.record.id),
       ...(bought.instructions ? { instructions: bought.instructions } : {}),
       ...(source ? { source } : {}),
-      next: 'Fund the deposit if instructed, then check status and open this purchase.',
+      next: bought.uncertain
+        ? `The wallet may have sent this payment. Do not pay again. Run annon status ${bought.record.id} until it is accepted.`
+        : 'Fund the deposit if instructed, then check status and open this purchase.',
     };
   } catch (error) {
     // Only failures before the SDK returns can release a 1Click reservation.
