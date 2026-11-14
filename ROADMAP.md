@@ -101,3 +101,15 @@ independent audit, then we remove the upgrade key and lock the contract.
 ### A testnet relayer
 
 A relayer on NEAR testnet, so developers can try selling, buying and recovery without real money.
+
+### Smaller client and selling modules
+
+The `Annon` client class (`packages/annon/src/api/annon.ts`) and the hosted selling class
+(`packages/annon/src/api/sharing.ts`) are still over 1,000 lines each. We plan to split them into
+smaller modules by purchase route and selling step. This touches the payment and selling paths, so
+it comes with its own tests and review.
+
+### The demo host on the published SDK
+
+The demo host imports SDK source files by relative path. We plan to move it to the package's public
+entry points, so the host depends only on the published API.
