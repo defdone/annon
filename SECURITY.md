@@ -86,5 +86,4 @@ us if you can make one worse than described.
 
 ## Supported versions
 
-After publication, only the latest alpha release on npm and the contract listed above will receive
-fixes.
+Only the latest alpha release on npm and the contract listed above receive fixes.
