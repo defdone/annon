@@ -29,12 +29,18 @@ export interface ReconcileSession {
 export interface ReconcileDeps {
   accept(record: PurchaseRecord): Promise<boolean>;
   restorePurchase(record: PurchaseRecord): Promise<PurchaseRecord>;
+  /** The canonical saved purchase, read only: no restore, no backup. */
+  loadCanonical(id: string): Promise<PurchaseRecord | null>;
 }
 
-/** Throws unless the record is a failed purchase with a saved commitment. */
+/**
+ * Throws unless the record is a failed purchase with a saved commitment whose quote and polling
+ * checkpoint name the same deposit. Reads nothing and writes nothing.
+ */
 export function checkReconcilable(record: BrowserPurchaseRecord): PurchaseRecord {
   if (record.state !== 'failed' || !record.purchase)
     throw new Error('only a failed saved purchase can be checked again');
+  checkSameDeposit(record, record.purchase);
   return record.purchase;
 }
 
@@ -85,7 +91,13 @@ export async function reconcileFailed(
   options: ReconcileOptions = {},
 ): Promise<ReconcileResult> {
   let saved = session.record;
-  const restored = await deps.restorePurchase(checkReconcilable(saved));
+  const committed = checkReconcilable(saved);
+  // Validate the canonical copy before restoring, which may write it and its backup.
+  if (saved.route === '1click') {
+    const canonical = await deps.loadCanonical(committed.id);
+    if (canonical) checkSameDeposit(saved, canonical);
+  }
+  const restored = await deps.restorePurchase(committed);
   if (restored.id !== saved.purchase?.id) throw new Error('saved purchase changed identity');
   checkSameDeposit(saved, restored);
   if (JSON.stringify(restored) !== JSON.stringify(saved.purchase))

@@ -6,8 +6,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setup, wallet } from '../../test/browser-purchase.js';
 import { purchase as fixture, must } from '../../test/fixtures.js';
 import type { OneClick } from '../oneclick/oneclick.js';
-import { encryptedPurchaseStore } from '../pay/backup.js';
+import { type EncryptedRecord, encryptedPurchaseStore } from '../pay/backup.js';
 import { purchaseKey } from '../pay/purchase.js';
+import type { AtomicStore } from '../pay/store.js';
 import { BrowserPurchaseController } from './purchases.js';
 
 const ID = 'synthetic-checkout';
@@ -101,6 +102,72 @@ describe('reconcile keeps to the saved deposit', () => {
     });
     expect((await c.storage.load(ID))?.purchase?.revision).toBe(newer.revision);
     expect(h.sdk.accept).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a refused check writes nothing', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['address', 'absent'],
+    ['memo', 'absent'],
+    ['address', 'older'],
+    ['memo', 'older'],
+  ] as const)(
+    'a checkpoint %s conflict with %s canonical storage refuses before any restore or backup',
+    async (field, canonicalCase) => {
+      const { h, c, before } = await failedPurchase();
+      const saved = {
+        ...before,
+        revision: before.revision + 1,
+        checkpoint: { ...must(before.checkpoint), [field]: 'wrong-checkpoint' },
+      };
+      await c.storage.save(before, saved);
+      const store = encryptedPurchaseStore(c.storage.rawStore, c.storage.backupSecret);
+      const committed = must(before.purchase);
+      const key = purchaseKey(committed.id);
+      expect(await store.load(key)).toBeNull();
+      if (canonicalCase === 'older')
+        expect(await store.compareAndSet(key, null, { ...committed, revision: 0 })).toBe(true);
+      const canonical = await store.load(key);
+      const write = vi.spyOn(c.storage.rawStore, 'compareAndSet');
+      const writeMany = vi.spyOn(
+        c.storage.rawStore as AtomicStore<EncryptedRecord>,
+        'compareAndSetMany',
+      );
+      const status = refunded();
+      await expect(c.reconcile({ oneClick: { status } })).rejects.toThrow(/changed deposit/);
+      expect(status).not.toHaveBeenCalled();
+      expect(h.sdk.accept).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+      expect(writeMany).not.toHaveBeenCalled();
+      expect(await store.load(key)).toEqual(canonical);
+      expect(await c.storage.rawStore.load(`annon/browser/backup/${committed.id}`)).toBeNull();
+      expect(await c.storage.load(ID)).toEqual(saved);
+    },
+  );
+
+  it('a canonical copy with another deposit is refused before restore writes it or its backup', async () => {
+    const { h, c, before } = await failedPurchase();
+    const store = encryptedPurchaseStore(c.storage.rawStore, c.storage.backupSecret);
+    const committed = must(before.purchase);
+    const quote = must(committed.quote);
+    const other = {
+      ...committed,
+      revision: 0,
+      quote: { ...quote, deposit: { ...quote.deposit, address: 'different-deposit' } },
+    };
+    expect(await store.compareAndSet(purchaseKey(committed.id), null, other)).toBe(true);
+    const restore = vi.spyOn(c.storage, 'restorePurchase');
+    const write = vi.spyOn(c.storage.rawStore, 'compareAndSet');
+    const status = refunded();
+    await expect(c.reconcile({ oneClick: { status } })).rejects.toThrow(/changed deposit/);
+    expect(restore).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect(await store.load(purchaseKey(committed.id))).toEqual(other);
+    await untouched(h, c, status, before);
   });
 });
 

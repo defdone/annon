@@ -826,6 +826,10 @@ export class BrowserPurchaseController {
         {
           accept: (record) => this.options.sdk.accept(record),
           restorePurchase: (record) => this.storage.restorePurchase(record),
+          loadCanonical: (id) =>
+            encryptedPurchaseStore(this.storage.rawStore, this.storage.backupSecret).load(
+              purchaseKey(id),
+            ),
         },
         options,
       ),
