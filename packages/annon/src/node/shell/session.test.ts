@@ -1,56 +1,15 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PassThrough } from 'node:stream';
 import { expect, it, vi } from 'vitest';
-import type { Input } from '../cli.js';
-import type { Dependencies } from '../command-context.js';
+import { session } from '../../../test/session.js';
 import { AdapterError } from '../errors.js';
 import { complete } from './complete.js';
-import { createSession } from './session.js';
 import { humanOutput, sessionAllowed, welcome } from './welcome.js';
 import { splitWords } from './words.js';
 
 const id = `0x${'ab'.repeat(32)}`;
 const other = `0x${'cd'.repeat(32)}`;
-type Hooks = Pick<Dependencies, 'prompt' | 'notify'>;
-type Adapter = (input: Input, hooks: Hooks) => Promise<Record<string, unknown>>;
-
-/** A session on in-memory streams. `type` sends a line; `shown` waits for text to appear. */
-function session(adapter: Adapter, terminal = false) {
-  const input = new PassThrough();
-  const output = new PassThrough();
-  let text = '';
-  output.on('data', (chunk) => {
-    text += String(chunk);
-  });
-  const calls: Input[] = [];
-  const s = createSession({
-    input,
-    output,
-    welcome: 'Annon test',
-    terminal,
-    wait: async () => {},
-    adapter: (hooks) => (o) => {
-      calls.push(o);
-      return adapter(o, hooks);
-    },
-  });
-  const exit = s.run();
-  return {
-    calls,
-    exit,
-    interrupt: s.interrupt,
-    type: (line: string) => input.write(`${line}\n`),
-    keys: (keys: string) => input.write(keys),
-    end: () => input.end(),
-    text: () => text,
-    shown: (part: string) => vi.waitFor(() => expect(text).toContain(part)),
-    /** Waits until the prompt has been printed `count` times: that many commands are done. */
-    prompts: (count: number) =>
-      vi.waitFor(() => expect(text.split('annon> ').length - 1).toBe(count)),
-  };
-}
 const catalog = {
   items: [
     { title: 'First', url: 'https://files.test/one' },
@@ -123,7 +82,8 @@ it('buy takes a row of the last catalog, waits for acceptance and offers to save
   s.type('out.bin');
   await s.shown('Accepted by NEAR. Saved out.bin (9 bytes).');
   await s.prompts(3);
-  // The session's own purchase is what status and open mean without an ID.
+  // Without an ID the session names no purchase itself: the adapter finds the latest one saved
+  // for the contract and network of that line.
   s.type('status');
   await s.prompts(4);
   s.type('open --output again.bin');
@@ -135,8 +95,8 @@ it('buy takes a row of the last catalog, waits for acceptance and offers to save
     { command: 'buy', target: 'https://files.test/two', maxPrice: '0.2' },
     { command: 'status', target: id },
     { command: 'open', target: id, output: 'out.bin' },
-    { command: 'status', target: id },
-    { command: 'open', target: id, output: 'again.bin' },
+    { command: 'status' },
+    { command: 'open', output: 'again.bin' },
   ]);
 });
 

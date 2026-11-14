@@ -10,8 +10,19 @@ import type { FileInfo } from '../src/near/rpc.js';
 import type { RecoveryRecord } from '../src/pay/backup.js';
 import type { PurchaseRecord } from '../src/pay/purchase.js';
 import { bytes, hex, usdc } from '../src/settle-near/codec.js';
-import { buildPurchaseMessage, type Purchase, purchaseId } from '../src/settle-near/purchase.js';
-import { NEAR_USDC, publishTextV2, type Terms, termsHash } from '../src/settle-near/terms.js';
+import {
+  baseNonceV2,
+  buildPurchaseMessage,
+  type Purchase,
+  purchaseId,
+} from '../src/settle-near/purchase.js';
+import {
+  BASE_USDC,
+  NEAR_USDC,
+  publishTextV2,
+  type Terms,
+  termsHash,
+} from '../src/settle-near/terms.js';
 import { terms as initial, purchase as initialPurchase } from './fixtures.js';
 
 export const contract = initial.contract;
@@ -118,18 +129,24 @@ export async function sealedFile(
   return { file, header, headerHash: hex(await sha256(header)), terms, info, seller };
 }
 
-/** A valid saved NEAR-route purchase record for the fixture file. */
+/** A valid saved purchase record for the fixture file: NEAR route, or Base with `base`. */
 export function purchaseRecord(
-  o: { headerHash?: string; nonce?: string; expiresAt?: string; contract?: string } = {},
+  o: {
+    headerHash?: string;
+    nonce?: string;
+    expiresAt?: string;
+    contract?: string;
+    base?: boolean;
+  } = {},
 ): PurchaseRecord {
   const secret = new Uint8Array(32).fill(7);
   const p: Purchase = {
     version: 2,
     refund: buyer,
-    network: 'near:mainnet',
+    network: o.base ? 'eip155:8453' : 'near:mainnet',
     contract: o.contract ?? contract,
-    route: 'near-usdc',
-    asset: NEAR_USDC,
+    route: o.base ? 'base-usdc' : 'near-usdc',
+    asset: o.base ? BASE_USDC : NEAR_USDC,
     file_id: fileId,
     terms_hash: initial.cipher_hash,
     price: initial.near.price,
@@ -144,7 +161,7 @@ export function purchaseRecord(
     schemaVersion: 2,
     recoveryProved: false,
     payment: {
-      route: 'near',
+      route: o.base ? 'base' : 'near',
       amountUsdc: usdc(BigInt(p.price)),
       amountBaseUnits: p.price,
       asset: { symbol: 'USDC', id: p.asset },
@@ -169,7 +186,7 @@ export function purchaseRecord(
       usdc: p.asset,
       price: p.price,
       buyerKey: p.buyer_key,
-      nonce: p.nonce,
+      nonce: o.base ? baseNonceV2(id) : p.nonce,
       headerHash,
       cipherHash: initial.cipher_hash,
       moderator: null,

@@ -10,5 +10,6 @@ keep the JSON envelope unchanged.
 
 `annon buy` takes a catalog row number (`buy 2 --shop demo`) and `--open <file>`, which waits for
 acceptance and writes the file. `annon status` and `annon open` without an ID use the latest
-purchase and accept an ID prefix of 8 or more hex digits. The `next` text of a NEAR or Base buy no
+purchase saved for the configured contract and network, and accept an ID prefix of 8 or more hex
+digits for purchases saved for it. The `next` text of a NEAR or Base buy no
 longer talks about a deposit.

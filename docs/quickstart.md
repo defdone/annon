@@ -79,7 +79,7 @@ MyNearWallet no longer connects to apps.
 Check the file, buy it, wait until the purchase is accepted, and open it. Pick the path that matches
 where your money is. In a terminal the CLI answers in short text and `buy` waits for acceptance
 itself; with `--json`, or when its output is piped, every command prints the JSON envelope and
-returns at once.
+returns at once, except `buy --open <file>`, which waits for acceptance and writes the file.
 
 Run `annon` with no arguments to work in one session instead: it keeps running until you type
 `exit`, the commands need no `annon` prefix, `catalog` numbers a shop's files and `buy 2` buys row 2
@@ -96,8 +96,9 @@ wallet in step 3. Login remembers one wallet, so sign in again to switch.
   second `annon buy` of the same file is refused with `purchase_open` unless you pass `--force`.
 - If `buy` ends with `state: "uncertain"` (exit code 4), the wallet may have sent the payment. Do not
   pay again: run `annon status` with the purchase ID until it says `accepted`.
-- `annon status` and `annon open --output <file>` without an ID use your latest purchase. An ID can
-  be shortened to its first 8 or more hex digits.
+- `annon status` and `annon open --output <file>` without an ID use your latest purchase for the
+  configured contract and network. The ID of a purchase saved for that contract and network can be
+  shortened to its first 8 or more hex digits.
 
 ### Pay on NEAR
 

@@ -203,7 +203,8 @@ recover --recovery <kind:id> [--purchase <id>]
 stop <file-id>
 verify <PAY2|url>
 status [purchase-id|id prefix]
-status and open without an id use the latest purchase; an id prefix needs 8 or more hex digits.
+status and open without an id use this contract's latest purchase; an id prefix needs 8 or more
+hex digits and a purchase saved for this contract and network.
 Common: --json --config <file> --contract-id <account> --near-rpc <url> --base-rpc <url>
 --network <near:mainnet> --state-dir <dir> --relayer <url> --trust-contract
 --wallet evm|solana|near --evm-key-file <file> --solana-key-file <file> --near-key-file <file>
@@ -225,6 +226,8 @@ function exitCode(input: Input, result: Result): number {
   if (!result) return 0;
   if (input.command === 'status' && result.state === 'pending') return 4;
   if (input.command !== 'buy') return 0;
+  // A payment that may be on chain outranks a failed status check or open after it.
+  if (result.state === 'uncertain') return 4;
   const failed = (result.openError ?? result.statusError) as PublicError | undefined;
   if (failed) return failed.exitCode;
   return result.state === 'uncertain' || result.settlement === 'pending' ? 4 : 0;

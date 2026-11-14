@@ -735,21 +735,23 @@ it('a buy becomes the latest purchase before it is saved, so status without an I
   const h = await harness({ purchase: async () => ({ file_id: fileId, grants: [] }) as never });
   const record = purchaseRecord({ headerHash: h.sealed.headerHash });
   const latest = () =>
-    fileStore<{ id: string; revision: number; purchaseId: string }>(
+    fileStore<{ id: string; revision: number; purchaseId: string; ids: string[] }>(
       join(h.ws.dir, 'latest-purchase'),
     ).load(JSON.stringify(['near:mainnet', contract]));
   h.buy.mockImplementation(async (o, sdk) => {
     await o.beforeSave?.(record);
-    // Already the latest purchase when the record is written and the payment follows.
-    expect(await latest()).toMatchObject({ purchaseId: record.id });
+    // Already the latest purchase, and listed for this contract, when the record is written and
+    // the payment follows.
+    expect(await latest()).toMatchObject({ purchaseId: record.id, ids: [record.id] });
     return saving(record)({ ...o, beforeSave: async () => {} }, sdk);
   });
   try {
     await h.run(h.input());
-    expect(await h.run({ command: 'status' })).toMatchObject({
-      purchaseId: record.id,
-      state: 'accepted',
-    });
+    for (const target of [undefined, record.id.slice(0, 12)])
+      expect(await h.run({ command: 'status', ...(target ? { target } : {}) })).toMatchObject({
+        purchaseId: record.id,
+        state: 'accepted',
+      });
   } finally {
     await h.ws.remove();
   }

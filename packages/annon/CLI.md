@@ -23,7 +23,10 @@ session keeps no wallet, config or secret between commands.
 
 - `catalog` numbers its rows; `buy 2` buys row 2 of the last listing shown.
 - After a NEAR or Base payment `buy` waits for acceptance, then asks where to save the file.
-- `status` and `open --output <file>` without an ID use the purchase made in this session.
+- `status` and `open --output <file>` without an ID use the latest purchase `buy` saved for the
+  contract and network of that line, as the one-shot commands do. The session remembers no
+  purchase itself, so a line with another `--contract-id`, `--network`, `--config` or
+  `--state-dir` never picks up a purchase made under a different one.
 - Ctrl-C cancels a prompt (the answer is no), stops a wait for acceptance, or drops a read-only
   command. During `buy`, `fund`, `sell`, `share`, `stop` or `recover` it asks
   `A payment may be in progress. Exit anyway? (y/N)`. Leaving removes nothing: the purchase saved
@@ -223,12 +226,16 @@ Fewer steps for a person (agent mode refuses all three and keeps requiring full 
   and `opened: { output, bytes }`. If the purchase is not accepted in time it adds
   `settlement: "pending"` and exits 4; if a status check or the open fails after payment, the result
   still names the purchase and adds `statusError` or `openError`, and the exit code is that
-  error's. Nothing is paid twice: finish with `status` and `open`. A 1Click buy returns its deposit
+  error's. A purchase that is still `state: "uncertain"` wins over the follow-up error: the result
+  carries `statusError`, and the exit code stays 4. Nothing is paid twice: finish with `status` and
+  `open`. A 1Click buy returns its deposit
   instructions without waiting. In a terminal, `buy` waits for acceptance even without `--open`.
 - `status` and `open --output <file>` without an ID use the latest purchase `buy` saved for the
   configured contract and network. An ID may be shortened to a prefix of 8 or more hex digits, with
-  or without `0x`; a prefix that matches no saved purchase, or more than one, is refused with
-  `purchase_required`. For `open`, a name of 8 to 63 hex digits is always read as a prefix: write
+  or without `0x`. A prefix only names purchases that `buy` or `recover` saved for the configured
+  contract and network; one that matches none of them, or more than one, is refused with
+  `purchase_required`. A purchase saved by an older version, or for another contract or network,
+  needs its full ID. For `open`, a name of 8 to 63 hex digits is always read as a prefix: write
   such a file as `./name`.
 `sell` creates a PAY2 file; arrange hosting separately. `buy` accepts the HTTPS resource URL
 or a named file containing decoded x402 `PAYMENT-REQUIRED` JSON. An offer file requires `--url` with the independently selected resource URL; it must match the offer. It checks the public header

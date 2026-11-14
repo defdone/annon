@@ -222,3 +222,67 @@ it('parses the shorter buyer flow: latest purchase, row numbers and buy --open',
   ])
     expect(() => parseCli(args)).toThrow(AdapterError);
 });
+
+it.each([
+  { args: [], human: true },
+  { args: ['--json', '--open', '/nonexistent/annon-test/out.bin'], human: false },
+])(
+  'an uncertain buy exits 4 even when the status check after it fails: $args',
+  async ({ args, human }) => {
+    const id = `0x${'ab'.repeat(32)}`;
+    const calls: string[] = [];
+    const output: string[] = [];
+    const code = await runCli(
+      ['buy', 'https://files.test/a', ...args],
+      async (o) => {
+        calls.push(o.command);
+        if (o.command === 'buy')
+          return { purchaseId: id, state: 'uncertain', route: 'near', backup: '/saved' };
+        throw new AdapterError('unavailable', 'RPC down.', 1);
+      },
+      (text) => output.push(text),
+      { human, notify: (text) => output.push(text) },
+    );
+    // One payment attempt, one status check, and the purchase is still reported in full.
+    expect(calls).toEqual(['buy', 'status']);
+    expect(code).toBe(4);
+    if (human)
+      expect(output).toEqual([
+        'The wallet may have sent this payment. Do not pay again. Checking NEAR...',
+        [
+          `Purchase ${id} (near route)`,
+          'Status check failed: RPC down. (unavailable)',
+          `Not accepted yet. Do not pay again. Run annon status ${id} until it is accepted, then annon open ${id} --output <file>.`,
+          'Backup: /saved',
+        ].join('\n'),
+      ]);
+    else
+      expect(JSON.parse(output.at(-1) ?? '')).toMatchObject({
+        ok: true,
+        result: {
+          purchaseId: id,
+          state: 'uncertain',
+          settlement: 'pending',
+          backup: '/saved',
+          statusError: { code: 'unavailable', message: 'RPC down.', exitCode: 1 },
+        },
+      });
+  },
+);
+
+it('a failed open or status check after an established payment keeps its own exit code', async () => {
+  const id = `0x${'ab'.repeat(32)}`;
+  const run = (state: string, statuses: 'accepted' | Error) =>
+    runCli(
+      ['buy', 'https://files.test/a', '--json', '--open', '/nonexistent/annon-test/out.bin'],
+      async (o) => {
+        if (o.command === 'buy') return { purchaseId: id, state, route: 'near', backup: '/saved' };
+        if (o.command === 'status' && statuses === 'accepted') return { state: 'accepted' };
+        throw o.command === 'status' ? statuses : new AdapterError('unavailable', 'Host down.', 1);
+      },
+      () => {},
+    );
+  // Accepted after an uncertain send: the payment is settled, so the open error decides.
+  expect(await run('uncertain', 'accepted')).toBe(1);
+  expect(await run('submitted', new AdapterError('invalid_config', 'Bad config.', 2))).toBe(2);
+});

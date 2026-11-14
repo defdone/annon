@@ -1,8 +1,9 @@
 /**
  * The interactive session: one prompt, the one-shot commands without the `annon` prefix. Every
  * line goes through `runCli` and the adapter exactly as a one-shot command does; the session adds
- * the prompt, a memory of the last catalog listing and purchase, and Ctrl-C handling. It keeps no
- * config, wallet or secret between commands.
+ * the prompt, a memory of the last catalog listing, and Ctrl-C handling. It keeps no config, wallet,
+ * secret or purchase between commands: `status` and `open` without an ID reach the adapter as
+ * typed, and it finds the latest purchase saved for the contract and network of that line.
  */
 import { createInterface } from 'node:readline/promises';
 import type { Readable, Writable } from 'node:stream';
@@ -38,11 +39,13 @@ const HELP = `Commands work as on the command line, without the annon prefix:
   shops, shop add <url>      list and add shops
   catalog [--shop <id>]      list a shop's files, numbered
   buy <#|url> [--open <file>]  buy a row of the last catalog, or a URL
-  status [id]                check a purchase (default: the latest)
-  open [id] --output <file>  save a bought file (default: the latest purchase)
+  status [id]                check a purchase (default: the latest saved for this contract)
+  open [id] --output <file>  save a bought file (default: the same latest purchase)
   init, verify, recover, sell, share, fund, budget, stop
   <command> --help           every command and option
-  exit, quit or Ctrl-D       leave. Ctrl-C cancels a prompt or a running command.`;
+  exit, quit or Ctrl-D       leave
+  Ctrl-C                     answers a prompt with no, drops a listing or status result, stops
+                             a wait for acceptance, and asks before leaving a running payment`;
 
 export function createSession(o: SessionOptions) {
   const rl = createInterface({
@@ -56,7 +59,6 @@ export function createSession(o: SessionOptions) {
   const queue: string[] = [];
   /** The catalog listing on screen, by row number; none until `catalog` has run. */
   let rows: Map<number, CatalogEntry> | undefined;
-  let lastPurchase: string | undefined;
   let question: AbortController | undefined;
   let running:
     | { command: string; waiting: boolean; live: boolean; stop: AbortController; drop: () => void }
@@ -89,7 +91,7 @@ export function createSession(o: SessionOptions) {
     prompt: async (message) => (await ask(message))?.toLowerCase() === 'yes',
     notify: say,
   });
-  /** The adapter call of a session line, with row numbers and the last purchase filled in. */
+  /** The adapter call of a session line, with a row number of the listing on screen filled in. */
   const execute: Execute = async (input) => {
     let next = input;
     // A number means a row of the listing on screen. Without one, or with --shop, the adapter
@@ -105,13 +107,7 @@ export function createSession(o: SessionOptions) {
       say(`Row ${input.target}: ${cleanText(row.title)} (${row.url})`);
       const { search: _search, ...rest } = input;
       next = { ...rest, target: row.url };
-    } else if (
-      (input.command === 'status' || input.command === 'open') &&
-      input.target === undefined &&
-      input.purchase === undefined &&
-      lastPurchase
-    )
-      next = { ...input, target: lastPurchase };
+    }
     const owner = running;
     const result = await adapter(next);
     // A command dropped with Ctrl-C printed nothing, so it must not change what a row number means.
@@ -120,8 +116,6 @@ export function createSession(o: SessionOptions) {
       rows = new Map(
         (result.items as CatalogEntry[]).map((entry, i) => [rowNumber(input, i), entry]),
       );
-    if (input.command === 'buy' && typeof result.purchaseId === 'string')
-      lastPurchase = result.purchaseId;
     return result;
   };
 
