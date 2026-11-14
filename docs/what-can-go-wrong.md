@@ -12,10 +12,10 @@ Three rules cover most cases:
 - **Keep your purchase ID and your backup secret.** They let you check, resume and open a purchase.
   Losing them does not lose the file: the same wallet can recover it.
 - **Exit code 4 means wait.** The CLI exits with it, and CLI JSON and MCP errors carry it as
-  `exitCode`, for anything still pending. It is not proof that the payment failed.
+  `exitCode`, for anything still pending or uncertain. It is not proof that the payment failed.
 
 Exit codes: 1 other failure, 2 invalid input or configuration, 3 human approval or contract trust
-needed, 4 pending.
+needed, 4 pending or uncertain.
 
 ## Before you pay
 
@@ -104,9 +104,12 @@ saved purchase.
 
 What you do: wait for `retryAfterSeconds` (30 seconds when nothing more precise is known), then run
 `annon status 0xPURCHASE_ID` again. The MCP server refuses to retry before that time.
-`transaction_uncertain` (also exit code 4) means a reply was lost. It includes `txHash` and, when
-known, `purchaseId`. Keep that evidence and check the existing transaction. Do not pay again to
-resolve uncertainty.
+`transaction_uncertain` (also exit code 4) means a transaction may have been sent and its result is
+not confirmed: a reply was lost, or a browser wallet did not report back after its send was called.
+It includes `txHash` and `purchaseId` when they are known; a hash is never invented. `annon buy`
+can also return `state: "uncertain"` with exit code 4, and `annon status` then reports
+`submission: "uncertain"` until the purchase is accepted. Keep that evidence and check the existing
+purchase or transaction. Do not pay again to resolve uncertainty.
 
 ### You closed the tab or the program crashed
 

@@ -532,9 +532,10 @@ RPC. A returned transaction hash alone never proves success.
 - Definite mismatches and failed finalized transactions are rejected without saving the hash as
   `nearSubmission` evidence. Only RPC unavailability or a non-final status keeps the outcome
   uncertain.
-- If submission or finalized verification is ambiguous, the CLI returns `state: "uncertain"`,
-  `purchaseId` and `txHash`, and keeps `nearSubmission: {state:"uncertain",txHash}` in the encrypted
-  purchase backup. Check status for that saved purchase before buying again.
+- If submission or finalized verification is ambiguous, the CLI returns `state: "uncertain"` and
+  `purchaseId`, and keeps `nearSubmission: {state:"uncertain"}` in the encrypted purchase backup.
+  Both carry `txHash` only when the wallet returned a valid one. `annon buy` exits 4. Check status
+  for that saved purchase before buying again.
 - Signing errors with a known hash also expose safe hash and purchase evidence, with exit code 4.
 
 **Reference handler.** `node/signer-mock` exports `signerMock`, an authenticated HTTP

@@ -253,7 +253,7 @@ Backup secret: run init once; it creates ~/.config/annon/backup-secret (owner-on
 overwrites. --backup-secret-file or ANNON_BACKUP_SECRET_FILE, then ANNON_BACKUP_SECRET, override it.
 Secrets: env ANNON_EVM_PRIVATE_KEY, ANNON_SOLANA_KEYPAIR, ANNON_NEAR_CREDENTIALS; or explicitly
 named files. See packages/annon/CLI.md. --version prints the installed version.
-Exit: 0 success (buy may need deposit), 1 operation failed, 2 arguments/config, 3 trust required, 4 purchase pending.
+Exit: 0 success (buy may need deposit), 1 operation failed, 2 arguments/config, 3 trust required, 4 purchase pending or uncertain.
 `;
 export async function runCli(
   argv: string[],

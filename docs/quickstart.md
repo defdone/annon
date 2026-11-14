@@ -86,6 +86,8 @@ wallet in step 3. Login remembers one wallet, so sign in again to switch.
   with `settlement_pending` (exit code 4), wait and check again; resume the same purchase with
   `annon status` and `annon open` instead of starting a new one. While it is live or accepted, a
   second `annon buy` of the same file is refused with `purchase_open` unless you pass `--force`.
+- If `buy` ends with `state: "uncertain"` (exit code 4), the wallet may have sent the payment. Do not
+  pay again: run `annon status` with the purchase ID until it says `accepted`.
 
 ### Pay on NEAR
 
