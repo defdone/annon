@@ -256,7 +256,7 @@ also sell with `annon_share` or `annon_sell`, under the same owner policy. Full 
 [docs/agents.md](docs/agents.md).
 
 Agents should buy the 0.10 USDC demo file with `near` or `base`: 1Click sets its own minimum per
-route (about 0.15 USDC from Base when we checked), so it refuses the quote for cheaper files and no
+route (about 0.15 USDC from Base when we checked), and below it 1Click refuses the quote before any
 payment is sent ([details](docs/agents.md)).
 
 ## For developers

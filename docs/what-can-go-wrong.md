@@ -66,7 +66,7 @@ An EVM wallet without `--route` gets `origin_required` for such a file, with the
 1Click can refuse a quote because of its route minimum or available liquidity. When supplied,
 `minimumAmountUsdc` gives the reported minimum. Do not send a deposit without a valid quote. Use
 another available payment route if the file's price cannot be quoted. The demo file costs 0.10 USDC,
-below the usual 1Click minimum, so buy it with `near` or `base`.
+below the 1Click minimum from Base when we checked, so from Base buy it with `near` or `base`.
 
 A refused quote still leaves a saved purchase, so until it expires (within an hour) the next buy of
 the same file stops with `purchase_open`, although no payment was sent. When there was no deposit

@@ -85,11 +85,11 @@ MCP: `annon_buy` with `target` and optional `route` (`near`, `base`, `1click`), 
 `recovery`.
 
 **1Click and small prices.** 1Click, the NEAR Intents swap service, sets a minimum amount for each
-route. When we checked, paying from USDC on Base, it was about 0.15 USDC; it is set by 1Click, not by
-Annon, and it can change. A file priced below it, like the 0.10 USDC demo file, cannot be bought
-through `1click`: 1Click refuses the quote (`quote_refused`, with `minimumAmountUsdc`) before there is
-a deposit address, so no payment is sent. Buy it with `near` or `base`, which need no swap and so have
-no such minimum. We kept the demo at 0.10 USDC so anyone can try it for a few cents, and we know agents
+route. When we checked, paying from USDC on Base, it was about 0.15 USDC, so the 0.10 USDC demo file
+could not be bought through `1click` from Base; from Solana, a 0.10 USDC purchase went through in our
+test. The minimum is set by 1Click, not by Annon, and it can change. Below it, 1Click refuses the quote
+(`quote_refused`, with `minimumAmountUsdc`) before there is a deposit address, so no payment is sent.
+Buy such a file with `near` or `base`, which need no swap and so have no such minimum. We kept the demo at 0.10 USDC so anyone can try it for a few cents, and we know agents
 should not have to find this out by trying: showing each route's minimum in the catalog, and skipping
 a route that cannot work, is on the [roadmap](https://github.com/defdone/annon/blob/master/ROADMAP.md).
 The refused attempt is still saved, and until it expires (within an hour) the next buy of the same file
