@@ -53,10 +53,16 @@ export function fakeElement(tag = 'div', value = ''): FakeElement {
     cloneNode: () => {
       const copy = fakeElement(tag);
       copy.textContent = e.textContent;
+      copy.attributes = new Map(e.attributes);
       copy.children = e.children.map((child) => child.cloneNode(true));
       return copy;
     },
-    querySelectorAll: () => [],
+    querySelectorAll: (selector) => {
+      const descendants = e.children.flatMap((child) => [child, ...child.querySelectorAll('*')]);
+      return selector === '*'
+        ? descendants
+        : descendants.filter((child) => child.attributes.has(selector.slice(1, -1)));
+    },
     focus: () => {},
     contains: (other) => other === e,
   };
@@ -76,7 +82,26 @@ export function fakeDocument(
     getElementById: (id: string) => {
       let e = elements.get(id);
       if (!e) {
-        e = fakeElement(id, value(id));
+        const tags: Record<string, string> = {
+          approve: 'button',
+          cancel: 'button',
+          action: 'pre',
+          rows: 'dl',
+          terms: 'dl',
+          warnings: 'ul',
+          title: 'h1',
+          'step-state': 'p',
+          'near-wallet': 'div',
+          summary: 'section',
+          pair: 'p',
+          amount: 'p',
+          message: 'pre',
+          'message-label': 'p',
+          note: 'p',
+          status: 'p',
+          'current-technical': 'details',
+        };
+        e = fakeElement(tags[id] ?? 'div', value(id));
         elements.set(id, e);
       }
       return e;

@@ -4,6 +4,10 @@ import type { PageElements } from './login-dom.js';
 export function approvalSteps(doc: Document, el: PageElements) {
   const list = doc.getElementById('steps') as HTMLElement;
   return {
+    start() {
+      el['current-technical'].hidden = false;
+      el['step-state'].textContent = 'In progress';
+    },
     finish() {
       const step = doc.createElement('details');
       step.className = 'step done';
@@ -18,10 +22,15 @@ export function approvalSteps(doc: Document, el: PageElements) {
       // Snapshots have no IDs, so only the current request owns page references.
       content.removeAttribute('id');
       for (const node of Array.from(content.querySelectorAll('[id]'))) node.removeAttribute('id');
+      for (const node of Array.from(content.querySelectorAll('[data-expiry]')))
+        node.textContent = 'Signed';
       const technical = doc.createElement('pre');
       technical.textContent = el.action.textContent;
       step.append(heading, content, technical);
       list.append(step);
+      el.summary.hidden = true;
+      el['current-technical'].hidden = true;
+      el['step-state'].textContent = 'Done';
     },
   };
 }

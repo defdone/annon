@@ -257,9 +257,22 @@ export async function startBrowserSession(o: {
       pending.reject(new Error('session closed'));
       pending = undefined;
     }
-    advance();
-    server.closeIdleConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    const flushed = [...followers].map(
+      (response) =>
+        new Promise<void>((resolve) => response.end(JSON.stringify({ action: null }), resolve)),
+    );
+    followers.clear();
+    const stopped = new Promise<void>((resolve) => server.close(() => resolve()));
+    let flushTimer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      Promise.all(flushed),
+      new Promise<void>((resolve) => {
+        flushTimer = setTimeout(resolve, 1000);
+      }),
+    ]);
+    clearTimeout(flushTimer);
+    server.closeAllConnections();
+    await stopped;
   };
   let timeout: ReturnType<typeof setTimeout>;
   const armIdle = () => {

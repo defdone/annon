@@ -17,6 +17,7 @@ const redirected = location.pathname === '/callback';
 let capability = redirected ? '' : location.hash.slice(1);
 history.replaceState(null, '', location.pathname);
 let paused = false;
+let finished = false;
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 const steps = approvalSteps(document, el);
 const api = async (path: string, body?: unknown, accepted?: () => void) => {
@@ -81,12 +82,8 @@ async function submit(id: string, result: unknown) {
       const next = await api('/api/result', { id, result, follow: true }, () => {
         accepted = true;
         steps.finish();
-        el.summary.hidden = true;
-        const technical = document.getElementById('current-technical');
-        if (technical) technical.hidden = true;
+        finished = true;
         status(STATUS.signed);
-        const state = document.getElementById('step-state');
-        if (state) state.textContent = 'Done';
       });
       if (next.action && next.action.id !== id) {
         show(next.action);
@@ -95,6 +92,8 @@ async function submit(id: string, result: unknown) {
       if (!accepted) throw error;
       status(STATUS.signed);
     }
+    paused = false;
+    pollTimer = setTimeout(() => void poll(), 1000);
   } catch {
     status(STATUS.rejected);
   }
@@ -129,10 +128,8 @@ if (redirected) {
 function show(q: SigningRequest | undefined, sendStarted = false) {
   if (q && q.id !== current?.id) {
     current = q;
-    const technical = document.getElementById('current-technical');
-    if (technical) technical.hidden = false;
-    const state = document.getElementById('step-state');
-    if (state) state.textContent = 'In progress';
+    finished = false;
+    steps.start();
     expiry = renderSummary(document, el, describeRequest(q), technicalDetails(q));
     el['wallet-field'].hidden = !q.operation.startsWith('near.');
     picker.setDisabled('hot-wallet', q.chain !== 'near:mainnet');
@@ -173,7 +170,7 @@ async function poll() {
       void poll();
     }, 1000);
   } catch (e) {
-    if (paused) return;
+    if (paused || finished) return;
     status({ tone: 'error', text: (e as Error).message });
     capability = '';
     approve.disabled = true;
