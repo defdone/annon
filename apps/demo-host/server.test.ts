@@ -808,3 +808,190 @@ it('refuses a crafted Base payment before the settlement handler for a file with
   });
   expect(serve).not.toHaveBeenCalled();
 });
+
+describe('file page for browsers', () => {
+  const CHROME =
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7';
+  const OFFER = Buffer.from('{"x402Version":2,"accepts":[]}').toString('base64');
+  const CSP =
+    "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+  /** Raw status, header lines (without the per-request Date) and body bytes. */
+  const raw = (url: string, headers: Record<string, string> = {}) =>
+    new Promise<{ status: number; headers: string[]; body: Buffer }>((resolve, reject) => {
+      const req = request(url, { headers }, (res) => {
+        const parts: Buffer[] = [];
+        res.on('data', (p: Buffer) => parts.push(p));
+        res.on('end', () => {
+          const lines: string[] = [];
+          for (let i = 0; i < res.rawHeaders.length; i += 2)
+            if (res.rawHeaders[i]?.toLowerCase() !== 'date')
+              lines.push(`${res.rawHeaders[i]}: ${res.rawHeaders[i + 1]}`);
+          resolve({ status: res.statusCode ?? 0, headers: lines, body: Buffer.concat(parts) });
+        });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  const info = (o: { stopped?: boolean; base?: boolean } = {}) =>
+    ({
+      price: 250000n,
+      seller: { kind: 'evm', id: `0x${'12'.repeat(19)}ab` },
+      takenDown: null,
+      salesStoppedAt: o.stopped ? 1 : null,
+      terms: { base: o.base === false ? null : { pay_to: `0x${'22'.repeat(20)}` } },
+    }) as never;
+  const offerServe = async () => ({
+    status: 402,
+    headers: { 'Cache-Control': 'no-store', 'PAYMENT-REQUIRED': OFFER },
+  });
+  const files = (title = 'Hello', description?: string) =>
+    setup([{ name: 'hello', fileId: FILE_ID, title, ...(description ? { description } : {}) }], {
+      hello: pay2(100, 10),
+    });
+  const without = (lines: string[], names: string[]) =>
+    lines.filter((l) => !names.includes(l.split(':')[0]?.toLowerCase() ?? ''));
+
+  it('keeps the 402 status and headers and adds a readable page for a browser', async () => {
+    const url = await start({ files: await files(), getFile: async () => info() }, offerServe);
+    const plain = await raw(`${url}/f/hello`);
+    expect(plain.status).toBe(402);
+    expect(plain.body.length).toBe(0);
+    expect(plain.headers).toContain(`PAYMENT-REQUIRED: ${OFFER}`);
+    const page = await raw(`${url}/f/hello`, { Accept: CHROME });
+    expect(page.status).toBe(402);
+    expect(without(page.headers, ['content-type', 'content-length'])).toEqual(
+      without(plain.headers, ['content-length', 'transfer-encoding']),
+    );
+    expect(page.headers).toContain('Content-Type: text/html; charset=utf-8');
+    expect(page.headers).toContain(`Content-Length: ${page.body.length}`);
+    expect(page.headers).toContain(`Content-Security-Policy: ${CSP}`);
+    expect(page.headers).toContain('X-Content-Type-Options: nosniff');
+    const html = page.body.toString();
+    expect(html).toContain('<h1>Hello</h1>');
+    expect(html).toContain('0.25 USDC');
+    expect(html).toContain('EVM 0x1212...12ab');
+    expect(html).toContain('NEAR, Base, 1Click (from another chain)');
+    expect(html).toContain(
+      'This file is encrypted. Buy it in the Annon demo shop, or with the command line.',
+    );
+    expect(html).toContain(`href="https://annon.dev/demo#file=${FILE_ID}"`);
+    expect(html).toContain('annon buy https://demo.example/f/hello --route near');
+    // Inline style only: the CSP allows it and nothing else.
+    expect(html).toContain('<style>');
+    expect(html).not.toMatch(/<script|src=|<link|@import|url\(/i);
+  });
+
+  it('answers non-browser and SDK requests exactly as before', async () => {
+    const url = await start({ files: await files(), getFile: async () => info() }, offerServe);
+    const baseline = await raw(`${url}/f/hello`);
+    expect(baseline.status).toBe(402);
+    expect(baseline.body.length).toBe(0);
+    expect(
+      without(baseline.headers, [
+        'connection',
+        'keep-alive',
+        'content-length',
+        'transfer-encoding',
+      ]),
+    ).toEqual([
+      'Vary: Origin',
+      'X-Content-Type-Options: nosniff',
+      `Content-Security-Policy: ${CSP}`,
+      'X-Frame-Options: DENY',
+      'Cache-Control: no-store',
+      `PAYMENT-REQUIRED: ${OFFER}`,
+    ]);
+    for (const headers of [
+      { Accept: '*/*' },
+      { Accept: 'application/json' },
+      { Accept: 'application/json, text/html' },
+      { Accept: 'application/octet-stream' },
+      { Accept: CHROME, 'Annon-Buyer-Proof': 'proof' },
+      { Accept: CHROME, Range: 'bytes=0-' },
+    ]) {
+      const r = await raw(`${url}/f/hello`, headers);
+      expect(r, JSON.stringify(headers)).toEqual(baseline);
+    }
+    // fetch() and the SDK send Accept: */*.
+    const r = await fetch(`${url}/f/hello`);
+    expect(r.headers.get('content-type')).toBeNull();
+    expect(await r.text()).toBe('');
+  });
+
+  it('escapes an injection attempt in the title and description', async () => {
+    const evil = `</title><script>alert(1)</script><a href="javascript:x">'`;
+    const url = await start(
+      { files: await files(evil, evil), getFile: async () => info() },
+      offerServe,
+    );
+    const html = (await raw(`${url}/f/hello`, { Accept: CHROME })).body.toString();
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('javascript:x">');
+    expect(html).toContain('&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).toContain('&lt;a href=&quot;javascript:x&quot;&gt;&#39;');
+  });
+
+  it('shows stopped sales without a buy link and keeps the 402', async () => {
+    const url = await start(
+      { files: await files(), getFile: async () => info({ stopped: true }) },
+      offerServe,
+    );
+    const page = await raw(`${url}/f/hello`, { Accept: CHROME });
+    expect(page.status).toBe(402);
+    expect(page.headers).toContain(`PAYMENT-REQUIRED: ${OFFER}`);
+    const html = page.body.toString();
+    expect(html).toContain('The seller has stopped selling this file.');
+    expect(html).not.toContain('annon.dev/demo');
+    expect(html).not.toContain('USDC');
+    expect((await raw(`${url}/f/hello`)).body.length).toBe(0);
+  });
+
+  it('still renders the page when the chain cannot be read', async () => {
+    const url = await start(
+      {
+        files: await files(),
+        getFile: async () => {
+          throw new Error('rpc down with secret detail');
+        },
+      },
+      offerServe,
+    );
+    const page = await raw(`${url}/f/hello`, { Accept: CHROME });
+    expect(page.status).toBe(402);
+    expect(page.headers).toContain(`PAYMENT-REQUIRED: ${OFFER}`);
+    const html = page.body.toString();
+    expect(html).toContain(`href="https://annon.dev/demo#file=${FILE_ID}"`);
+    expect(html).not.toContain('secret');
+  });
+
+  it('explains taken-down and expired files to browsers only', async () => {
+    const url = await start({ files: await files() }, async () => ({
+      status: 410,
+      headers: { 'Cache-Control': 'no-store' },
+    }));
+    const plain = await raw(`${url}/f/hello`);
+    expect(plain.status).toBe(410);
+    expect(plain.body.length).toBe(0);
+    const page = await raw(`${url}/f/hello`, { Accept: CHROME });
+    expect(page.status).toBe(410);
+    expect(page.body.toString()).toContain('This file was taken down');
+    await new Promise((r) => (server ? server.close(r) : r(null)));
+    const expiredIds = new Set([FILE_ID]);
+    const capacity = {
+      snapshot: async () => ({ expiredIds, expiredSlugs: new Set(['gone']), objects: {} }),
+    } as never;
+    const url2 = await start({ files: await files(), capacity });
+    for (const slug of ['hello', 'gone']) {
+      const json = await raw(`${url2}/f/${slug}`);
+      expect(json.status).toBe(410);
+      expect(JSON.parse(json.body.toString())).toEqual({
+        error: 'file_expired',
+        message: 'This hosted file has expired.',
+      });
+      const html = await raw(`${url2}/f/${slug}`, { Accept: CHROME });
+      expect(html.status).toBe(410);
+      expect(html.headers).toContain('Content-Type: text/html; charset=utf-8');
+      expect(html.body.toString()).toContain('This hosted file has expired');
+    }
+  });
+});

@@ -45,6 +45,7 @@ import { hostSettings } from './config.ts';
 import { downloadLedger } from './downloads.ts';
 import { requireEligibility } from './eligibility.ts';
 import { baseFacilitator, initFacilitatorState } from './facilitator.ts';
+import { esc, filePage, type PageFile, type PageState, wantsPage } from './file-page.ts';
 import { sweepSellerRecords } from './maintenance.ts';
 import { StartupError, type StartupReason } from './startup-errors.ts';
 import { hostStorage } from './storage.ts';
@@ -108,11 +109,6 @@ type Serve = (
 ) => Promise<HostResponse>;
 
 const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const esc = (s: string) =>
-  s.replace(
-    /[&<>"']/g,
-    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string,
-  );
 const text = (v: unknown, what: string, max: number): string => {
   if (typeof v !== 'string' || v.length === 0 || v.length > max) throw new Error(`bad ${what}`);
   return v;
@@ -325,21 +321,40 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
         return send(200, { 'Content-Type': 'application/json' }, JSON.stringify(list));
       }
       const m = /^\/f\/([a-z0-9-]+)(\/header)?$/.exec(path);
-      const snapshot = m ? await c.capacity?.snapshot() : undefined;
-      if (m && snapshot?.expiredSlugs.has(m[1] as string))
-        return send(
-          410,
-          { 'Content-Type': 'application/json' },
-          JSON.stringify({ error: 'file_expired', message: 'This hosted file has expired.' }),
+      // A person opening the file URL gets a readable body; status and headers stay the same.
+      const browser = !!m && !m[2] && wantsPage(requestHeaders.get);
+      const html = (status: number, headers: Record<string, string>, body: string) =>
+        send(
+          status,
+          {
+            ...headers,
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Length': String(Buffer.byteLength(body)),
+          },
+          body,
         );
+      const expired = (file?: Loaded) =>
+        browser
+          ? html(
+              410,
+              {},
+              filePage(
+                file
+                  ? pageFile(c, file)
+                  : { fileId: '', title: 'Expired file', url: `${c.publicUrl}${path}` },
+                'expired',
+              ),
+            )
+          : send(
+              410,
+              { 'Content-Type': 'application/json' },
+              JSON.stringify({ error: 'file_expired', message: 'This hosted file has expired.' }),
+            );
+      const snapshot = m ? await c.capacity?.snapshot() : undefined;
+      if (m && snapshot?.expiredSlugs.has(m[1] as string)) return expired();
       const f = m ? (await allFiles(snapshot)).find((x) => x.name === m[1]) : undefined;
       if (!m || !f) return send(404, {});
-      if (snapshot?.expiredIds.has(f.fileId))
-        return send(
-          410,
-          { 'Content-Type': 'application/json' },
-          JSON.stringify({ error: 'file_expired', message: 'This hosted file has expired.' }),
-        );
+      if (snapshot?.expiredIds.has(f.fileId)) return expired(f);
       try {
         await f.verify?.();
       } catch (error) {
@@ -430,6 +445,39 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
         r.headers['Content-Disposition'] =
           `attachment; filename*=UTF-8''${encodeURIComponent(filename).replace(/[!'()*]/g, (value) => `%${value.charCodeAt(0).toString(16).toUpperCase()}`)}`;
       }
+      if (browser && !r.body && (r.status === 402 || r.status === 410)) {
+        let info: FileInfo | null = null;
+        if (r.status === 402)
+          try {
+            info = await (c.getFile ?? ((id) => getFile(c.nearRpc, c.contractId, id)))(f.fileId);
+          } catch {
+            // The page is still useful without the chain details.
+          }
+        const state: PageState =
+          r.status === 410 || (info && info.takenDown !== null)
+            ? 'taken_down'
+            : info && info.salesStoppedAt !== null
+              ? 'stopped'
+              : 'offer';
+        return html(
+          r.status,
+          r.headers,
+          filePage(
+            pageFile(c, f),
+            state,
+            info
+              ? {
+                  price: info.price,
+                  seller: info.seller,
+                  routes:
+                    c.facilitator && info.terms.base
+                      ? ['near', 'base', '1click']
+                      : ['near', '1click'],
+                }
+              : undefined,
+          ),
+        );
+      }
       res.writeHead(r.status, r.headers);
       active.set(f.fileId, (active.get(f.fileId) ?? 0) + 1);
       try {
@@ -449,6 +497,13 @@ export function handler(c: HostConfig, serve: Serve = serveFile) {
     }
   };
 }
+
+const pageFile = (c: HostConfig, f: Loaded): PageFile => ({
+  fileId: f.fileId,
+  title: f.title,
+  ...(f.description ? { description: f.description } : {}),
+  url: `${c.publicUrl}/f/${f.name}`,
+});
 
 const noFacilitator: Facilitator = async () => {
   throw new Error('this host has no Base facilitator');
