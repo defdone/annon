@@ -667,3 +667,27 @@ it.each([
     }
   },
 );
+
+it.each([
+  ['before', '4000000000'],
+  ['after', '1000'],
+])(
+  'after a browser send that may have reached the chain, a plain buy is refused %s the purchase expiry',
+  async (_, expiresAt) => {
+    const h = await harness();
+    const record = purchaseRecord({ headerHash: h.sealed.headerHash, expiresAt });
+    // As the SDK saves a NEAR payment whose wallet failed after its send started: no hash known.
+    const uncertain: PurchaseRecord = { ...record, nearSubmission: { state: 'uncertain' } };
+    h.buy.mockImplementationOnce(saving(uncertain, { uncertain: { purchaseId: uncertain.id } }));
+    try {
+      const first = await h.run(h.input());
+      expect(first).toMatchObject({ purchaseId: uncertain.id, state: 'uncertain' });
+      expect(first).not.toHaveProperty('txHash');
+      const error = await h.run(h.input()).catch((e) => e);
+      expect(publicError(error)).toMatchObject({ code: 'purchase_open', exitCode: 2 });
+      expect(h.buy).toHaveBeenCalledTimes(1);
+    } finally {
+      await h.ws.remove();
+    }
+  },
+);

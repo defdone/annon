@@ -8,6 +8,8 @@ export const WALLET_FAILURES = [
   'rejected',
   'wallet_error',
   'refused',
+  /** The wallet's send call ran and then failed: the transaction may be on chain. Never retried. */
+  'send_uncertain',
 ] as const;
 export type WalletFailure = (typeof WALLET_FAILURES)[number];
 export const isWalletFailure = (v: unknown): v is WalletFailure =>
@@ -15,12 +17,19 @@ export const isWalletFailure = (v: unknown): v is WalletFailure =>
 
 /** A refusal written by the page itself (wrong chain, wallet not offered); its message is shown as is. */
 export class Refusal extends Error {}
+/** Any failure after the wallet's send call started, whatever the wallet says: it may have broadcast. */
+export class SendUncertain extends Error {}
 
 const AGAIN = 'Try again or pick another wallet.';
 
 /** The reason and the page text for a failed wallet attempt. */
 export function walletFailure(error: unknown): { reason: WalletFailure; text: string } {
   if (error instanceof Refusal) return { reason: 'refused', text: error.message };
+  if (error instanceof SendUncertain)
+    return {
+      reason: 'send_uncertain',
+      text: 'The wallet may have sent the transaction. Do not approve it again. Return to the terminal.',
+    };
   const e = (error && typeof error === 'object' ? error : {}) as {
     message?: unknown;
     code?: unknown;

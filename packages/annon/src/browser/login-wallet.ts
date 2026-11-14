@@ -11,7 +11,7 @@ import type { SigningRequest, SigningResult } from '../node/signing.js';
 import type { TypedData } from '../pay/eip3009.js';
 import { signInAccountOnly } from '../wallet/account-only.js';
 import { evmWallet } from '../wallet/wallet.js';
-import { Refusal } from './login-status.js';
+import { Refusal, SendUncertain } from './login-status.js';
 
 type NearNetwork = 'mainnet' | 'testnet';
 /** Signing-request chains the page can bind a NEAR wallet to. Anything else is refused. */
@@ -36,7 +36,7 @@ const NEAR_WALLETS = new Map<string, { name: string; networks: readonly NearNetw
 
 export type Outcome =
   | { kind: 'result'; result: SigningResult }
-  /** A redirect wallet returns the result through /callback. */
+  /** A redirect wallet returns a NEP-413 result through /callback. */
   | { kind: 'redirect' }
   /** The account-only sign-in for a transaction finished; the next click sends it. */
   | { kind: 'connected'; account: string };
@@ -87,6 +87,11 @@ export function pageWallets(callbacks: {
   /** Remember which request a redirect wallet's opaque `state` belongs to. */
   expect(state: string, id: string): void;
   forget(state: string): void;
+  /**
+   * Called just before the wallet's send for request `id`: marks it sent for good and resolves
+   * only once the CLI acknowledged it. A rejection means the wallet is never called.
+   */
+  sending(id: string): Promise<void>;
 }) {
   /** Wallets this page has loaded and signed out of any older connection, per wallet and network. */
   const loaded = new Map<string, Selected>();
@@ -158,23 +163,39 @@ export function pageWallets(callbacks: {
       gas: string;
       deposit: string;
     };
-    const outcome = await wallet.signAndSendTransaction({
-      signerId: account,
-      receiverId: p.receiverId,
-      // Selector v10 passes Borsh Action structs through to its transaction encoder.
-      actions: [
-        {
-          functionCall: {
-            methodName: p.method,
-            args: Buffer.from(JSON.stringify(p.args)),
-            gas: BigInt(p.gas),
-            deposit: BigInt(p.deposit),
-          },
+    const actions = [
+      {
+        // Selector v10 passes Borsh Action structs through to its transaction encoder.
+        functionCall: {
+          methodName: p.method,
+          args: Buffer.from(JSON.stringify(p.args)),
+          gas: BigInt(p.gas),
+          deposit: BigInt(p.deposit),
         },
-      ] as never,
-    });
-    if (!outcome) return { kind: 'redirect' };
-    return { kind: 'result', result: { txHash: outcome.transaction.hash } };
+      },
+    ] as never;
+    // From here on the wallet may broadcast: any failure is uncertain and this request is never
+    // tried again from the page. The CLI must know before the wallet is called.
+    try {
+      await callbacks.sending(q.id);
+    } catch {
+      throw new Refusal(
+        'The CLI did not accept this send, so nothing was sent. Return to the terminal.',
+      );
+    }
+    let hash: unknown;
+    try {
+      const outcome = await wallet.signAndSendTransaction({
+        signerId: account,
+        receiverId: p.receiverId,
+        actions,
+      });
+      hash = outcome?.transaction?.hash;
+    } catch (error) {
+      throw new SendUncertain('wallet send failed', { cause: error });
+    }
+    if (typeof hash !== 'string' || !hash) throw new SendUncertain('no transaction hash');
+    return { kind: 'result', result: { txHash: hash } };
   }
 
   return {

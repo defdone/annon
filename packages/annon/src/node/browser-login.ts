@@ -12,6 +12,7 @@ import {
   failureLine,
   isPageReport,
   openingLine,
+  sendUncertain,
   waitingLine,
 } from './approval-status.js';
 import { LOGIN_PAGE_CSS, LOGIN_PAGE_HTML } from './login-page.js';
@@ -88,6 +89,14 @@ export async function startBrowserSession(o: {
     timer: ReturnType<typeof setTimeout>;
     /** The last wallet failure the page reported for this request. */
     failure?: WalletFailure;
+    /** The page called the wallet's send: the request can only end as sent or uncertain. */
+    sending?: boolean;
+  };
+  /** Ends a request whose transaction may be on chain, with the CLI's own warning. */
+  const uncertain = (p: Pending) => {
+    const { line, error } = sendUncertain(p.action);
+    notify(line);
+    return error;
   };
   let pending: Pending | undefined;
   const server = createServer((req, res) => {
@@ -115,7 +124,14 @@ export async function startBrowserSession(o: {
         )
           return void send(403, '{}');
         if (path === '/api/action' && ['GET', 'POST'].includes(req.method ?? ''))
-          return void send(200, JSON.stringify({ pairingCode, action: pending?.action ?? null }));
+          return void send(
+            200,
+            JSON.stringify({
+              pairingCode,
+              action: pending?.action ?? null,
+              sendStarted: pending?.sending === true,
+            }),
+          );
         if (!['/api/result', '/api/report'].includes(path) || req.method !== 'POST')
           return void send(404, '{}');
         let size = 0;
@@ -127,15 +143,20 @@ export async function startBrowserSession(o: {
         }
         const b = JSON.parse(Buffer.concat(parts).toString());
         if (path === '/api/report') {
-          // A fixed reason for the current, unconsumed request. Only `cancelled` ends it.
+          // A fixed reason for the current, unconsumed request. Only `cancelled` and
+          // `send_uncertain` end it, and never as cancelled once the page started a send.
           const p = pending;
           if (!p || p.busy || b.id !== p.action.id || !isPageReport(b.reason))
             return void send(409, '{}');
-          if (b.reason === 'cancelled') {
+          if (b.reason === 'send_started') {
+            // One send per request: a reloaded or second page cannot start another.
+            if (p.sending) return void send(409, '{}');
+            p.sending = true;
+          } else if (b.reason === 'cancelled' || b.reason === 'send_uncertain') {
             clearTimeout(p.timer);
             pending = undefined;
             armIdle();
-            p.reject(cancelledError());
+            p.reject(p.sending || b.reason === 'send_uncertain' ? uncertain(p) : cancelledError());
           } else if (p.failure !== b.reason) {
             p.failure = b.reason;
             notify(failureLine(b.reason, p.action.expiresAt - Date.now()));
@@ -263,7 +284,7 @@ export async function startBrowserSession(o: {
               pending = undefined;
               armIdle();
             }
-            reject(expiredError(entry.failure));
+            reject(entry.sending ? uncertain(entry) : expiredError(entry.failure));
           }, action.expiresAt - Date.now()),
         };
         pending = entry;

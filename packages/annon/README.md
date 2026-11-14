@@ -321,12 +321,21 @@ listing terms apart from it with a warning if their price differs, and the raw r
 Technical details. While a request waits, the terminal prints its expiry on stderr.
 
 - Each click opens at most one wallet window, inside that click, so the browser's pop-up blocker
-  allows it. If the wallet window closes, is blocked or declines, the page says so and you can try
-  again, with the same or another wallet, until the request expires. Nothing is retried for you.
+  allows it. If the wallet window closes, is blocked or declines before anything is sent, the page
+  says so and you can try again, with the same or another wallet, until the request expires.
+  Nothing is retried for you.
+- Once the page has called the wallet's send for a transaction, that request is never attempted
+  again, whatever the wallet answers, because it may already have broadcast. The request ends as
+  `transaction_uncertain` and the terminal says: "The wallet may have sent the transaction. Do not
+  pay again. Run annon status <purchase id> to check it." The page records the send start with
+  the CLI before it calls the wallet, so a reloaded page or the request's expiry cannot turn it
+  into a retryable failure. The saved purchase blocks a plain `annon buy` of the same file
+  (`purchase_open`) until it is accepted or you choose `--force` (see CLI.md).
 - The page reports only a fixed reason name (`window_closed`, `popup_blocked`, `rejected`,
-  `wallet_error`, `refused` or `cancelled`) to the CLI, which prints its own line for it. Cancel ends
-  the request at once; an expired request fails with the last reported reason, for example
-  `rejected` or `wallet_error`, instead of a generic error. A report never completes a request.
+  `wallet_error`, `refused`, `send_uncertain`, `send_started` or `cancelled`) to the CLI, which
+  prints its own line for it. Cancel ends the request at once; an expired request fails with the
+  last reported reason, for example `rejected` or `wallet_error`, instead of a generic error. A
+  report never completes a request.
 
 - Host (including port), Origin and an unpredictable RAM-only capability are checked on action and
   result API calls.

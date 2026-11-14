@@ -1,9 +1,12 @@
 import { AnnonError } from '../errors.js';
-/** Public evidence to retain whenever a submitted NEAR transaction cannot be confirmed. */
+/**
+ * Public evidence to retain whenever a submitted NEAR transaction cannot be confirmed. `txHash` is
+ * absent when a wallet may have broadcast but never returned a hash: unknown, never invented.
+ */
 export class TransactionUncertain extends AnnonError {
   readonly code = 'transaction_uncertain';
   constructor(
-    readonly txHash: string,
+    readonly txHash: string | undefined,
     readonly purchaseId?: string,
   ) {
     super(

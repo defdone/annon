@@ -1,8 +1,9 @@
 import { Buffer } from 'buffer';
 import type { SigningRequest } from '../node/signing.js';
 import { pageElements, renderSummary, showStatus } from './login-dom.js';
+import { walletPicker } from './login-dropdown.js';
 import { expiryText } from './login-format.js';
-import { connected, STATUS, type Status, walletFailure } from './login-status.js';
+import { connected, SendUncertain, STATUS, type Status, walletFailure } from './login-status.js';
 import { describeRequest, technicalDetails } from './login-view.js';
 import { pageWallets } from './login-wallet.js';
 
@@ -10,8 +11,6 @@ Object.assign(globalThis, { Buffer });
 const el = pageElements(document);
 const approve = el.approve as HTMLButtonElement;
 const cancel = document.getElementById('cancel') as HTMLButtonElement | null;
-const nearChoice = document.getElementById('near-wallet') as HTMLSelectElement | null;
-const hotChoice = document.getElementById('near-wallet-hot') as HTMLOptionElement | null;
 const fragment = new URLSearchParams(location.hash.slice(1));
 const redirected = location.pathname === '/callback';
 let capability = redirected ? '' : location.hash.slice(1);
@@ -34,13 +33,20 @@ const callbacks = new Map<string, string>();
 const wallets = pageWallets({
   expect: (state, id) => callbacks.set(state, id),
   forget: (state) => callbacks.delete(state),
+  sending: async (id) => {
+    // The wallet may broadcast from now on: this request is never attempted again here, and the
+    // CLI records it before the wallet is called.
+    done.add(id);
+    await api('/api/report', { id, reason: 'send_started' });
+  },
 });
 let current: SigningRequest | undefined;
 let expiry: HTMLElement | undefined;
 let busy = false;
 
 const status = (s: Status) => showStatus(el, s);
-const walletId = () => nearChoice?.value || 'meteor-wallet';
+const picker = walletPicker(document, () => controls());
+const walletId = () => picker.value();
 /** Buttons and wallet choice follow the request: usable only while it is open and idle. */
 function controls() {
   const q = current;
@@ -50,7 +56,8 @@ function controls() {
     cancel.hidden = !open;
     cancel.disabled = busy;
   }
-  if (nearChoice) nearChoice.disabled = busy;
+  // No wallet switch while a wallet is open or once the request is finished or sent.
+  picker.setLocked(!open || busy);
   approve.textContent =
     q && wallets.needsConnect(q, walletId()) ? 'Connect wallet' : 'Review in wallet';
 }
@@ -92,15 +99,20 @@ if (redirected) {
 }
 
 /** Shows the CLI's current request; a finished one stays on screen with its outcome. */
-function show(q: SigningRequest | undefined) {
+function show(q: SigningRequest | undefined, sendStarted = false) {
   if (q && q.id !== current?.id) {
     current = q;
     expiry = renderSummary(document, el, describeRequest(q), technicalDetails(q));
     el['wallet-field'].hidden = !q.operation.startsWith('near.');
-    if (hotChoice) hotChoice.disabled = q.chain !== 'near:mainnet';
+    picker.setDisabled('hot-wallet', q.chain !== 'near:mainnet');
     status(wallets.needsConnect(q, walletId()) ? STATUS.connect : STATUS.ready);
   }
   const last = current;
+  // A send started from an earlier load of this page: the wallet may have broadcast it.
+  if (last && q && sendStarted && !done.has(last.id)) {
+    done.add(last.id);
+    status({ tone: 'error', text: walletFailure(new SendUncertain()).text });
+  }
   if (!last || !expiry) {
     status(STATUS.waitingCli);
   } else {
@@ -123,7 +135,7 @@ async function poll() {
   try {
     const r = await api('/api/action');
     el.pair.textContent = String(r.pairingCode);
-    show(r.action ?? undefined);
+    show(r.action ?? undefined, r.sendStarted === true);
     setTimeout(() => {
       void poll();
     }, 1000);
@@ -165,7 +177,6 @@ if (cancel)
     status({ tone: 'error', text: 'Cancelled. Return to the terminal.' });
     void api('/api/report', { id: q.id, reason: 'cancelled' }).catch(() => {});
   };
-if (nearChoice) nearChoice.onchange = controls;
 if (!redirected) {
   void (async () => {
     if (!capability) capability = (await api('/api/bootstrap')).capability;

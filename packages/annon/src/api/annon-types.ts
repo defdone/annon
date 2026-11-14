@@ -97,6 +97,7 @@ export interface Bought {
   route: BuyRoute;
   record: PurchaseRecord;
   instructions?: Deposit;
-  uncertain?: { purchaseId: string; txHash: string };
+  /** `txHash` is absent when the wallet may have sent the transaction without returning one. */
+  uncertain?: { purchaseId: string; txHash?: string };
   payment?: string;
 }

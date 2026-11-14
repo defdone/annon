@@ -159,11 +159,18 @@ blindly retried. Raw upstream errors are intentionally suppressed to avoid leaki
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Command completed; buy may still require a deposit or settlement |
+| 0 | Command completed; buy may still require a deposit or settlement, and `state: "uncertain"` means a NEAR payment may be on chain |
 | 1 | Operation failed; inspect final status and retained encrypted state before retrying |
-| 2 | Invalid arguments, configuration, wallet source or missing local input |
-| 3 | First-use contract trust required or declined |
-| 4 | `status` reports pending; acceptance has not been observed (not proof of payment failure) |
+| 2 | Invalid arguments, configuration, wallet source or missing local input; `purchase_open` when a saved purchase of the file, including an uncertain NEAR send, still blocks a new one |
+| 3 | First-use contract trust required or declined; browser approval cancelled (`cancelled`), expired (`cancelled`, or `rejected` or `wallet_error` after the last wallet failure the page reported) or declined by the wallet |
+| 4 | `status` reports pending, or `transaction_uncertain`: a transaction may have been sent and is not confirmed (not proof of payment failure) |
+
+In browser approval, a wallet that fails after the page called its send ends the request as
+`transaction_uncertain`, never as a retryable wallet error. A purchase records it with the saved
+purchase, without a transaction hash when the wallet returned none. Do not pay again: run
+`annon status <purchase id>` until it is accepted. A plain `annon buy` of the same file is refused
+with `purchase_open` until then, also after the purchase expired. If it stays pending after the
+purchase expired and your wallet shows no transfer, you may buy again with `--force`.
 
 ## SDK seller resume and CKD configuration
 

@@ -78,7 +78,8 @@ export interface PurchaseRecord extends Versioned {
   recoveryProved: boolean;
   /** Source details are the reviewed 1Click quote. */
   payment: PaymentSummary;
-  nearSubmission?: { state: 'uncertain'; txHash: string };
+  /** A NEAR send that may be on chain; `txHash` only when the wallet returned one. */
+  nearSubmission?: { state: 'uncertain'; txHash?: string };
   paymentState?: 'expired' | 'canceled';
   purchase: Purchase;
   message: string;

@@ -13,7 +13,7 @@ export const LOGIN_PAGE_HTML = `<!doctype html><html lang="en"><head><meta chars
 <h1 id="title">Waiting for the CLI</h1>
 <section class="pair" aria-labelledby="pair-label"><p class="label" id="pair-label">Pairing code</p><p id="pair" class="code">------</p><p class="hint">Check that your terminal shows the same code.</p></section>
 <section id="summary" class="summary" hidden><p id="amount" class="amount" hidden></p><dl id="rows" class="rows"></dl><div id="message-box" class="message" hidden><p id="message-label" class="label"></p><pre id="message"></pre></div><ul id="warnings" class="warnings" hidden></ul><div id="terms-box" class="terms" hidden><p class="label">Terms from the CLI</p><p class="hint">For review. Your wallet signs only the request above.</p><dl id="terms" class="rows"></dl></div><p id="note" class="note"></p></section>
-<section class="act"><p id="wallet-field" class="field" hidden><label for="near-wallet">NEAR wallet</label><select id="near-wallet"><option value="meteor-wallet">Meteor Wallet</option><option id="near-wallet-hot" value="hot-wallet">HOT Wallet (mainnet)</option></select></p><div class="buttons"><button id="approve" class="primary" disabled>Review in wallet</button><button id="cancel" class="secondary" hidden>Cancel</button></div><p id="status" class="status" role="status" aria-live="polite"></p></section>
+<section class="act"><div id="wallet-field" class="field" hidden><span class="label" id="near-wallet-label">NEAR wallet</span><div class="picker"><div id="near-wallet" class="picker-button" role="combobox" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-controls="near-wallet-list" aria-labelledby="near-wallet-label near-wallet-value"><span id="near-wallet-value">Meteor Wallet</span></div><ul id="near-wallet-list" class="picker-list" role="listbox" aria-labelledby="near-wallet-label" hidden><li id="near-wallet-meteor" class="option" role="option" aria-selected="true">Meteor Wallet<span class="option-note">Extension or web popup</span></li><li id="near-wallet-hot" class="option" role="option" aria-selected="false">HOT Wallet<span class="option-note">Mainnet only</span></li></ul></div></div><div class="buttons"><button id="approve" class="primary" disabled>Review in wallet</button><button id="cancel" class="secondary" hidden>Cancel</button></div><p id="status" class="status" role="status" aria-live="polite"></p></section>
 <details class="details"><summary>Technical details</summary><pre id="action"></pre></details>
 </main></body></html>`;
 
@@ -24,7 +24,7 @@ body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.5 var(--serif
 .card{max-width:640px;margin:0 auto;padding:40px 16px 56px}
 .brand{display:flex;align-items:center;gap:10px;margin-bottom:20px}
 .mark{fill:var(--ink);flex:none}
-.eyebrow,.label,dt,.details summary,button,select,label{font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;font-size:12px}
+.eyebrow,.label,dt,.details summary,button{font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase;font-size:12px}
 .eyebrow{margin:0;color:var(--soft)}
 h1{font-weight:500;font-size:clamp(28px,6vw,36px);line-height:1.15;margin:0 0 24px;letter-spacing:-.01em}
 .label{margin:0 0 6px;color:var(--muted)}
@@ -44,14 +44,25 @@ pre{margin:0;padding:14px 16px;background:var(--alt);border:1px solid var(--line
 .note{margin:20px 0 0;color:var(--soft)}
 .act{margin-top:28px;border-top:1px solid var(--line);padding-top:20px}
 .field{margin:0 0 16px;display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px}
-label{color:var(--muted)}
-select{appearance:none;-webkit-appearance:none;background:var(--paper) linear-gradient(45deg,transparent 50%,var(--ink) 50%) no-repeat right 14px center/6px 6px;color:var(--ink);border:1px solid var(--ink);padding:10px 36px 10px 12px;min-width:16em;max-width:100%}
+.picker{position:relative;flex:0 1 20em;min-width:0}
+.picker-button{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--paper);color:var(--ink);border:1px solid var(--ink);padding:10px 12px;cursor:pointer;font:14px/1.4 var(--mono);user-select:none}
+.picker-button::after{content:"";width:0;height:0;border:5px solid transparent;border-top-color:var(--ink);border-bottom:0;flex:none}
+.picker-button[aria-expanded="true"]::after{border-top:0;border-bottom:5px solid var(--ink)}
+.picker-button[aria-disabled="true"]{opacity:.4;cursor:not-allowed}
+.picker-list{position:absolute;z-index:2;left:0;right:0;top:100%;margin:0;padding:0;list-style:none;background:var(--paper);border:1px solid var(--ink);border-top:0}
+.option{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 12px;cursor:pointer;font:14px/1.4 var(--mono);color:var(--soft)}
+.option+.option{border-top:1px solid var(--line)}
+.option.active{background:var(--alt);color:var(--ink)}
+.option[aria-selected="true"]{color:var(--ink);font-weight:600}
+.option[aria-selected="true"]::before{content:"";width:6px;height:6px;background:var(--ink);flex:none;align-self:center}
+.option[aria-disabled="true"]{color:var(--muted);cursor:not-allowed;opacity:.6}
+.option-note{margin-left:auto;font-size:11px;font-weight:400;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .buttons{display:flex;flex-wrap:wrap;gap:12px}
 button{padding:14px 22px;border:1px solid var(--ink);cursor:pointer}
 .primary{background:var(--ink);color:var(--paper)}
 .secondary{background:transparent;color:var(--ink)}
 button:disabled{cursor:not-allowed;opacity:.4}
-button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+button:focus-visible,.picker-button:focus-visible,summary:focus-visible{outline:2px solid var(--red);outline-offset:2px}
 .status{min-height:1.5em;margin:16px 0 0;color:var(--soft)}
 .status.wait{color:var(--muted)}
 .status.ok{color:var(--ink);border-left:3px solid var(--ink);padding-left:12px}
@@ -60,5 +71,5 @@ button:focus-visible,select:focus-visible,summary:focus-visible{outline:2px soli
 .details summary{cursor:pointer;color:var(--muted);padding:6px 0}
 .details pre{margin-top:10px}
 [hidden]{display:none!important}
-@media (max-width:480px){.row{grid-template-columns:1fr}.card{padding-top:28px}button{flex:1 1 100%}select{min-width:0;width:100%}}
+@media (max-width:480px){.row{grid-template-columns:1fr}.card{padding-top:28px}button{flex:1 1 100%}.picker{flex-basis:100%}}
 `;

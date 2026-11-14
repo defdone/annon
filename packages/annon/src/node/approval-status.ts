@@ -4,14 +4,19 @@
  * or a wallet.
  */
 
-import { clock } from '../browser/login-format.js';
+import { clock, record } from '../browser/login-format.js';
 import { isWalletFailure, type WalletFailure } from '../browser/login-status.js';
+import { parsePurchaseMessage, purchaseId } from '../settle-near/purchase.js';
+import { TransactionUncertain } from '../wallet/uncertain.js';
 import { AdapterError } from './errors.js';
 
-/** What the page may report: a failed wallet attempt, or that the person cancelled the request. */
-export type PageReport = WalletFailure | 'cancelled';
+/**
+ * What the page may report: a failed wallet attempt, a cancel, or that it is about to call the
+ * wallet's send (after which the request can only end as sent or uncertain).
+ */
+export type PageReport = WalletFailure | 'cancelled' | 'send_started';
 export const isPageReport = (v: unknown): v is PageReport =>
-  v === 'cancelled' || isWalletFailure(v);
+  v === 'cancelled' || v === 'send_started' || isWalletFailure(v);
 
 export const openingLine = (url: string) =>
   `Opening your browser. If it does not open, visit ${url}`;
@@ -25,6 +30,7 @@ const FAILED: Record<WalletFailure, string> = {
   rejected: 'The wallet declined the request.',
   wallet_error: 'The wallet could not complete the request.',
   refused: 'The page refused the wallet, account or chain for this request.',
+  send_uncertain: 'The wallet may have sent the transaction.',
 };
 export const failureLine = (reason: WalletFailure, ms: number) =>
   `${FAILED[reason]} You can try again on the page for ${clock(ms)}.`;
@@ -45,4 +51,29 @@ export function expiredError(last?: WalletFailure): AdapterError {
   const code =
     last === 'rejected' ? 'rejected' : last === 'window_closed' ? 'cancelled' : 'wallet_error';
   return new AdapterError(code, `${FAILED[last]} The browser approval then expired. ${again}`, 3);
+}
+
+/** The purchase a NEAR USDC payment request pays for, when its transfer message names one. */
+export function requestPurchase(action: unknown): string | undefined {
+  const p = record(record(action).payload);
+  const msg = record(p.args).msg;
+  if (p.method !== 'ft_transfer_call' || typeof msg !== 'string') return undefined;
+  try {
+    return purchaseId(parsePurchaseMessage(msg));
+  } catch {
+    return undefined;
+  }
+}
+
+/** The line and error when a send may have reached the chain. The CLI never pays again by itself. */
+export function sendUncertain(action: unknown): { line: string; error: TransactionUncertain } {
+  const purchase = requestPurchase(action);
+  return {
+    line: `The wallet may have sent the transaction. Do not pay again. ${
+      purchase
+        ? `Run annon status ${purchase} to check it.`
+        : 'Check the transaction in your wallet before you run the command again.'
+    }`,
+    error: new TransactionUncertain(undefined, purchase),
+  };
 }
