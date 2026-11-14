@@ -286,16 +286,30 @@ async function approveNear(
   return { status: elements.get('status')?.textContent ?? '', results, logs, stored, elements };
 }
 
-/** Every string and property name reachable from logged values (cycle safe, any depth). */
+/**
+ * Every string and property name reachable from logged values (cycle safe, any depth). Byte
+ * values (typed arrays, ArrayBuffers, number arrays) are added as base58, hex and base64.
+ */
 function logged(logs: unknown[][]): string[] {
   const out: string[] = [];
   const seen = new Set<unknown>();
+  const bytes = (b: Uint8Array) =>
+    out.push(base58.encode(b), Buffer.from(b).toString('hex'), Buffer.from(b).toString('base64'));
   const walk = (v: unknown) => {
     if (typeof v === 'string') out.push(v);
     else if (typeof v === 'bigint' || typeof v === 'number') out.push(String(v));
     else if (v && (typeof v === 'object' || typeof v === 'function') && !seen.has(v)) {
       seen.add(v);
-      if (v instanceof Uint8Array) out.push(base58.encode(v), Buffer.from(v).toString('hex'));
+      if (ArrayBuffer.isView(v)) bytes(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+      else if (v instanceof ArrayBuffer) bytes(new Uint8Array(v));
+      else if (
+        Array.isArray(v) &&
+        v.length > 0 &&
+        v.every((n) => Number.isInteger(n) && n >= 0 && n < 256)
+      )
+        bytes(Uint8Array.from(v));
+      else if (Array.isArray(v) && v.length > 0 && v.every((c) => typeof c === 'string'))
+        out.push(v.join(''));
       for (const key of Object.getOwnPropertyNames(v)) {
         out.push(key);
         try {
@@ -311,17 +325,60 @@ function logged(logs: unknown[][]): string[] {
   return out;
 }
 
+/**
+ * What in the logs reveals a key pair or a private key the page stored: key-pair property names,
+ * the stored 64-byte key, or its 32-byte seed (Meteor's `secretKey`, which is not a substring of
+ * the 64-byte encoding), each as base58, hex or base64. Compared only against the known stored
+ * synthetic secrets, since public keys are 32 bytes too.
+ */
+function secretFindings(logs: unknown[][], stored: Map<string, string>) {
+  const secrets = [...stored.values()].filter((v) => /^ed25519:[1-9A-HJ-NP-Za-km-z]{80,}$/.test(v));
+  const forbidden = secrets.flatMap((secret) => {
+    const full = base58.decode(secret.slice(8));
+    return [full, full.slice(0, 32)].flatMap((b) => [
+      base58.encode(b),
+      Buffer.from(b).toString('hex'),
+      Buffer.from(b).toString('base64'),
+    ]);
+  });
+  const text = logged(logs);
+  const findings = [
+    ...text.filter((t) => /secretKey|extendedSecretKey/.test(t)),
+    ...text.filter((t) => forbidden.some((f) => t.includes(f))),
+  ];
+  return { secrets, findings };
+}
+
 /** No logged value may carry a key pair or any private key the page stored. */
 function expectNoSecretLogged(logs: unknown[][], stored: Map<string, string>) {
-  const secrets = [...stored.values()].filter((v) => /^ed25519:[1-9A-HJ-NP-Za-km-z]{80,}$/.test(v));
-  const text = logged(logs);
-  expect(text.filter((t) => /secretKey|extendedSecretKey/.test(t))).toEqual([]);
-  for (const secret of secrets) {
-    const raw = secret.slice(8);
-    expect(text.filter((t) => t.includes(raw))).toEqual([]);
-  }
+  const { secrets, findings } = secretFindings(logs, stored);
+  expect(findings).toEqual([]);
   return secrets;
 }
+
+it('the console check rejects a logged key pair, its seed and its full key in any encoding', () => {
+  const full = Uint8Array.from({ length: 64 }, (_, i) => (i * 37 + 11) % 256);
+  const seed = full.slice(0, 32);
+  const stored = new Map([['_meteor_walletbot.near:testnet', `ed25519:${base58.encode(full)}`]]);
+  const keyPair = { secretKey: base58.encode(seed), extendedSecretKey: base58.encode(full) };
+  const leaks: unknown[][] = [
+    [keyPair], // the original console.log(accessKey)
+    [base58.encode(seed)], // console.info(accessKey.secretKey)
+    [`key ${base58.encode(full)}`],
+    [seed],
+    [Array.from(seed)],
+    [{ nested: { value: seed.buffer.slice(0) } }],
+    [Buffer.from(seed).toString('hex')],
+    [Buffer.from(seed).toString('base64')],
+    [Array.from(base58.encode(seed))],
+  ];
+  for (const leak of leaks) expect(secretFindings([leak], stored).findings).not.toEqual([]);
+  // The public half of the key and unrelated text are not findings.
+  expect(
+    secretFindings([[base58.encode(full.slice(32))], ['Comparing access key and actions']], stored)
+      .findings,
+  ).toEqual([]);
+});
 
 const accessKey = `ed25519:${base58.encode(new Uint8Array(32).fill(7))}`;
 const nearRpc = (method: string, params: Record<string, unknown>) =>
