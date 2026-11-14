@@ -7,6 +7,54 @@ import { expect, it, vi } from 'vitest';
 import { browserBuildOptions } from '../../scripts/build-browser.js';
 import { nep413Hash } from '../near/nep413.js';
 
+/** A DOM element as far as the approval page uses one. */
+interface FakeElement {
+  textContent: string;
+  disabled: boolean;
+  hidden: boolean;
+  value: string;
+  className: string;
+  tag: string;
+  children: FakeElement[];
+  onclick?: () => Promise<void> | void;
+  append(...c: FakeElement[]): void;
+  replaceChildren(...c: FakeElement[]): void;
+}
+function fakeElement(tag = 'div', value = ''): FakeElement {
+  const e: FakeElement = {
+    textContent: '',
+    disabled: false,
+    hidden: false,
+    value,
+    className: '',
+    tag,
+    children: [],
+    append: (...c) => {
+      e.children.push(...c);
+    },
+    replaceChildren: (...c) => {
+      e.children = c;
+    },
+  };
+  return e;
+}
+function fakeDocument(
+  elements: Map<string, FakeElement>,
+  value: (id: string) => string = () => '',
+) {
+  return {
+    getElementById: (id: string) => {
+      let e = elements.get(id);
+      if (!e) {
+        e = fakeElement(id, value(id));
+        elements.set(id, e);
+      }
+      return e;
+    },
+    createElement: (tag: string) => fakeElement(tag),
+  };
+}
+
 it('bundled page starts with dynamic code generation disabled by CSP and no persistent capabilities', async () => {
   const asset =
     (await build({ ...browserBuildOptions, write: false })).outputFiles?.[0]?.text ?? '';
@@ -97,10 +145,7 @@ it('starts a wallet action only once even with repeated clicks while approval is
   const asset =
     (await build({ ...browserBuildOptions, write: false })).outputFiles?.[0]?.text ?? '';
   const address = `0x${'11'.repeat(20)}`;
-  const elements = new Map<
-    string,
-    { textContent: string; disabled: boolean; onclick?: () => Promise<void> }
-  >();
+  const elements = new Map<string, FakeElement>();
   const provider = {
     request: vi.fn(async ({ method }: { method: string }) =>
       method === 'eth_requestAccounts' || method === 'eth_accounts'
@@ -140,13 +185,7 @@ it('starts a wallet action only once even with repeated clicks while approval is
           },
         }),
       addEventListener: vi.fn(),
-      document: {
-        getElementById: (id: string) => {
-          const e = { textContent: '', disabled: false };
-          elements.set(id, e);
-          return e;
-        },
-      },
+      document: fakeDocument(elements),
       localStorage: { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() },
     },
     { codeGeneration: { strings: false, wasm: false } },
@@ -181,18 +220,21 @@ const nearAction = (operation: string, chain = 'near:testnet') => ({
         },
 });
 
-/** Runs the bundled page against one pending NEAR action and clicks approve once. */
+/**
+ * Runs the bundled page against one pending NEAR action and clicks approve `clicks` times, one
+ * click per wallet step. `onClick` runs before each click (a fresh user activation).
+ */
 async function approveNear(
   action: ReturnType<typeof nearAction>,
   walletId: string,
   globals: Record<string, unknown>,
+  clicks = 1,
+  onClick: (elements: Map<string, FakeElement>) => void = () => {},
 ) {
   const asset =
     (await build({ ...browserBuildOptions, write: false })).outputFiles?.[0]?.text ?? '';
-  const elements = new Map<
-    string,
-    { textContent: string; disabled: boolean; value: string; onclick?: () => Promise<void> }
-  >();
+  const elements = new Map<string, FakeElement>();
+  const reports: unknown[] = [];
   const {
     rpc,
     fetch: wallet,
@@ -246,15 +288,7 @@ async function approveNear(
       },
       removeEventListener: (_name: string, fn: (e: unknown) => void) => listeners.delete(fn),
       document: {
-        getElementById: (id: string) => {
-          const e = {
-            textContent: '',
-            disabled: false,
-            value: id === 'near-wallet' ? walletId : '',
-          };
-          elements.set(id, e);
-          return e;
-        },
+        ...fakeDocument(elements, (id) => (id === 'near-wallet' ? walletId : '')),
         ...page,
       },
       localStorage: {
@@ -265,6 +299,7 @@ async function approveNear(
       ...rest,
       fetch: async (url: string, init?: RequestInit) => {
         if (url === '/api/result') results.push(JSON.parse(String(init?.body)).result);
+        if (url === '/api/report') reports.push(JSON.parse(String(init?.body)).reason);
         if (url.startsWith('/')) return Response.json({ pairingCode: '123', action });
         if (/^https:\/\/(free|test)\.rpc\.fastnear\.com\/?$/.test(url)) {
           const q = JSON.parse(String(init?.body));
@@ -282,8 +317,21 @@ async function approveNear(
   );
   runInContext(asset, context);
   await new Promise((resolve) => setTimeout(resolve, 0));
-  await elements.get('approve')?.onclick?.();
-  return { status: elements.get('status')?.textContent ?? '', results, logs, stored, elements };
+  const statuses: string[] = [];
+  for (let i = 0; i < clicks; i++) {
+    onClick(elements);
+    await elements.get('approve')?.onclick?.();
+    statuses.push(elements.get('status')?.textContent ?? '');
+  }
+  return {
+    status: elements.get('status')?.textContent ?? '',
+    statuses,
+    results,
+    reports,
+    logs,
+    stored,
+    elements,
+  };
 }
 
 /**
@@ -393,7 +441,7 @@ const nearRpc = (method: string, params: Record<string, unknown>) =>
       : null;
 
 it.each(['near.nep413', 'near.signTransaction'])(
-  'bundled Meteor Wallet %s signs in account-only and approves the exact payload in its popup',
+  'bundled Meteor Wallet %s opens one popup per click and approves the exact payload',
   async (operation) => {
     const action = nearAction(operation);
     const opened: URL[] = [];
@@ -404,52 +452,62 @@ it.each(['near.nep413', 'near.signTransaction'])(
       sign_message: { accountId: 'bot.near', publicKey: accessKey, signature: 'fake' },
       sign: { executionOutcomes: [{ transaction: { hash: 'FAKE-TX-HASH' } }] },
     };
-    const { status, results, logs, stored } = await approveNear(action, 'meteor-wallet', {
-      rpc: nearRpc,
-      listeners,
-      open: (url: string) => {
-        opened.push(new URL(url));
-        return {
-          closed: false,
-          focus() {},
-          postMessage(
-            data: {
-              uid: string;
-              status: string;
-              actionType: string;
-              inputs?: Record<string, unknown>;
+    const nep413 = operation === 'near.nep413';
+    const { status, statuses, results, logs, stored } = await approveNear(
+      action,
+      'meteor-wallet',
+      {
+        rpc: nearRpc,
+        listeners,
+        open: (url: string) => {
+          opened.push(new URL(url));
+          return {
+            closed: false,
+            focus() {},
+            postMessage(
+              data: {
+                uid: string;
+                status: string;
+                actionType: string;
+                inputs?: Record<string, unknown>;
+              },
+              origin: string,
+            ) {
+              if (origin !== 'https://wallet.meteorwallet.app') throw new Error('wrong origin');
+              if (data.status !== 'initializing' || !data.inputs) return;
+              sent.push({ actionType: data.actionType, inputs: data.inputs });
+              const payload = payloads[data.actionType];
+              setTimeout(() => {
+                for (const fn of listeners)
+                  fn({ origin, data: { uid: data.uid, status: 'closed_success', payload } });
+              }, 0);
             },
-            origin: string,
-          ) {
-            if (origin !== 'https://wallet.meteorwallet.app') throw new Error('wrong origin');
-            if (data.status !== 'initializing' || !data.inputs) return;
-            sent.push({ actionType: data.actionType, inputs: data.inputs });
-            const payload = payloads[data.actionType];
-            setTimeout(() => {
-              for (const fn of listeners)
-                fn({ origin, data: { uid: data.uid, status: 'closed_success', payload } });
-            }, 0);
-          },
-        };
+          };
+        },
       },
-    });
-    expect(status).toContain('Verified');
-    // Meteor's SDK stores a generated connector key; it must never reach the console.
-    expect(expectNoSecretLogged(logs, stored)).toHaveLength(1);
-    expect(opened.map((u) => `${u.origin}${u.pathname}`)).toEqual([
-      'https://wallet.meteorwallet.app/connect/testnet/login',
-      `https://wallet.meteorwallet.app/connect/testnet/${operation === 'near.nep413' ? 'sign_message' : 'sign'}`,
-    ]);
+      nep413 ? 1 : 2,
+    );
+    expect(status).toContain('Signed. Return to the terminal.');
+    // Meteor's SDK stores a generated connector key at sign-in; it must never reach the console.
+    // A NEP-413 message needs no sign-in, so no key exists at all.
+    expect(expectNoSecretLogged(logs, stored)).toHaveLength(nep413 ? 0 : 1);
+    // One wallet window per click: NEP-413 signs directly, a transaction connects first.
+    expect(opened.map((u) => `${u.origin}${u.pathname}`)).toEqual(
+      nep413
+        ? ['https://wallet.meteorwallet.app/connect/testnet/sign_message']
+        : [
+            'https://wallet.meteorwallet.app/connect/testnet/login',
+            'https://wallet.meteorwallet.app/connect/testnet/sign',
+          ],
+    );
+    if (!nep413) expect(statuses[0]).toContain('Connected as bot.near');
     for (const u of opened) {
       expect(u.href).not.toContain('CAP');
       expect(u.href).not.toContain(action.id);
     }
-    // Account-only: no contract and no method list, so no function-call key is requested.
-    expect(sent[0]?.actionType).toBe('login');
-    expect(sent[0]?.inputs.contract_id).toBe('');
-    expect(sent[0]?.inputs.methods).toBeUndefined();
-    if (operation === 'near.nep413') {
-      const inputs = sent[1]?.inputs ?? {};
+    if (nep413) {
+      expect(sent.map((x) => x.actionType)).toEqual(['sign_message']);
+      const inputs = sent[0]?.inputs ?? {};
       expect(inputs.message).toBe('exact');
       expect(inputs.recipient).toBe('annon');
       expect([...(inputs.nonce as Uint8Array)]).toEqual(Array(32).fill(1));
@@ -459,6 +517,10 @@ it.each(['near.nep413', 'near.signTransaction'])(
         expect.objectContaining({ accountId: 'bot.near', publicKey: accessKey, signature: 'fake' }),
       ]);
     } else {
+      // Account-only: no contract and no method list, so no function-call key is requested.
+      expect(sent[0]?.actionType).toBe('login');
+      expect(sent[0]?.inputs.contract_id).toBe('');
+      expect(sent[0]?.inputs.methods).toBeUndefined();
       const { decodeTransaction } = await import('near-api-js');
       expect(sent[1]?.actionType).toBe('sign');
       const tx = decodeTransaction(
@@ -479,7 +541,7 @@ it.each(['near.nep413', 'near.signTransaction'])(
 );
 
 it.each(['near.nep413', 'near.signTransaction'])(
-  'bundled HOT Wallet %s signs in account-only and sends the exact payload through its widget',
+  'bundled HOT Wallet %s sends the exact payload through its widget, one step per click',
   async (operation) => {
     const action = nearAction(operation, 'near:mainnet');
     const secret = new Uint8Array(32).fill(9);
@@ -503,49 +565,50 @@ it.each(['near.nep413', 'near.signTransaction'])(
       }
       return { transactions: [{ transaction: { hash: 'FAKE-TX-HASH' } }] };
     };
-    const element = () => {
-      const e = {
+    const element = (tag: string) => {
+      const e = Object.assign(fakeElement(tag), {
         style: {},
-        children: [] as unknown[],
-        appendChild: (child: unknown) => e.children.push(child),
+        appendChild: (child: FakeElement) => e.children.push(child),
         remove: () => {},
-      };
+      });
       return e;
     };
-    const { status, results, logs, stored } = await approveNear(action, 'hot-wallet', {
-      rpc: nearRpc,
-      setTimeout: (fn: () => void, ms: number) => (ms === 3000 || ms < 100 ? setTimeout(fn, 0) : 0),
-      document: {
-        createElement: element,
-        body: { appendChild: (e: { children: { src?: string }[] }) => mounted.push(e) },
+    const nep413 = operation === 'near.nep413';
+    const { status, results, logs, stored } = await approveNear(
+      action,
+      'hot-wallet',
+      {
+        rpc: nearRpc,
+        setTimeout: (fn: () => void, ms: number) =>
+          ms === 3000 || ms < 100 ? setTimeout(fn, 0) : 0,
+        document: {
+          createElement: element,
+          body: { appendChild: (e: { children: { src?: string }[] }) => mounted.push(e) },
+        },
+        fetch: (url: string, init?: RequestInit) => {
+          const [, id, kind] = new URL(url).pathname.split('/');
+          if (new URL(url).origin !== 'https://h4n.app' || !id)
+            throw new Error(`unexpected ${url}`);
+          if (kind === 'request') {
+            const query = JSON.parse(String(init?.body)).data as string;
+            const q = JSON.parse(new TextDecoder().decode(base58.decode(query)));
+            requests.push({ method: q.method, request: q.request, origin: q.origin });
+            responses.set(id, { success: true, payload: answer(q.method, q.request) });
+            return new Response('{}');
+          }
+          return Response.json({ data: JSON.stringify(responses.get(id)) });
+        },
       },
-      fetch: (url: string, init?: RequestInit) => {
-        const [, id, kind] = new URL(url).pathname.split('/');
-        if (new URL(url).origin !== 'https://h4n.app' || !id) throw new Error(`unexpected ${url}`);
-        if (kind === 'request') {
-          const query = JSON.parse(String(init?.body)).data as string;
-          const q = JSON.parse(new TextDecoder().decode(base58.decode(query)));
-          requests.push({ method: q.method, request: q.request, origin: q.origin });
-          responses.set(id, { success: true, payload: answer(q.method, q.request) });
-          return new Response('{}');
-        }
-        return Response.json({ data: JSON.stringify(responses.get(id)) });
-      },
-    });
-    expect(status).toContain('Verified');
+      nep413 ? 1 : 2,
+    );
+    expect(status).toContain('Signed. Return to the terminal.');
     expectNoSecretLogged(logs, stored);
-    expect(mounted.map((c) => c.children[0]?.src?.split('?')[0])).toEqual([
-      'https://hot-labs.org/hot-widget/index.html',
-      'https://hot-labs.org/hot-widget/index.html',
-    ]);
-    expect(requests[0]).toEqual({
-      method: 'near:signIn',
-      request: {},
-      origin: 'http://127.0.0.1:1234/',
-    });
-    if (operation === 'near.nep413') {
-      expect(requests[1]?.method).toBe('near:signMessage');
-      expect(requests[1]?.request).toEqual({
+    expect(mounted.map((c) => c.children[0]?.src?.split('?')[0])).toEqual(
+      Array(nep413 ? 1 : 2).fill('https://hot-labs.org/hot-widget/index.html'),
+    );
+    if (nep413) {
+      expect(requests.map((r) => r.method)).toEqual(['near:signMessage']);
+      expect(requests[0]?.request).toEqual({
         message: 'exact',
         recipient: 'annon',
         nonce: Array(32).fill(1),
@@ -561,6 +624,11 @@ it.each(['near.nep413', 'near.signTransaction'])(
         ),
       ).toBe(true);
     } else {
+      expect(requests[0]).toEqual({
+        method: 'near:signIn',
+        request: {},
+        origin: 'http://127.0.0.1:1234/',
+      });
       expect(requests[1]).toEqual({
         method: 'near:signAndSendTransactions',
         request: {
@@ -603,7 +671,9 @@ it.each(['near:testnet', 'near:sandbox'])(
   async (chain) => {
     const action = nearAction('near.signTransaction', chain);
     const hotExtension = { autoRun: true, request: vi.fn(), subscribe: vi.fn() };
-    const createElement = vi.fn();
+    // The page builds its own summary rows; the HOT widget would be an iframe mounted on body.
+    const createElement = vi.fn((tag: string) => fakeElement(tag));
+    const mount = vi.fn();
     const relay = vi.fn();
     const open = vi.fn();
     const { status, results, elements } = await approveNear(action, 'hot-wallet', {
@@ -611,7 +681,7 @@ it.each(['near:testnet', 'near:sandbox'])(
       hotExtension,
       open,
       fetch: relay,
-      document: { createElement, body: { appendChild: createElement } },
+      document: { createElement, body: { appendChild: mount } },
     });
     expect(status).toMatch(
       chain === 'near:testnet' ? /HOT Wallet is offered for near:mainnet only/ : /not near:sandbox/,
@@ -619,7 +689,8 @@ it.each(['near:testnet', 'near:sandbox'])(
     expect(elements.get('near-wallet-hot')?.disabled).toBe(true);
     expect(hotExtension.request).not.toHaveBeenCalled();
     expect(hotExtension.subscribe).not.toHaveBeenCalled();
-    expect(createElement).not.toHaveBeenCalled();
+    expect(createElement.mock.calls.map(([tag]) => tag)).not.toContain('iframe');
+    expect(mount).not.toHaveBeenCalled();
     expect(relay).not.toHaveBeenCalled();
     expect(open).not.toHaveBeenCalled();
     expect(results).toEqual([]);
@@ -650,7 +721,7 @@ it.each(['near:foo', 'near:Mainnet', 'eip155:8453'])(
 it('the approval session API omits credentials and rejects redirects', async () => {
   const source = await readFile(new URL('./login.ts', import.meta.url), 'utf8');
   const api = source
-    .slice(source.indexOf('const api = async'), source.indexOf('const used ='))
+    .slice(source.indexOf('const api = async'), source.indexOf('/** Requests whose result'))
     .replace('path: string, body?: unknown', 'path, body');
   const fetcher = vi.fn(async () => Response.json({ ok: true }));
   await runInNewContext(`${api}\napi('/api/action')`, {
@@ -666,4 +737,124 @@ it('the approval session API omits credentials and rejects redirects', async () 
       headers: expect.objectContaining({ authorization: 'Bearer synthetic-capability' }),
     }),
   );
+});
+
+/** Meteor's web popup: answers each action with `reply(actionType)`, success by default. */
+function meteorPopup(
+  listeners: Set<(e: unknown) => void>,
+  o: { opened?: string[]; reply?: (actionType: string) => string; canOpen?: () => boolean } = {},
+) {
+  const payloads: Record<string, unknown> = {
+    login: { accountId: 'bot.near', allKeys: [accessKey] },
+    sign_message: { accountId: 'bot.near', publicKey: accessKey, signature: 'fake' },
+    sign: { executionOutcomes: [{ transaction: { hash: 'FAKE-TX-HASH' } }] },
+  };
+  return (url: string) => {
+    if (o.canOpen && !o.canOpen()) return null;
+    o.opened?.push(new URL(url).pathname);
+    return {
+      closed: false,
+      focus() {},
+      postMessage(data: { uid: string; status: string; actionType: string; inputs?: unknown }) {
+        if (data.status !== 'initializing' || !data.inputs) return;
+        const status = o.reply?.(data.actionType) ?? 'closed_success';
+        setTimeout(() => {
+          for (const fn of listeners)
+            fn({
+              origin: 'https://wallet.meteorwallet.app',
+              data: { uid: data.uid, status, payload: payloads[data.actionType], endTags: [] },
+            });
+        }, 0);
+      },
+    };
+  };
+}
+
+it.each(['near.nep413', 'near.signTransaction'])(
+  'Meteor %s: every popup opens inside its own click, never after an awaited popup',
+  async (operation) => {
+    // A browser allows window.open only with a fresh user activation, and window.open uses it up.
+    let activation = false;
+    let blocked = 0;
+    const opened: string[] = [];
+    const listeners = new Set<(e: unknown) => void>();
+    const open = meteorPopup(listeners, {
+      opened,
+      canOpen: () => {
+        if (!activation) {
+          blocked++;
+          return false;
+        }
+        activation = false;
+        return true;
+      },
+    });
+    const nep413 = operation === 'near.nep413';
+    const { status, results, elements } = await approveNear(
+      nearAction(operation),
+      'meteor-wallet',
+      { rpc: nearRpc, listeners, open },
+      nep413 ? 1 : 2,
+      (page) => {
+        activation = true;
+        if (!nep413 && opened.length === 0)
+          expect(page.get('approve')?.textContent).toBe('Connect wallet');
+      },
+    );
+    expect(blocked).toBe(0);
+    expect(opened).toEqual(
+      nep413
+        ? ['/connect/testnet/sign_message']
+        : ['/connect/testnet/login', '/connect/testnet/sign'],
+    );
+    expect(status).toContain('Signed. Return to the terminal.');
+    expect(results).toHaveLength(1);
+    expect(elements.get('approve')?.disabled).toBe(true);
+  },
+);
+
+it('after a closed wallet window the page explains it, reports only the reason and lets the person retry', async () => {
+  const listeners = new Set<(e: unknown) => void>();
+  let attempts = 0;
+  const open = meteorPopup(listeners, {
+    reply: () => (++attempts === 1 ? 'closed_window' : 'closed_success'),
+  });
+  let enabledBeforeRetry: boolean | undefined;
+  const { statuses, results, reports } = await approveNear(
+    nearAction('near.nep413'),
+    'meteor-wallet',
+    { rpc: nearRpc, listeners, open },
+    2,
+    (page) => {
+      if (attempts === 1) enabledBeforeRetry = page.get('approve')?.disabled === false;
+    },
+  );
+  expect(statuses[0]).toBe(
+    'The wallet window closed before signing. Try again or pick another wallet.',
+  );
+  expect(enabledBeforeRetry).toBe(true);
+  expect(reports).toEqual(['window_closed']);
+  expect(statuses[1]).toContain('Signed. Return to the terminal.');
+  expect(results).toHaveLength(1);
+});
+
+it('renders the request summary, pairing code and a cancel that reports only "cancelled"', async () => {
+  const listeners = new Set<(e: unknown) => void>();
+  const { elements, reports, results } = await approveNear(
+    nearAction('near.signTransaction'),
+    'meteor-wallet',
+    { rpc: nearRpc, listeners, open: meteorPopup(listeners) },
+    0,
+  );
+  expect(elements.get('title')?.textContent).toBe('Approve a payment');
+  expect(elements.get('amount')?.textContent).toBe('1 base units of usdc.near');
+  expect(elements.get('pair')?.textContent).toBe('123');
+  expect(elements.get('wallet-field')?.hidden).toBe(false);
+  expect(elements.get('approve')?.textContent).toBe('Connect wallet');
+  expect(elements.get('cancel')?.hidden).toBe(false);
+  await elements.get('cancel')?.onclick?.();
+  expect(reports).toEqual(['cancelled']);
+  expect(elements.get('approve')?.disabled).toBe(true);
+  expect(elements.get('status')?.textContent).toBe('Cancelled. Return to the terminal.');
+  expect(results).toEqual([]);
 });

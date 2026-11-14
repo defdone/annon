@@ -3,7 +3,18 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { WalletFailure } from '../browser/login-status.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
+import {
+  APPROVED_LINE,
+  cancelledError,
+  expiredError,
+  failureLine,
+  isPageReport,
+  openingLine,
+  waitingLine,
+} from './approval-status.js';
+import { LOGIN_PAGE_CSS, LOGIN_PAGE_HTML } from './login-page.js';
 
 const equal = (a: string, b: string) =>
   Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -29,7 +40,10 @@ export async function startBrowserSession(o: {
   open?: (url: string) => void;
   asset?: string;
   timeoutMs?: number;
+  /** Human progress lines; stderr by default, never stdout. */
+  notify?: (line: string) => void;
 }): Promise<BrowserSession> {
+  const notify = o.notify ?? ((line: string) => void process.stderr.write(`${line}\n`));
   let asset = o.asset;
   if (asset === undefined) {
     try {
@@ -65,16 +79,17 @@ export async function startBrowserSession(o: {
             .join(',')}}`
       : JSON.stringify(v);
 
-  let pending:
-    | {
-        action: { id: string; expiresAt: number };
-        busy: boolean;
-        resolve: (v: unknown) => void;
-        reject: (e: Error) => void;
-        verify: (r: unknown) => Promise<void>;
-        timer: ReturnType<typeof setTimeout>;
-      }
-    | undefined;
+  type Pending = {
+    action: { id: string; expiresAt: number };
+    busy: boolean;
+    resolve: (v: unknown) => void;
+    reject: (e: Error) => void;
+    verify: (r: unknown) => Promise<void>;
+    timer: ReturnType<typeof setTimeout>;
+    /** The last wallet failure the page reported for this request. */
+    failure?: WalletFailure;
+  };
+  let pending: Pending | undefined;
   const server = createServer((req, res) => {
     void (async () => {
       const headers = {
@@ -101,7 +116,8 @@ export async function startBrowserSession(o: {
           return void send(403, '{}');
         if (path === '/api/action' && ['GET', 'POST'].includes(req.method ?? ''))
           return void send(200, JSON.stringify({ pairingCode, action: pending?.action ?? null }));
-        if (path !== '/api/result' || req.method !== 'POST') return void send(404, '{}');
+        if (!['/api/result', '/api/report'].includes(path) || req.method !== 'POST')
+          return void send(404, '{}');
         let size = 0;
         const parts: Buffer[] = [];
         for await (const chunk of req) {
@@ -110,6 +126,22 @@ export async function startBrowserSession(o: {
           parts.push(chunk);
         }
         const b = JSON.parse(Buffer.concat(parts).toString());
+        if (path === '/api/report') {
+          // A fixed reason for the current, unconsumed request. Only `cancelled` ends it.
+          const p = pending;
+          if (!p || p.busy || b.id !== p.action.id || !isPageReport(b.reason))
+            return void send(409, '{}');
+          if (b.reason === 'cancelled') {
+            clearTimeout(p.timer);
+            pending = undefined;
+            armIdle();
+            p.reject(cancelledError());
+          } else if (p.failure !== b.reason) {
+            p.failure = b.reason;
+            notify(failureLine(b.reason, p.action.expiresAt - Date.now()));
+          }
+          return void send(200, '{}');
+        }
         const key = canonical(b.result);
         const previous = results.get(b.id);
         if (previous && Date.now() < previous.expiresAt) {
@@ -134,6 +166,7 @@ export async function startBrowserSession(o: {
             pending = undefined;
             armIdle();
           }
+          notify(APPROVED_LINE);
           p.resolve(b.result);
           complete(200);
           send(200, '{}');
@@ -153,12 +186,9 @@ export async function startBrowserSession(o: {
       }
       if (req.method !== 'GET') return void send(405, '{}');
       if (path === '/app.js') return void send(200, asset, 'text/javascript');
+      if (path === '/app.css') return void send(200, LOGIN_PAGE_CSS, 'text/css; charset=utf-8');
       if (path === '/' || path === '/callback')
-        return void send(
-          200,
-          '<!doctype html><html><head><meta charset="utf-8"><title>Annon wallet approval</title><script src="/app.js" defer></script></head><body><h1>Annon wallet approval</h1><p id="pair"></p><pre id="action"></pre><p><label for="near-wallet">NEAR wallet</label> <select id="near-wallet"><option value="meteor-wallet">Meteor Wallet</option><option id="near-wallet-hot" value="hot-wallet">HOT Wallet (mainnet)</option></select></p><button id="approve">Review in wallet</button><p id="status"></p></body></html>',
-          'text/html; charset=utf-8',
-        );
+        return void send(200, LOGIN_PAGE_HTML, 'text/html; charset=utf-8');
       send(404, '{}');
     })().catch(() => {
       if (!res.headersSent) res.writeHead(400, { 'cache-control': 'no-store' }).end();
@@ -192,6 +222,8 @@ export async function startBrowserSession(o: {
   };
   armIdle();
   const url = `${origin}/#${capability}`;
+  // The capability-free page URL: in open mode the page bootstraps the capability once.
+  if (!o.noOpen) notify(openingLine(`${origin}/`));
   if (!o.noOpen)
     (
       o.open ??
@@ -220,21 +252,22 @@ export async function startBrowserSession(o: {
           return;
         }
         clearTimeout(timeout);
-        const timer = setTimeout(() => {
-          if (pending?.timer === timer) {
-            pending = undefined;
-            armIdle();
-          }
-          reject(new Error('action expired'));
-        }, action.expiresAt - Date.now());
-        pending = {
+        const entry: Pending = {
           action: JSON.parse(JSON.stringify(action)),
           busy: false,
           resolve: resolve as (v: unknown) => void,
           reject,
           verify: verify as (v: unknown) => Promise<void>,
-          timer,
+          timer: setTimeout(() => {
+            if (pending === entry) {
+              pending = undefined;
+              armIdle();
+            }
+            reject(expiredError(entry.failure));
+          }, action.expiresAt - Date.now()),
         };
+        pending = entry;
+        notify(waitingLine(action.expiresAt - Date.now()));
       }),
   };
 }
