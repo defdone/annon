@@ -17,7 +17,7 @@ Create a working directory and a configuration file, for example `/absolute/anno
   "contractId": "v1.annon.defdone.near",
   "network": "near:mainnet",
   "nearRpc": "https://rpc.mainnet.fastnear.com",
-  "baseRpc": "https://your-base-rpc-with-api-key.example",
+  "baseRpc": "https://mainnet.base.org",
   "relayer": "https://relayer.mainnet.annon.dev",
   "stateDir": "/absolute/private/annon-state",
   "trustContract": true,
@@ -40,7 +40,7 @@ Create a working directory and a configuration file, for example `/absolute/anno
         "network": "near:mainnet",
         "contract": "v1.annon.defdone.near",
         "nearRpc": "https://rpc.mainnet.fastnear.com",
-        "baseRpc": "https://your-base-rpc-with-api-key.example",
+        "baseRpc": "https://mainnet.base.org",
         "relayer": "https://relayer.mainnet.annon.dev",
         "host": "https://demo.annon.dev"
       }
@@ -65,6 +65,12 @@ or point it at that file: a missing file fails without falling back:
 ANNON_CONFIG=/absolute/annon-agent.json annon init
 ANNON_CONFIG=/absolute/annon-agent.json annon init --agent --wallet evm --recovery evm:0xAGENT_ADDRESS --evm-key-file /absolute/private/agent-evm.key --daily-budget 1
 ```
+
+The agent's wallet is an ordinary EVM account. Create a fresh one with a wallet tool you trust and
+save its private key, `0x` and 64 hex digits, in a file only the owner can read (mode 600). Its
+address is `0xAGENT_ADDRESS`, and that is the address you fund: the `base` route needs only USDC on
+Base, because the demo host pays the Base gas. `https://mainnet.base.org` is a public endpoint with
+rate limits; use your own Base RPC for regular use, in the configuration and the shop's `profile`.
 
 | Setting | What it limits |
 |---|---|

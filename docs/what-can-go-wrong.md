@@ -65,7 +65,12 @@ An EVM wallet without `--route` gets `origin_required` for such a file, with the
 
 1Click can refuse a quote because of its route minimum or available liquidity. When supplied,
 `minimumAmountUsdc` gives the reported minimum. Do not send a deposit without a valid quote. Use
-another available payment route if the file's price cannot be quoted.
+another available payment route if the file's price cannot be quoted. The demo file costs 0.10 USDC,
+below the usual 1Click minimum, so buy it with `near` or `base`.
+
+A refused quote can leave a saved purchase that stays `pending`, so the next buy of the same file
+stops with `purchase_open` although nothing was sent. When there was no deposit address, no deposit
+can have been sent: buy with another route and `--force` (MCP: `force: true`).
 
 ### The relayer refuses or is busy
 
@@ -96,7 +101,9 @@ cannot, switch it yourself and try again. The payment was not signed.
 
 `smart_wallet_unsupported`: the Base route needs an ordinary wallet account (an EOA), not a smart
 contract wallet. Use another account or another route. `insufficient_balance` means there is not
-enough USDC on Base.
+enough USDC on Base: send at least the price in USDC on Base to the paying address (for an agent, the
+identity `annon init --agent` printed). The Base route needs no ETH. The refused attempt may still
+count against the daily budget until its window ends.
 
 ### The file is moderated or taken down
 

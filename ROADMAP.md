@@ -102,6 +102,15 @@ It suits agents that need to hand a file to another agent they already know.
 - A local purchases panel, started from the CLI, that shows your purchases and sales from your
   local records.
 
+### Agents
+
+- Funding errors that say exactly what to send: chain, token, paying address, price, balance and
+  shortfall.
+- `annon init --agent` that can create a fresh EVM key file and print only its address.
+- A read-only readiness check: route, signer, trust, limits, RPC and balance in one answer.
+- A refused 1Click quote that leaves no pending purchase behind, route minimums shown in the
+  catalog, and a daily budget released when a payment provably never left the machine.
+
 ### Independent audit and contract lock
 
 During the alpha defdone can upgrade the contract ([SECURITY.md](SECURITY.md)). We plan an

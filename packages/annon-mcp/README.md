@@ -57,7 +57,7 @@ The configuration file, written by a human:
   "contractId": "v1.annon.defdone.near",
   "network": "near:mainnet",
   "nearRpc": "https://rpc.mainnet.fastnear.com",
-  "baseRpc": "https://your-base-rpc-with-api-key.example",
+  "baseRpc": "https://mainnet.base.org",
   "relayer": "https://relayer.mainnet.annon.dev",
   "stateDir": "/absolute/private/annon-state",
   "trustContract": true,
@@ -80,7 +80,7 @@ The configuration file, written by a human:
         "network": "near:mainnet",
         "contract": "v1.annon.defdone.near",
         "nearRpc": "https://rpc.mainnet.fastnear.com",
-        "baseRpc": "https://your-base-rpc-with-api-key.example",
+        "baseRpc": "https://mainnet.base.org",
         "relayer": "https://relayer.mainnet.annon.dev",
         "host": "https://demo.annon.dev"
       }
