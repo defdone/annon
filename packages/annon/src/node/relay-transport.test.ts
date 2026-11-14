@@ -42,8 +42,12 @@ async function relayed(
         },
       },
     );
-    const outcome = await run({ command: 'stop', target: fileId }).catch((e: unknown) => e);
-    return { outcome, results, wait };
+    let rejected = false;
+    const outcome = await run({ command: 'stop', target: fileId }).catch((e: unknown) => {
+      rejected = true;
+      return e;
+    });
+    return { outcome, rejected, results, wait };
   } finally {
     await ws.remove();
   }
@@ -161,13 +165,48 @@ it.each<[nearRpcModule.Outcome, string]>([
 ])('reports the final transaction outcome %o as %s', async (result, code) => {
   const fetcher = submitted();
   vi.spyOn(nearRpcModule, 'txOutcome').mockResolvedValue(result);
-  const { outcome, wait } = await relayed([['stop_sales', { args: { file_id: fileId } }]], fetcher);
+  const { outcome, rejected, results, wait } = await relayed(
+    [['stop_sales', { args: { file_id: fileId } }]],
+    fetcher,
+  );
+  // The command fails: the call never resolved, so the SDK never saw a result.
+  expect(rejected).toBe(true);
+  expect(results).toEqual([]);
+  expect(outcome).toBeInstanceOf(Error);
   expect(publicError(outcome)).toMatchObject({ code });
   if (code === 'storage_required')
     expect(publicError(outcome).message).toContain('storageDeposit helper');
   expect(fetcher).toHaveBeenCalledTimes(1);
   expect(wait).not.toHaveBeenCalled();
 });
+
+it.each(['refused', 'pending'] as const)(
+  'a %s relayed transaction is never treated as a successful contract call',
+  async (state) => {
+    const fetcher = submitted();
+    vi.spyOn(nearRpcModule, 'txOutcome').mockResolvedValue(
+      state === 'refused'
+        ? { state, method: 'stop_sales', reason: 'Smart contract panicked', events: [] }
+        : { state, method: 'stop_sales', events: [] },
+    );
+    let settled: PromiseSettledResult<unknown> | undefined;
+    const { outcome, rejected } = await relayed([], fetcher, {
+      options: async (options) => {
+        [settled] = await Promise.allSettled([
+          options.send?.('stop_sales', { args: { file_id: fileId } }),
+        ]);
+      },
+    });
+    expect(settled).toMatchObject({
+      status: 'rejected',
+      reason: { message: `transaction ${state}` },
+    });
+    // The scripted stop swallowed the rejection, so only the call itself failed.
+    expect(rejected).toBe(false);
+    expect(outcome).toEqual({ fileId, stopped: true });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  },
+);
 
 it.each([
   ['an active policy', {}, true],

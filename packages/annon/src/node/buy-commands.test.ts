@@ -445,30 +445,44 @@ it.each(['renewed', 'conflicting'] as const)(
     const h = await harness();
     const record = purchaseRecord({ headerHash: h.sealed.headerHash });
     const save = saving(record);
+    let start = -1;
     h.buy.mockImplementation(async (o, sdk) => {
       const before = await h.guard();
+      start = before.value.revision;
       if (mode === 'conflicting')
         await writeFile(
           before.path,
           JSON.stringify({ ...before.value, revision: before.value.revision + 10 }),
         );
       await vi.advanceTimersByTimeAsync(30000);
-      for (let i = 0; i < 100 && mode === 'renewed'; i++) {
-        if ((await h.guard()).value.revision > before.value.revision) break;
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      if (mode === 'renewed') {
+        // Wait for the renewal itself to land, however long it takes; the test timeout bounds it.
+        while ((await h.guard()).value.revision === start)
+          await new Promise((resolve) => setImmediate(resolve));
+        expect((await h.guard()).value).toMatchObject({
+          revision: start + 1,
+          owner: expect.any(String),
+        });
       }
-      if (mode === 'renewed')
-        expect((await h.guard()).value.revision).toBe(before.value.revision + 1);
-      else await new Promise((resolve) => setTimeout(resolve, 50));
+      // A conflicting renewal needs no wait: the guard applies updates in order, so the save
+      // checkpoint fails with store_conflict whether or not the renewal has failed yet.
       return save(o, sdk);
     });
     try {
       const result = await h.run(h.input()).catch((e) => e);
-      if (mode === 'renewed') expect(result).toMatchObject({ state: 'submitted' });
-      else {
+      if (mode === 'renewed') {
+        expect(result).toMatchObject({ state: 'submitted' });
+        // Renewal, the checkpoint, the saved purchase and the release: four updates.
+        expect((await h.guard()).value).toMatchObject({
+          revision: start + 4,
+          owner: null,
+          purchases: [record.id],
+        });
+      } else {
         expect(publicError(result)).toMatchObject({ code: 'store_conflict', exitCode: 4 });
         // The failed renewal stops the purchase at its save checkpoint.
         expect(await h.records().load(purchaseKey(record.id))).toBeNull();
+        expect((await h.guard()).value.revision).toBe(start + 10);
       }
     } finally {
       await h.ws.remove();
