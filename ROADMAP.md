@@ -89,9 +89,18 @@ A way to send a file to one recipient without a sale: the sender encrypts the fi
 recipient's public key and hosts the ciphertext. There is no contract call and no fee, only hosting.
 It suits agents that need to hand a file to another agent they already know.
 
-### A local purchases panel in the CLI
+### The CLI
 
-A panel, started from the CLI, that shows your purchases and sales from your local records.
+- Guided selling. `share` or `sell` with no arguments in a session asks for the file (with path
+  completion), title, description, price, shop and NEAR storage, explains what each amount pays
+  for, shows one summary to confirm, and then walks through the approvals in the browser.
+- Approving from a phone. A QR code in the terminal connects a phone wallet, so a person can sign
+  without a browser wallet on the same machine.
+- Solana on the approval page. Phantom and other Solana wallets can approve CLI requests in the
+  browser, as NEAR and EVM wallets already can, so a Solana seller can stop a listing without a key
+  file.
+- A local purchases panel, started from the CLI, that shows your purchases and sales from your
+  local records.
 
 ### Independent audit and contract lock
 
