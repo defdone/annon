@@ -1,4 +1,15 @@
-import { lstat, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import {
+  link,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  readlink,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -11,6 +22,11 @@ import { defaultStateDir, loadConfig } from './config.js';
 import { deploymentQuestion } from './init-config.js';
 import { shareHost } from './sharing.js';
 import { catalogRow } from './shops.js';
+
+vi.mock('node:fs/promises', async (original) => {
+  const actual = await original<typeof import('node:fs/promises')>();
+  return { ...actual, link: vi.fn(actual.link) };
+});
 
 const homeConfig = () => join(homedir(), '.config', 'annon', 'config.json');
 const absent = (path: string) => expect(lstat(path)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -40,6 +56,7 @@ async function cli(argv: string[], env: Record<string, string> = {}, d: Dependen
 const terminal = (answer: string | undefined) => vi.fn(async (_: string) => answer);
 
 afterEach(async () => {
+  vi.mocked(link).mockReset();
   for (const dir of ['.config', '.local', 'custom'])
     await rm(join(homedir(), dir), { recursive: true, force: true });
 });
@@ -219,7 +236,7 @@ describe('an existing path is never changed', () => {
     expect((await cli(['init', '--json'])).json.result.config.state).toBe('kept');
     expect((await cli(['init'], {}, { ask })).text).toBe(
       [
-        `Config kept: ${homeConfig()} (existing file, not changed)`,
+        `Config kept: ${homeConfig()} (already exists, not changed)`,
         `Backup secret checked: ${defaultBackupSecretPath()}`,
         'Next: annon login --wallet near',
       ].join('\n'),
@@ -229,38 +246,65 @@ describe('an existing path is never changed', () => {
     expect((await stat(homeConfig())).mode & 0o777).toBe(0o644);
   });
 
-  it.each([
-    [
-      'a dangling symlink',
-      'invalid_config',
-      async (path: string) => symlink(join(dirname(path), 'target.json'), path),
-    ],
-    [
-      'a symlink to a file',
-      'invalid_config',
-      async (path: string) => {
-        await writeFile(join(dirname(path), 'target.json'), '{}');
-        await symlink(join(dirname(path), 'target.json'), path);
-      },
-    ],
-    // The agent-policy read already stops at a directory, as before.
-    ['a directory', 'backup_secret_required', async (path: string) => mkdir(path)],
-  ])(
-    'refuses %s at the path, exit 2, without following it or creating the secret',
-    async (_, code, setup) => {
-      await mkdir(dirname(homeConfig()), { recursive: true, mode: 0o700 });
-      await setup(homeConfig());
-      const before = await readdir(dirname(homeConfig()));
-      const target = join(dirname(homeConfig()), 'target.json');
-      const targetText = await readFile(target, 'utf8').catch(() => undefined);
-      const out = await cli(['init', '--deployment', 'defdone', '--json']);
-      expect(out.code).toBe(2);
-      expect(out.json.error.code).toBe(code);
-      expect(await readdir(dirname(homeConfig()))).toEqual(before);
-      expect(await readFile(target, 'utf8').catch(() => undefined)).toBe(targetText);
-      await absent(defaultBackupSecretPath());
-    },
-  );
+  it('keeps a symlink to a valid config: link and target unchanged, no question', async () => {
+    const dir = dirname(homeConfig());
+    const target = join(dir, 'dotfiles-config.json');
+    const text = '{"contractId":"mine.near","nearRpc":"https://near.test"}';
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFile(target, text);
+    await symlink(target, homeConfig());
+    const ask = terminal('y');
+    for (const out of [
+      await cli(['init', '--deployment', 'defdone', '--json']),
+      await cli(['init', '--json'], {}, { ask }),
+    ])
+      expect(out.json.result.config).toEqual({ path: homeConfig(), state: 'kept' });
+    expect((await cli(['init'], {}, { ask })).text.split('\n')[0]).toBe(
+      `Config kept: ${homeConfig()} (already exists, not changed)`,
+    );
+    expect(ask).not.toHaveBeenCalled();
+    expect(await readFile(target, 'utf8')).toBe(text);
+    expect((await lstat(homeConfig())).isSymbolicLink()).toBe(true);
+    expect(await readlink(homeConfig())).toBe(target);
+  });
+
+  it('keeps a dangling symlink and creates nothing at its target', async () => {
+    const dir = dirname(homeConfig());
+    const target = join(dir, 'missing', 'config.json');
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await symlink(target, homeConfig());
+    const out = await cli(
+      ['init', '--deployment', 'defdone', '--json'],
+      {},
+      { ask: terminal('y') },
+    );
+    expect(out.code).toBe(0);
+    expect(out.json.result.config).toEqual({ path: homeConfig(), state: 'kept' });
+    expect(await readlink(homeConfig())).toBe(target);
+    await absent(dirname(target));
+  });
+
+  it('a directory at the path stops at the existing agent-policy read, as before', async () => {
+    await mkdir(homeConfig(), { recursive: true });
+    const out = await cli(['init', '--deployment', 'defdone', '--json']);
+    expect(out.code).toBe(2);
+    expect(out.json.error.code).toBe('backup_secret_required');
+    expect(await readdir(homeConfig())).toEqual([]);
+    await absent(defaultBackupSecretPath());
+  });
+
+  it('keeps what appears at the path between the check and the hard link', async () => {
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    vi.mocked(link).mockImplementationOnce(async (from, to) => {
+      await actual.writeFile(to, '{"raced":true}');
+      return actual.link(from, to);
+    });
+    const out = await cli(['init', '--deployment', 'defdone', '--json']);
+    expect(out.code).toBe(0);
+    expect(out.json.result.config).toEqual({ path: homeConfig(), state: 'kept' });
+    expect(await readFile(homeConfig(), 'utf8')).toBe('{"raced":true}');
+    expect((await readdir(dirname(homeConfig()))).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+  });
 });
 
 describe('agent mode is unchanged', () => {

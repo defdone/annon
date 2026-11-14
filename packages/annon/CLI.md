@@ -99,9 +99,10 @@ payloads and decrypted file contents are never returned in CLI/MCP results. Plai
 
 ### Init and the configuration
 
-Bare `annon init` sets up the configuration first, then the backup secret below. It never changes
-an existing file at the configuration path (`--config`, then `ANNON_CONFIG`, then
-`~/.config/annon/config.json`) and reports it as kept. With nothing there:
+Bare `annon init` sets up the configuration first, then the backup secret below. It writes the
+configuration only when nothing exists at the configuration path (`--config`, then `ANNON_CONFIG`,
+then `~/.config/annon/config.json`); it never changes, replaces or writes through anything already
+there, such as a file or a symlink, and reports it as kept without asking. With nothing there:
 
 - `--deployment defdone` writes the preset for the deployment run by defdone without asking: the
   configuration in [docs/quickstart.md](../../docs/quickstart.md#2-configure), with `stateDir` set
@@ -114,8 +115,10 @@ an existing file at the configuration path (`--config`, then `ANNON_CONFIG`, the
 
 The file is written with mode 0600 to an exclusive temporary file, synced, and published with a
 hard link, so it never appears half-written and never replaces anything. A missing directory is
-created with mode 0700. A symlink, directory or other non-regular file at the path is refused, not
-followed, with `invalid_config` (exit 2), before the backup secret step.
+created with mode 0700. If something appears at the path while init writes, it is kept. The agent
+policy check that runs before init reads an existing config as before, through a symlink too; a
+path it cannot read as JSON, such as a directory, stops init with `backup_secret_required` (exit 2)
+before anything is written.
 
 The result adds `config` beside `backupSecret`: `{"path": ..., "state": "created", "deployment": "defdone"}`,
 `{"path": ..., "state": "kept"}`, or `{"path": ..., "state": "none", "howTo": ...}`. In a terminal

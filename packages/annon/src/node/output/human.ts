@@ -31,7 +31,7 @@ function initText(r: Result): string {
     config.state === 'created'
       ? `Config created (defdone deployment): ${path}`
       : config.state === 'kept'
-        ? `Config kept: ${path} (existing file, not changed)`
+        ? `Config kept: ${path} (already exists, not changed)`
         : `No config written. ${config.howTo}`,
     `Backup secret ${secret.created ? 'created' : 'checked'}: ${cleanText(secret.path ?? 'ANNON_BACKUP_SECRET')}`,
     'Next: annon login --wallet near',

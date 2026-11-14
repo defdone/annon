@@ -28,9 +28,9 @@ annon init --deployment defdone
 
 It does two things and prints where each file is:
 
-- If you have no configuration yet, it writes `~/.config/annon/config.json` (or the file named by
-  `--config` or `ANNON_CONFIG`) with the deployment run by defdone. An existing file is never
-  changed; init says it kept it.
+- If nothing exists yet at `~/.config/annon/config.json` (or the file named by `--config` or
+  `ANNON_CONFIG`), it writes the configuration for the deployment run by defdone there. It never
+  changes, replaces or writes through anything already at that path; init says it kept it.
 - It creates the backup secret that encrypts your local purchase records (below).
 
 Plain `annon init` in a terminal asks the same question: "Use the Annon deployment run by defdone

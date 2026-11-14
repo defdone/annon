@@ -45,25 +45,21 @@ const howTo = `Add one with annon init --deployment defdone, or write your own: 
 
 const printable = (path: string) => (/\p{Cc}/u.test(path) ? JSON.stringify(path) : path);
 const configError = (message: string) => new AdapterError('invalid_config', message, 2);
-const notRegular = (path: string) =>
-  configError(
-    `The config path ${printable(path)} is a symlink or not a regular file. Annon does not follow or replace it; remove it or select another file with --config.`,
-  );
 
-/** True for a regular file at the path, false for nothing; anything else is refused. */
+/** True when anything (file, symlink, directory, other) exists at the path itself. */
 async function existing(path: string): Promise<boolean> {
   try {
-    if ((await lstat(path)).isFile()) return true;
+    await lstat(path);
+    return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw error;
   }
-  throw notRegular(path);
 }
 
 /**
  * Writes an exclusive owner-only temporary file and publishes it with link(), which never
- * replaces or follows anything at the path. Returns false when a file appeared there meanwhile.
+ * replaces or writes through anything at the path. False when something appeared there meanwhile.
  */
 async function createConfig(path: string): Promise<boolean> {
   const dir = dirname(path);
@@ -89,12 +85,12 @@ async function createConfig(path: string): Promise<boolean> {
     await unlink(temp).catch(() => {});
   }
   if (published) await syncDir(dir);
-  else if (!(await existing(path))) throw notRegular(path);
   return published;
 }
 
 /**
- * Never changes an existing config. With none, writes the preset for `--deployment defdone` or a
+ * Writes only when nothing exists at the path; never changes, replaces or writes through what is
+ * there. With nothing there, writes the preset for `--deployment defdone` or a
  * yes in a terminal; otherwise writes nothing and says how to add one.
  */
 export async function initConfig(o: Partial<Input>, env: Environment, ask?: Dependencies['ask']) {
