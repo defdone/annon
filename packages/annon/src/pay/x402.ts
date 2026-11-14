@@ -62,7 +62,7 @@ export interface Offer {
 }
 
 /** `extensions.annon` as a server advertises it. */
-export interface AnnonExtension {
+interface AnnonExtension {
   info: {
     version?: unknown;
     network?: unknown;

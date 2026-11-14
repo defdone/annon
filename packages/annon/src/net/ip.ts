@@ -43,7 +43,6 @@ export function clientKey(
 ): string {
   return canonical(header) ?? canonical(socket) ?? 'unknown';
 }
-export const ipBucket = clientKey;
 
 /** Bounded fixed windows; overflow shares a bucket instead of bypassing admission. */
 export function fixedWindowLimiter(

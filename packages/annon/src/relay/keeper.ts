@@ -23,10 +23,7 @@ export interface MaterializeRefundArgs {
   index: number;
   proof: string[];
 }
-export interface RefundRoot {
-  root: string;
-  count: number;
-}
+
 const integer = (v: number, max = Number.MAX_SAFE_INTEGER) => {
   if (!Number.isSafeInteger(v) || v < 0 || v > max) throw new TypeError('invalid contract integer');
 };
@@ -60,27 +57,7 @@ export async function getDelivery(
   const d = await view(url, contract, 'get_delivery', { delivery_id: deliveryId });
   return d === null ? null : delivery(d);
 }
-export async function listDeliveries(
-  url: string,
-  contract: string,
-  from = 0,
-  limit = 50,
-  onError?: (error: unknown) => void,
-): Promise<DeliveryInfo[]> {
-  integer(from);
-  integer(limit, 50);
-  const ds = await view(url, contract, 'list_deliveries', { from, limit });
-  if (!Array.isArray(ds) || ds.length > limit) throw new TypeError('invalid deliveries');
-  return ds.flatMap((d) => {
-    try {
-      return [delivery(d)];
-    } catch (error) {
-      if (!onError) throw error;
-      onError(error);
-      return [];
-    }
-  });
-}
+
 /** Unordered positions, capped at 50. Pin every page and count to ONE finalized block ID;
  * removal swaps the last entry into the hole. Moving-block forward scans can skip entries.
  * New deliveries after the snapshot are discovered on the next sweep. */
@@ -107,54 +84,7 @@ export async function openDeliveryCount(
   integer(n as number);
   return n as number;
 }
-export async function refundRoot(url: string, contract: string): Promise<RefundRoot> {
-  const r = (await view(url, contract, 'refund_root', {})) as RefundRoot;
-  bytes(r.root, 32);
-  integer(r.count, 2 ** 32);
-  return r;
-}
-export function fundDelivery(
-  wallet: Pick<NearWallet, 'call'>,
-  contract: string,
-  deliveryId: number,
-): Promise<unknown> {
-  integer(deliveryId);
-  return wallet.call({
-    receiverId: account(contract),
-    method: 'fund_delivery',
-    args: { delivery_id: deliveryId },
-    gas: 150000000000000n,
-  });
-}
-/** Permissionless deposit, bookkeeping and isolated payout dispatch; no deposit attached. */
-export function settle(
-  wallet: Pick<NearWallet, 'call'>,
-  contract: string,
-  deliveryId: number,
-): Promise<unknown> {
-  integer(deliveryId);
-  return wallet.call({
-    receiverId: account(contract),
-    method: 'settle',
-    args: { delivery_id: deliveryId },
-    gas: 600000000000000n,
-  });
-}
-export function paySlot(
-  wallet: Pick<NearWallet, 'call'>,
-  contract: string,
-  deliveryId: number,
-  slot: number,
-): Promise<unknown> {
-  integer(deliveryId);
-  integer(slot, 0xffffffff);
-  return wallet.call({
-    receiverId: account(contract),
-    method: 'pay_slot',
-    args: { delivery_id: deliveryId, slot },
-    gas: 80000000000000n,
-  });
-}
+
 /** Attach storage funding, or pass zero to spend the caller's prepaid contract balance. */
 export function materializeRefund(
   wallet: Pick<NearWallet, 'call'>,

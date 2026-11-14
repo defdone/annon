@@ -1,7 +1,7 @@
 /** Append-only, zero-padded, depth-32 refund tree, spec §8. */
 import { sha256 } from '@noble/hashes/sha2.js';
-import { account, bytes, concat, hash, hex, le, network, str } from './codec.js';
-import { encodeIdentity, type Identity } from './identity.js';
+import { account, bytes, concat, hash, hex, le, network, str } from '../src/settle-near/codec.js';
+import { encodeIdentity, type Identity } from '../src/settle-near/identity.js';
 
 export interface RefundLeaf {
   network: string;
@@ -21,7 +21,7 @@ export function encodeRefundLeaf(f: RefundLeaf): Uint8Array<ArrayBuffer> {
 }
 export const refundLeaf = (f: RefundLeaf): string =>
   hash('annon/refund-leaf/v1', encodeRefundLeaf(f));
-export const refundNode = (left: string, right: string): string =>
+const refundNode = (left: string, right: string): string =>
   hex(sha256(concat(le(1, 1), bytes(left, 32), bytes(right, 32))));
 const zeros = [hex(new Uint8Array(32))];
 for (let h = 0; h < 32; h++) zeros.push(refundNode(zeros[h] as string, zeros[h] as string));

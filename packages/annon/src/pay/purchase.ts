@@ -11,7 +11,7 @@ import type { Versioned } from './store.js';
 import type { PaymentRequired } from './x402.js';
 
 /** What the purchase pays for; fixed when it is created. */
-export interface PurchaseTerms {
+interface PurchaseTerms {
   network: string;
   contractId: string;
   fileId: string;

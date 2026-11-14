@@ -153,7 +153,7 @@ function output(
   );
 }
 
-export interface StreamSealed {
+interface StreamSealed {
   manifest: UploadManifest;
   headerSize(contractId: string): number;
   /** Replays encrypted body chunks before registration without CKD or a final header. */
@@ -373,7 +373,7 @@ export async function sealStreamWithKey(
   };
 }
 
-export interface OpenStreamOptions extends Omit<OpenOptions, 'ckdSecret'> {
+interface OpenStreamOptions extends Omit<OpenOptions, 'ckdSecret'> {
   /** Called after registration/signature/stanza checks, BEFORE the complete body is checked. */
   ckdSecret: OpenOptions['ckdSecret'];
   /** Authenticated metadata. Like plaintext, discard it if the stream later errors. */

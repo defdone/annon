@@ -60,7 +60,7 @@ export const MAX_VALIDITY_SECONDS = 180;
 /** How far the Base RPC's clock may be from ours. */
 export const MAX_CLOCK_SKEW_SECONDS = 60;
 
-export interface PreflightOptions {
+interface PreflightOptions {
   nearRpc: string;
   baseRpc: string;
   /** The Annon contract the client trusts. */
@@ -88,7 +88,7 @@ export interface PreflightOptions {
 }
 
 /** A purchase that passed every check, ready to sign. */
-export interface Quote {
+interface Quote {
   nearRpc: string;
   baseRpc: string;
   contractId: string;
@@ -258,13 +258,13 @@ export async function preflight(o: PreflightOptions): Promise<Quote> {
   };
 }
 
-export interface Wallet {
+interface Wallet {
   address: string;
   /** EIP-712, as viem's `signTypedData`: returns the 65-byte signature as 0x hex. */
   signTypedData(t: TypedData): Promise<string>;
 }
 
-export interface AuthorizeOptions {
+interface AuthorizeOptions {
   /** The canonical purchase binding its terms, buyer key, refund and recovery identities. */
   purchase: Purchase;
   buyerSecret: Uint8Array;

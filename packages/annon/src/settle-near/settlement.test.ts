@@ -4,6 +4,7 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import { base58 } from '@scure/base';
 import { privateKeyToAccount } from 'viem/accounts';
 import { describe, expect, it } from 'vitest';
+import { RefundTree, refundLeaf, verifyRefundProof } from '../../test/refund-tree.js';
 import { bitCases } from '../../test/sampling.js';
 import {
   encodeIdentity,
@@ -23,7 +24,6 @@ import {
   purchaseId,
   reopenTextV2,
 } from './purchase.js';
-import { RefundTree, refundLeaf, verifyRefundProof } from './refund.js';
 import {
   encodeTerms,
   NEAR_USDC,

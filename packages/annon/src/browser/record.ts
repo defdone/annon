@@ -45,7 +45,7 @@ export interface BrowserReceipt {
 }
 
 /** Durable metadata only. Full workflow records live under their own keys. */
-export interface BrowserIndexEntry extends Versioned {
+interface BrowserIndexEntry extends Versioned {
   fileId: string;
   route: BuyRoute;
   state: BrowserPurchaseState;

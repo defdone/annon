@@ -58,4 +58,3 @@ export function hostSettings(e: Record<string, string | undefined>) {
     capacity: { ...parsed.capacity, canonicalFileId },
   };
 }
-export type HostSettings = ReturnType<typeof hostSettings>;

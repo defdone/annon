@@ -65,7 +65,7 @@ export interface FacilitatorState extends Versioned {
   days: Record<string, Day>;
   times: number[];
 }
-export interface FacilitatorOptions {
+interface FacilitatorOptions {
   split?: SplitSettings;
   splitFee?: ProtocolFee;
   splitMinPrice?: bigint;

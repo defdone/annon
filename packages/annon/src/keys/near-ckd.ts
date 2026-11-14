@@ -33,7 +33,7 @@ const fail = (code: CkdErrorCode, message?: string): never => {
   throw new CkdError(code, message);
 };
 
-export interface OneTimeKey {
+interface OneTimeKey {
   /** The scalar `a`, 32 bytes big-endian. Persist only in an encrypted purchase or recovery record. */
   secret: Uint8Array;
   /** `A = a·G1` as the contract takes it: `bls12381g1:<base58 of 48 bytes>`. */
@@ -62,7 +62,7 @@ export const appId = (account: string, path: string) =>
 export const fileAppId = (contractId: string, fileId: Uint8Array) =>
   appId(contractId, `file/${Array.from(fileId, (x) => x.toString(16).padStart(2, '0')).join('')}`);
 
-export interface OpenAnswerOptions {
+interface OpenAnswerOptions {
   /** The one-time secret whose public key went with the request. */
   secret: Uint8Array;
   /** `fileAppId(contractId, fileId)` for an Annon file. */

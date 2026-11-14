@@ -509,22 +509,6 @@ export async function keep(o: KeepOptions): Promise<KeepResult> {
   );
 }
 
-export {
-  type DeliveryInfo,
-  type DeliveryStep,
-  fundDelivery,
-  getDelivery,
-  listDeliveries,
-  listOpenDeliveries,
-  type MaterializeRefundArgs,
-  materializeRefund,
-  openDeliveryCount,
-  paySlot,
-  type RefundRoot,
-  refundRoot,
-  settle,
-} from './keeper.js';
-
 // Load-time declarations stay together in their original evaluation order.
 export {
   accounts,

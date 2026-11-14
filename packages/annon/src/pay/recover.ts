@@ -5,13 +5,14 @@ import { blockHeader, type EvmLog, PayError } from './base.js';
 import { status } from './pay.js';
 import { type PurchaseRecord, purchaseKey, resendable } from './purchase.js';
 import type { Store } from './store.js';
-export type NextStep =
+
+type NextStep =
   | { step: 'claim_key'; args: { purchase_id: string; grant: number } }
   | { step: 'unlock'; args: { purchase: string; logs: EvmLog[]; header: string | null } }
   | { step: 'resend'; header: string }
   | { step: 'wait' }
   | { step: 'buy' };
-export interface NextStepOptions {
+interface NextStepOptions {
   nearRpc: string;
   baseRpc: string;
   store: Store<PurchaseRecord>;

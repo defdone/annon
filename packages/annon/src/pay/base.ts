@@ -156,7 +156,7 @@ const selector = (signature: string) =>
 const call = (...parts: Uint8Array[]) =>
   toHex(Uint8Array.from(parts.flatMap((p) => Array.from(p))));
 
-export interface Head {
+interface Head {
   number: number;
   timestamp: number;
   /** 0x and lowercase, when the RPC gave it. */
@@ -341,7 +341,7 @@ export async function blockHeader(url: string, hash: string): Promise<string> {
 // ---------- after the payment ----------
 
 const topic = (signature: string) => toHex(keccak_256(new TextEncoder().encode(signature)));
-export const TOPICS = {
+const TOPICS = {
   authorizationUsed: topic('AuthorizationUsed(address,bytes32)'),
   authorizationCanceled: topic('AuthorizationCanceled(address,bytes32)'),
   transfer: topic('Transfer(address,address,uint256)'),

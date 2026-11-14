@@ -23,7 +23,7 @@ interface Ledger extends Versioned {
   nextAllowedAt: number;
   attempt?: Attempt;
 }
-export interface DownloadLimits {
+interface DownloadLimits {
   now?: () => number;
   immediateCount?: number;
   fourthWaitSeconds?: number;

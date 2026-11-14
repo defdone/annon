@@ -12,7 +12,7 @@ const sigs = bls.longSignatures;
 const utf8 = new TextEncoder();
 
 /** `UTF8("annon/v1.1 buyer proof") || 0x0a || UTF8(resource.url)`. */
-export const buyerProofMessage = (resourceUrl: string) =>
+const buyerProofMessage = (resourceUrl: string) =>
   Uint8Array.from([...utf8.encode('annon/v1.1 buyer proof'), 0x0a, ...utf8.encode(resourceUrl)]);
 
 const b64url = (b: Uint8Array) =>
@@ -63,7 +63,7 @@ export function sameResource(advertised: string, requested: string): boolean {
   return a !== null && a === canonical(requested);
 }
 
-export interface PurchaseProof {
+interface PurchaseProof {
   purchase_id: string;
   grant: number;
   signature: string;

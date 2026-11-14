@@ -33,7 +33,7 @@ export interface ScanCheckpoint {
   receipts: string[];
   totals: [string, string][];
 }
-export interface ScanProgress {
+interface ScanProgress {
   load(): Promise<ScanCheckpoint | null>;
   save(state: ScanCheckpoint): Promise<void>;
 }

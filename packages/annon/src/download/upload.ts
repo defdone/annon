@@ -80,7 +80,7 @@ export interface UploadBaseSplit {
   salt: string;
   txHash: string | null;
 }
-export interface UploadBaseSplitRequest {
+interface UploadBaseSplitRequest {
   kind: 'push';
   salt: string;
 }

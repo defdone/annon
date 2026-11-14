@@ -1,5 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import {
+  encodeRefundLeaf,
+  type RefundLeaf,
+  RefundTree,
+  refundLeaf,
+  verifyRefundProof,
+} from '../../test/refund-tree.js';
 import { bitCases } from '../../test/sampling.js';
 import { inspectHeader, open, type PreviewPackage, sealWithKey } from '../envelope/pay2.js';
 import { openStream, sealStreamWithKey } from '../envelope/stream.js';
@@ -23,13 +30,6 @@ import {
   type ReopenV2,
   reopenTextV2,
 } from './purchase.js';
-import {
-  encodeRefundLeaf,
-  type RefundLeaf,
-  RefundTree,
-  refundLeaf,
-  verifyRefundProof,
-} from './refund.js';
 import { encodeTerms, publishTextV2, registerTextV2, type Terms, termsHash } from './terms.js';
 
 const v = JSON.parse(

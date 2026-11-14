@@ -5,7 +5,7 @@ import { fileStore } from '../../packages/annon/src/pay/store-node.ts';
 
 import { StartupError } from './startup-errors.ts';
 
-export interface CapacityLimits {
+interface CapacityLimits {
   maxFileBytes?: number;
   maxPay2Bytes?: number;
   now?: () => number;
@@ -26,7 +26,7 @@ export interface CapacityLimits {
   canonicalFileId?: string;
   canonicalSlug?: string;
 }
-export interface Admission {
+interface Admission {
   id: string;
   fileId: string;
   slug: string;

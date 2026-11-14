@@ -54,7 +54,7 @@ export { clientKey, limiter } from '../../packages/annon/src/net/ip.ts';
 export type { Chain } from './facilitator.ts';
 export { facilitatorFor } from './facilitator.ts';
 
-export interface DemoFile {
+interface DemoFile {
   /** URL path segment: lowercase letters, digits and dashes. */
   name: string;
   fileId: string;

@@ -1,6 +1,6 @@
 import type { StartupReason } from './startup-errors.ts';
 
-export type HostAlertType =
+type HostAlertType =
   | 'host_file_invalid'
   | 'host_startup_failed'
   | 'facilitator_dropped'
@@ -17,7 +17,7 @@ export type HostAlertType =
   | 'restart'
   | 'store_busy'
   | 'host_capacity';
-export interface HostAlert {
+interface HostAlert {
   type: HostAlertType;
   reason?: StartupReason;
   balance?: string;
