@@ -1,5 +1,14 @@
 # @defdone/annon-mcp
 
+## 0.1.0-alpha.3
+
+### Patch Changes
+
+- Updated dependencies [edb0ec2]
+- Updated dependencies [5d871b7]
+- Updated dependencies [f607080]
+  - @defdone/annon@0.1.0-alpha.3
+
 ## 0.1.0-alpha.2
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "@defdone/annon",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "Files only the buyer can open: encrypted on the client, the key released by NEAR once the payment is verified.",
   "license": "Apache-2.0",
   "homepage": "https://annon.dev",
