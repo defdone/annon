@@ -1,5 +1,12 @@
 # @defdone/annon-relayer
 
+## 0.1.0-alpha.5
+
+### Patch Changes
+
+- Updated dependencies [13256ce]
+  - @defdone/annon@0.1.0-alpha.5
+
 ## 0.1.0-alpha.4
 
 ### Patch Changes
