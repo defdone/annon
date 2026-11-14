@@ -76,8 +76,8 @@ signer with its own spending policy, when that matters.
 }
 ```
 
-The alpha packages are pending publication. Once published, install them with the npm `alpha` tag.
-Until then, build from source and point `command` at `node` with `packages/annon-mcp/dist/main.js`.
+The packages are on the npm `alpha` tag. To run a build from source instead, point `command` at
+`node` with `packages/annon-mcp/dist/main.js`.
 
 ## 3. The tool sequence
 

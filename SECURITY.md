@@ -23,7 +23,7 @@ In scope:
 | | |
 |---|---|
 | Contract | `v1.annon.defdone.near` on NEAR mainnet, upgradeable by defdone |
-| Packages | Planned release series: `0.1.0-alpha.N` on the npm `alpha` tag; publication is pending |
+| Packages | `@defdone/annon` and `@defdone/annon-mcp`, release series `0.1.0-alpha.N` on the npm `alpha` tag |
 | Audits | Internal reviews and mutation testing only. No independent audit yet. |
 
 During the alpha defdone keeps a full-access key to the contract account so that a bug can be fixed

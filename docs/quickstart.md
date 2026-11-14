@@ -12,9 +12,9 @@ You need Node.js 22.18 or newer.
 npm install -g @defdone/annon@alpha
 ```
 
-The alpha packages are pending publication. Once published, install them with the npm `alpha` tag.
-Until then, build from source (see [Build and test](../README.md#build-and-test)) and run
-`node packages/annon/dist/node/main.js` in place of `annon`.
+The packages are on the npm `alpha` tag. To use a build from source instead (see
+[Build and test](../README.md#build-and-test)), run `node packages/annon/dist/node/main.js` in place
+of `annon`.
 
 ## 2. Configure
 

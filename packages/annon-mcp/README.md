@@ -8,7 +8,7 @@ working directory, and no tool call can change them. Stdout carries only the MCP
 
 ## Install
 
-The alpha package is pending publication. Use these commands once it is published.
+The package is on the npm `alpha` tag.
 
 ```sh
 npm i -g @defdone/annon-mcp@alpha

@@ -33,8 +33,7 @@ sponsorship limits ([shops and limits](https://github.com/defdone/annon/blob/mas
 
 ## Install
 
-Node.js 22 or newer. The alpha package is pending publication. Use these commands once it is
-published.
+Node.js 22 or newer. The package is on the npm `alpha` tag.
 
 ```sh
 npm i @defdone/annon@alpha        # the SDK

@@ -167,9 +167,7 @@ expire seven days after publication; keep your own copy. All limits:
 ### Buy a file
 
 You need Node.js 22.18 or newer, and either a NEAR wallet with a little USDC and NEAR, or an EVM
-wallet with USDC on Base. Install the CLI. The alpha packages are pending publication. Once
-published, install them with the npm `alpha` tag. Until then, build from source as in
-[Build and test](#build-and-test) and use the built CLI.
+wallet with USDC on Base. Install the CLI from the npm `alpha` tag:
 
 ```sh
 npm install -g @defdone/annon@alpha
