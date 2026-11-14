@@ -38,6 +38,27 @@ export function checkReconcilable(record: BrowserPurchaseRecord): PurchaseRecord
   return record.purchase;
 }
 
+const depositOf = (record: PurchaseRecord | undefined) =>
+  (record?.quote as OneClickQuote | null | undefined)?.deposit;
+
+/**
+ * A 1Click check must read the deposit this purchase was saved with. The restored purchase may be a
+ * newer revision of the same commitment, but its deposit address and memo, and those of any saved
+ * polling checkpoint, must be the saved ones. Anything else is refused before any read or write.
+ */
+export function checkSameDeposit(saved: BrowserPurchaseRecord, restored: PurchaseRecord): void {
+  if (saved.route !== '1click') return;
+  const expected = depositOf(saved.purchase);
+  const actual = depositOf(restored);
+  const point = saved.checkpoint;
+  if (
+    expected?.address !== actual?.address ||
+    expected?.memo !== actual?.memo ||
+    (point && (point.address !== expected?.address || point.memo !== expected?.memo))
+  )
+    throw new Error('saved purchase changed deposit; check it with support');
+}
+
 const settled: Partial<Record<SwapStatus['status'], BrowserPurchaseState>> = {
   SUCCESS: 'accepting',
   REFUNDED: 'refunded',
@@ -66,13 +87,14 @@ export async function reconcileFailed(
   let saved = session.record;
   const restored = await deps.restorePurchase(checkReconcilable(saved));
   if (restored.id !== saved.purchase?.id) throw new Error('saved purchase changed identity');
+  checkSameDeposit(saved, restored);
   if (JSON.stringify(restored) !== JSON.stringify(saved.purchase))
     saved = await session.change({ purchase: restored });
   if (await deps.accept(restored)) {
     saved = await session.change({ state: 'accepted' });
     return { state: saved.state };
   }
-  const deposit = (restored.quote as OneClickQuote | null)?.deposit;
+  const deposit = depositOf(restored);
   if (saved.route !== '1click' || !deposit) return { state: saved.state };
   const status = await (options.oneClick ?? new OneClick()).status(deposit.address, {
     ...(deposit.memo === undefined ? {} : { memo: deposit.memo }),
