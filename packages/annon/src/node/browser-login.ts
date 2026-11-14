@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { WalletFailure } from '../browser/login-status.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
@@ -104,6 +104,11 @@ export async function startBrowserSession(o: {
     p.sending === true ||
     (p.action as { operation?: unknown }).operation === 'near.signTransaction';
   let pending: Pending | undefined;
+  const followers = new Set<ServerResponse>();
+  const advance = (action: unknown = null) => {
+    for (const response of followers) response.end(JSON.stringify({ action }));
+    followers.clear();
+  };
   const server = createServer((req, res) => {
     void (async () => {
       const headers = {
@@ -194,9 +199,14 @@ export async function startBrowserSession(o: {
             armIdle();
           }
           notify(APPROVED_LINE);
-          p.resolve(b.result);
           complete(200);
-          send(200, '{}');
+          if (b.follow === true) {
+            res.writeHead(200, { ...headers, 'content-type': 'application/json' });
+            res.flushHeaders();
+            followers.add(res);
+            res.on('close', () => followers.delete(res));
+          } else send(200, '{}');
+          p.resolve(b.result);
         } catch (error) {
           clearTimeout(p.timer);
           if (pending === p) {
@@ -247,7 +257,8 @@ export async function startBrowserSession(o: {
       pending.reject(new Error('session closed'));
       pending = undefined;
     }
-    server.closeAllConnections();
+    advance();
+    server.closeIdleConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   };
   let timeout: ReturnType<typeof setTimeout>;
@@ -305,6 +316,7 @@ export async function startBrowserSession(o: {
           }, action.expiresAt - Date.now()),
         };
         pending = entry;
+        advance(entry.action);
         notify(waitingLine(action.expiresAt - Date.now()));
       }),
   };

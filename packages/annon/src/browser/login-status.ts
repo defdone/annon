@@ -72,7 +72,7 @@ export const STATUS = {
   verifying: { tone: 'wait', text: 'Signed. The CLI is checking the result.' },
   signed: {
     tone: 'ok',
-    text: 'Signed. Return to the terminal. Keep this tab open if the command asks for another approval.',
+    text: 'Signed. Return to the terminal.',
   },
   redirected: {
     tone: 'ok',

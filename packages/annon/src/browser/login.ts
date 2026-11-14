@@ -4,6 +4,7 @@ import { pageElements, renderSummary, showStatus } from './login-dom.js';
 import { walletPicker } from './login-dropdown.js';
 import { expiryText } from './login-format.js';
 import { connected, SendUncertain, STATUS, type Status, walletFailure } from './login-status.js';
+import { approvalSteps } from './login-steps.js';
 import { describeRequest, technicalDetails } from './login-view.js';
 import { pageWallets } from './login-wallet.js';
 
@@ -15,7 +16,10 @@ const fragment = new URLSearchParams(location.hash.slice(1));
 const redirected = location.pathname === '/callback';
 let capability = redirected ? '' : location.hash.slice(1);
 history.replaceState(null, '', location.pathname);
-const api = async (path: string, body?: unknown) => {
+let paused = false;
+let pollTimer: ReturnType<typeof setTimeout> | undefined;
+const steps = approvalSteps(document, el);
+const api = async (path: string, body?: unknown, accepted?: () => void) => {
   const r = await fetch(path, {
     method: 'POST',
     headers: { authorization: `Bearer ${capability}`, 'content-type': 'application/json' },
@@ -25,11 +29,13 @@ const api = async (path: string, body?: unknown) => {
     body: JSON.stringify(body ?? {}),
   });
   if (!r.ok) throw new Error('Session expired or wallet result rejected. Return to the terminal.');
+  accepted?.();
   return r.json();
 };
 /** Requests whose result went to the CLI, or that ended here: never signed again. */
 const done = new Set<string>();
 const callbacks = new Map<string, string>();
+const submitting = new Set<string>();
 const wallets = pageWallets({
   expect: (state, id) => callbacks.set(state, id),
   forget: (state) => callbacks.delete(state),
@@ -62,12 +68,33 @@ function controls() {
     q && wallets.needsConnect(q, walletId()) ? 'Connect wallet' : 'Review in wallet';
 }
 async function submit(id: string, result: unknown) {
+  if (submitting.has(id)) return;
+  submitting.add(id);
+  paused = true;
+  clearTimeout(pollTimer);
   done.add(id);
   status(STATUS.verifying);
   controls();
   try {
-    await api('/api/result', { id, result });
-    status(STATUS.signed);
+    let accepted = false;
+    try {
+      const next = await api('/api/result', { id, result, follow: true }, () => {
+        accepted = true;
+        steps.finish();
+        el.summary.hidden = true;
+        const technical = document.getElementById('current-technical');
+        if (technical) technical.hidden = true;
+        status(STATUS.signed);
+        const state = document.getElementById('step-state');
+        if (state) state.textContent = 'Done';
+      });
+      if (next.action && next.action.id !== id) {
+        show(next.action);
+      }
+    } catch (error) {
+      if (!accepted) throw error;
+      status(STATUS.signed);
+    }
   } catch {
     status(STATUS.rejected);
   }
@@ -102,6 +129,10 @@ if (redirected) {
 function show(q: SigningRequest | undefined, sendStarted = false) {
   if (q && q.id !== current?.id) {
     current = q;
+    const technical = document.getElementById('current-technical');
+    if (technical) technical.hidden = false;
+    const state = document.getElementById('step-state');
+    if (state) state.textContent = 'In progress';
     expiry = renderSummary(document, el, describeRequest(q), technicalDetails(q));
     el['wallet-field'].hidden = !q.operation.startsWith('near.');
     picker.setDisabled('hot-wallet', q.chain !== 'near:mainnet');
@@ -128,18 +159,21 @@ function show(q: SigningRequest | undefined, sendStarted = false) {
 }
 
 async function poll() {
+  if (paused) return;
   if (!capability) {
     status(STATUS.noCapability);
     return;
   }
   try {
     const r = await api('/api/action');
+    if (paused) return;
     el.pair.textContent = String(r.pairingCode);
     show(r.action ?? undefined, r.sendStarted === true);
-    setTimeout(() => {
+    pollTimer = setTimeout(() => {
       void poll();
     }, 1000);
   } catch (e) {
+    if (paused) return;
     status({ tone: 'error', text: (e as Error).message });
     capability = '';
     approve.disabled = true;

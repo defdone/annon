@@ -22,6 +22,8 @@ export interface FakeElement {
   setAttribute(name: string, value: string): void;
   removeAttribute(name: string): void;
   getAttribute(name: string): string | null;
+  cloneNode(deep?: boolean): FakeElement;
+  querySelectorAll(selector: string): FakeElement[];
   focus(): void;
   contains(other: unknown): boolean;
 }
@@ -48,6 +50,13 @@ export function fakeElement(tag = 'div', value = ''): FakeElement {
       e.attributes.delete(name);
     },
     getAttribute: (name) => e.attributes.get(name) ?? null,
+    cloneNode: () => {
+      const copy = fakeElement(tag);
+      copy.textContent = e.textContent;
+      copy.children = e.children.map((child) => child.cloneNode(true));
+      return copy;
+    },
+    querySelectorAll: () => [],
     focus: () => {},
     contains: (other) => other === e,
   };
