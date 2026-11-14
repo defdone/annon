@@ -142,8 +142,8 @@ open, verify, recover, status, budget, shops and catalog; agent policy also rest
 
 ## How to check it
 
-Use Node.js 26 to match CI. The root engine is `^22.18.0 || >=23.6.0`; both service packages also
-require `>=22.22.2`. The package manager is pinned to `pnpm@12.14.0`. Rust is pinned to 1.97.1 with
+Use Node.js 26 to match CI. The root engine is `^22.22.2 || >=23.6.0`; the published packages and
+both service packages require `>=22.22.2`. The package manager is pinned to `pnpm@12.14.0`. Rust is pinned to 1.97.1 with
 rustfmt, clippy and the `wasm32-unknown-unknown` target in `rust-toolchain.toml`. CI runs
 `rustup toolchain install` before the contract checks. Run the commands below from the repository
 root. They send no blockchain transactions. Installation and audit need network access. The

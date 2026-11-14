@@ -134,6 +134,7 @@ export function createSession(o: SessionOptions) {
     running = current;
     const done = runCli(words, execute, (text) => current.live && say(text), {
       human: true,
+      session: true,
       notify: (message) => current.live && say(message),
       signal: current.stop.signal,
       onWaiting: (waiting) => {
@@ -153,7 +154,7 @@ export function createSession(o: SessionOptions) {
     try {
       words = splitWords(text);
     } catch (error) {
-      say(humanError(publicError(error)));
+      say(humanError(publicError(error), true));
       return false;
     }
     if (words[0] === 'annon') words.shift();

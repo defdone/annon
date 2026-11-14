@@ -179,13 +179,20 @@ describe('reconcile order, refusals and routes', () => {
   it('checks NEAR before the single status read, both under the lease', async () => {
     const { h, c } = await failedPurchase();
     const calls: string[] = [];
+    // Both gates exist before reconcile starts, so a slow lease read cannot lose the release.
+    let entered = () => {};
+    const inside = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
     let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     h.sdk.accept = vi.fn(async () => {
       calls.push('accept');
       expect((await c.storage.load(ID))?.lease).toBeDefined();
-      await new Promise<void>((resolve) => {
-        release = resolve;
-      });
+      entered();
+      await gate;
       return false;
     });
     const status = vi.fn<OneClick['status']>(async (address) => {
@@ -195,7 +202,8 @@ describe('reconcile order, refusals and routes', () => {
       return { status: 'REFUNDED' };
     });
     const running = c.reconcile({ oneClick: { status } });
-    await vi.waitFor(() => expect(h.sdk.accept).toHaveBeenCalledTimes(1));
+    await Promise.race([inside, running]);
+    expect(h.sdk.accept).toHaveBeenCalledTimes(1);
     expect(status).not.toHaveBeenCalled();
     release();
     await running;

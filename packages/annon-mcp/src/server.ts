@@ -209,12 +209,20 @@ const outputSchema = z.object({
     })
     .optional(),
 });
+/** Returned in the initialize result, so a client knows the order of the tools before it lists them. */
+export const INSTRUCTIONS = [
+  'Start with annon_catalog to find a file, or annon_verify to check a file URL.',
+  'Buy it with annon_buy and keep the purchase ID it returns.',
+  'Call annon_status with that ID until the purchase is accepted; pending means wait, never buy again.',
+  'Then annon_open writes the file to a path inside the working directory.',
+  'Buying needs a wallet and limits the owner configures: https://github.com/defdone/annon/blob/master/docs/agents.md',
+].join('\n');
 export function createServer(
   execute: (input: Input) => Promise<Record<string, unknown>> = createAdapter(process.env, {
     agent: true,
   }),
 ) {
-  const server = new McpServer({ name: 'annon', version });
+  const server = new McpServer({ name: 'annon', version }, { instructions: INSTRUCTIONS });
   for (const command of [
     'share',
     'sell',

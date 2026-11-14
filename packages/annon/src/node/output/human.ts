@@ -42,7 +42,7 @@ function initText(r: Result): string {
   ].join('\n');
 }
 
-export function humanResult(input: Input, result: Result | undefined): string {
+export function humanResult(input: Input, result: Result | undefined, session = false): string {
   const r = result ?? {};
   switch (input.command) {
     case 'init':
@@ -54,7 +54,7 @@ export function humanResult(input: Input, result: Result | undefined): string {
     case 'shop':
       return shopAddedText(r as Parameters<typeof shopAddedText>[0]);
     case 'catalog':
-      return catalogText(input, r as Parameters<typeof catalogText>[1]);
+      return catalogText(input, r as Parameters<typeof catalogText>[1], session);
     case 'buy':
       return buyText(r);
     case 'status':
@@ -72,7 +72,11 @@ export function humanResult(input: Input, result: Result | undefined): string {
   }
 }
 
-export function humanError(error: PublicError): string {
+/** The person's way past a missing wallet; scripts and agents keep the configuration message. */
+const signIn = (session: boolean) =>
+  `Sign in with ${session ? '' : 'annon '}login --wallet near (or evm) to approve payments in your browser, or configure a key as in the docs.`;
+
+export function humanError(error: PublicError, session = false): string {
   const {
     code: _code,
     message: _message,
@@ -84,5 +88,6 @@ export function humanError(error: PublicError): string {
     `Error: ${failure(error)}`,
     ...(Object.keys(facts).length > 0 ? [fields(facts)] : []),
     ...(retryAfterSeconds === undefined ? [] : [`Try again in ${retryAfterSeconds} seconds.`]),
+    ...(error.code === 'credentials_required' ? [signIn(session)] : []),
   ].join('\n');
 }

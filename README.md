@@ -166,7 +166,7 @@ expire seven days after publication; keep your own copy. All limits:
 
 ### Buy a file
 
-You need Node.js 22.18 or newer, and either a NEAR wallet with a little USDC and NEAR, or an EVM
+You need Node.js 22.22.2 or newer, and either a NEAR wallet with a little USDC and NEAR, or an EVM
 wallet with USDC on Base. Install the CLI from the npm `alpha` tag:
 
 ```sh
@@ -186,7 +186,9 @@ annon status 0xPURCHASE_ID
 annon open 0xPURCHASE_ID --output what-we-are-building.pdf
 ```
 
-You see the price and the recipients before you approve. Then you get a purchase ID, a status of
+You see the price and the recipients before you approve. The demo file costs 0.10 USDC and splits
+69/31: the relayer's fee for a sponsored listing is 0.03 USDC plus 1% per sale, which is 31% of
+0.10 USDC but only 4% of a 1 USDC file ([fees](docs/shops-and-limits.md#fees)). Then you get a purchase ID, a status of
 `accepted`, and the decrypted file. Your purchase is saved, encrypted, before you pay. If `status`
 says `pending`, wait and check again; resume the same purchase with `annon status` and `annon open`
 instead of starting a new one. While it is live or accepted, a second `annon buy` of the same file
@@ -304,10 +306,12 @@ Specifications, with test vectors checked in CI, so anyone can build a compatibl
 
 ## Build and test
 
-You need Node.js 22.18 or newer, pnpm 12 (`corepack enable` picks the pinned version) and Rust from
-`rust-toolchain.toml`. From the repository root:
+You need Node.js 22.22.2 or newer (on Node 23, 23.6 or newer), pnpm 12 (`corepack enable` picks the
+pinned version) and Rust. `rust-toolchain.toml` pins the Rust version, so run `rustup toolchain
+install` in the repository first. From the repository root:
 
 ```sh
+rustup toolchain install
 pnpm install --frozen-lockfile
 pnpm build
 pnpm test
@@ -345,7 +349,7 @@ amounts, keep your backup secret, and tell us what breaks: hello@annon.dev or a 
 | Wallets | NEAR, EVM and Solana, for sellers and buyers |
 | File size | Up to 50,000,000 bytes of plaintext per file |
 | Split recipients | Up to 8 |
-| Tests | About 2,600 automated JavaScript tests in CI, plus the contract's Rust unit and sandbox tests |
+| Tests | About 3,100 automated JavaScript tests in CI (`pnpm test`), plus the contract's Rust unit and sandbox tests |
 | Fees | None for the protocol, SDK, CLI or MCP server on your own infrastructure ([details](docs/shops-and-limits.md#fees)) |
 
 | Deployment | Mainnet |

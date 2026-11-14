@@ -47,6 +47,9 @@ launcher-owned deployment overrides. A client configuration:
 }
 ```
 
+Instead of `ANNON_WALLET` and a key file in the server environment, the owner can save a key
+reference once with `annon init --agent` ([docs/agents.md](https://github.com/defdone/annon/blob/master/docs/agents.md#1-what-the-owner-sets-up)).
+
 The configuration file, written by a human:
 
 ```json
@@ -58,12 +61,37 @@ The configuration file, written by a human:
   "relayer": "https://relayer.mainnet.annon.dev",
   "stateDir": "/absolute/private/annon-state",
   "trustContract": true,
-  "maxPrice": "0.2",
+  "maxPrice": "0.20",
   "dailyBudget": "1",
   "workDir": "/absolute/annon-work",
-  "allowedResources": ["https://demo.annon.dev/f/*"]
+  "allowedResources": ["https://demo.annon.dev/f/*"],
+  "origins": {
+    "base-usdc": {
+      "fromChain": "base",
+      "fromAsset": "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near",
+      "usdcDecimals": 6
+    }
+  },
+  "shops": [
+    {
+      "id": "demo",
+      "manifest": "https://annon.dev/.well-known/annon-shop.json",
+      "profile": {
+        "network": "near:mainnet",
+        "contract": "v1.annon.defdone.near",
+        "nearRpc": "https://rpc.mainnet.fastnear.com",
+        "baseRpc": "https://your-base-rpc-with-api-key.example",
+        "relayer": "https://relayer.mainnet.annon.dev",
+        "host": "https://demo.annon.dev"
+      }
+    }
+  ],
+  "defaultShop": "demo"
 }
 ```
+
+The `shops` block is the demo shop from [quickstart.md](https://github.com/defdone/annon/blob/master/docs/quickstart.md#2-configure), with the same
+`baseRpc` in its `profile` as in the configuration. `dailyBudget` is needed for buying.
 
 | Field | Meaning |
 | --- | --- |
