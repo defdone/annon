@@ -312,21 +312,44 @@ in the wallet.
 | Wallet | How | Signing supported |
 | --- | --- | --- |
 | EVM | Injected EIP-1193 wallet on Base | `personal_sign` for the SDK's authorization texts, `eth_signTypedData_v4` for the exact EIP-3009/x402 payload |
-| NEAR | Meteor Wallet (extension or web popup; mainnet and testnet) or HOT Wallet (mainnet only) through Wallet Selector, picked on the page; account-only sign-in (no `contractId`, no method list) | NEP-413 and `signAndSendTransaction`, including the required deposit `"1"` on `ft_transfer_call` |
+| NEAR | Meteor Wallet (extension or web popup; mainnet and testnet) or HOT Wallet (mainnet only) through Wallet Selector, picked on the page. NEP-413 messages are signed directly, with the account chosen in the wallet and no sign-in. Transactions take two clicks: an account-only sign-in (no `contractId`, no method list), then the transaction | NEP-413 and `signAndSendTransaction`, including the required deposit `"1"` on `ft_transfer_call` |
 
 Browser and remote EVM split-deployment transactions and browser and remote Solana signing are not
 included; the local-key adapters remain available for those workflows.
 
 **The local page.** The listener binds `127.0.0.1` on an OS-assigned port before opening the browser.
 Match the short pairing code with the terminal, and review the action, amount, recipients, file and
-chain on the page before approving in the wallet.
+chain on the page before approving in the wallet. The page shows a summary built only from the
+request the wallet signs (amounts in USDC or NEAR, receiver, account, expiry), the CLI's payment or
+listing terms apart from it with a warning if their price differs, and the raw request under
+Technical details. While a request waits, the terminal prints its expiry on stderr.
+
+- Each click opens at most one wallet window, inside that click, so the browser's pop-up blocker
+  allows it. If the wallet window closes, is blocked or declines before anything is sent, the page
+  says so and you can try again, with the same or another wallet, until the request expires.
+  Nothing is retried for you.
+- Once the page has called the wallet's send for a transaction, that request is never attempted
+  again, whatever the wallet answers, because it may already have broadcast. The request ends as
+  `transaction_uncertain` and the terminal says: "The wallet may have sent the transaction. Do not
+  pay again. Run annon status <purchase id> to check it." The page records the send start with
+  the CLI before it calls the wallet, so a reloaded page or the request's expiry cannot turn it
+  into a retryable failure, and a result the CLI cannot verify after that point also ends as
+  uncertain. `annon buy` exits 4, `annon status` reports `submission: "uncertain"`, and the saved
+  purchase blocks a plain `annon buy` of the same file (`purchase_open`). `--force` overrides it
+  only after you have reconciled the first attempt (see CLI.md).
+- The page reports only a fixed reason name (`window_closed`, `popup_blocked`, `rejected`,
+  `wallet_error`, `refused`, `send_uncertain`, `send_started` or `cancelled`) to the CLI, which
+  prints its own line for it. Cancel ends the request at once; an expired request fails with the
+  last reported reason, for example `rejected` or `wallet_error`, instead of a generic error. A
+  report never completes a request.
 
 - Host (including port), Origin and an unpredictable RAM-only capability are checked on action and
   result API calls.
 - In open mode, a same-origin POST bootstraps the capability once into the opened page, then the
   bootstrap route closes. With `--no-open`, bootstrap is disabled and the capability exists only in
   the printed URL fragment. It is never passed to the browser launcher in argv.
-- Bundled scripts, a restrictive CSP, no framing, `no-store` and `no-referrer` are enforced. The page
+- Bundled scripts and a stylesheet from the page's own origin (no inline styles, fonts or other
+  resources), a restrictive CSP, no framing, `no-store` and `no-referrer` are enforced. The page
   connects only to itself, the Wallet Selector's NEAR RPC (`free.rpc.fastnear.com` on mainnet,
   `test.rpc.fastnear.com` on testnet, fixed in the page and independent of your configured RPC) and
   HOT's relay `h4n.app`, and frames only `hot-labs.org`.

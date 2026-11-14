@@ -253,9 +253,23 @@ blindly retried. Raw upstream errors are intentionally suppressed to avoid leaki
 | --- | --- |
 | 0 | Command completed; buy may still require a deposit or settlement |
 | 1 | Operation failed; inspect final status and retained encrypted state before retrying |
-| 2 | Invalid arguments, configuration, wallet source or missing local input |
-| 3 | First-use contract trust required or declined |
-| 4 | `status` reports pending; acceptance has not been observed (not proof of payment failure) |
+| 2 | Invalid arguments, configuration, wallet source or missing local input; `purchase_open` when a saved purchase of the file, including an uncertain NEAR send, still blocks a new one |
+| 3 | First-use contract trust required or declined; browser approval cancelled (`cancelled`), expired (`cancelled`, or `rejected` or `wallet_error` after the last wallet failure the page reported) or declined by the wallet |
+| 4 | Not settled, and not proof of failure: `status` reports pending; `buy` returned `state: "uncertain"` (its payment may be on chain; the JSON result is unchanged and names the saved purchase); or `transaction_uncertain`: a transaction may have been sent and is not confirmed |
+
+In browser approval, once the CLI has acknowledged the page's send start, the request can only end
+as a verified transaction or as `transaction_uncertain`: a wallet failure, a cancel, the expiry, or a
+result the CLI cannot verify (an RPC rejection, malformed evidence) never counts as "not sent". The
+purchase is saved with that uncertainty, with the transaction hash only when the wallet returned a
+valid one. `annon buy` then exits 4 with `state: "uncertain"`, and `annon status <purchase id>`
+answers `submission: "uncertain"` until the purchase is accepted. Do not pay again.
+
+A plain `annon buy` of the same file is refused with `purchase_open` while that uncertainty is
+saved, also after the purchase expired: a late transfer still moves tokens, and the contract then
+owes a refund that is paid out later rather than returned at once. Neither a pending status, an
+expired purchase nor an empty wallet history proves that nothing was sent. `--force` overrides the
+guard; use it only after you have reconciled the original attempt, for example by finding its
+final transaction or its refund, because otherwise you may pay twice.
 
 ## SDK seller resume and CKD configuration
 

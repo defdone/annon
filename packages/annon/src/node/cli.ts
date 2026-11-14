@@ -292,11 +292,12 @@ export async function runCli(
       if (Array.isArray(items)) for (const item of items) show(item);
     }
     write(JSON.stringify({ ok: true, result }, null, json ? undefined : 2));
-    return input.command === 'status' &&
-      result &&
+    // 4: not settled. A pending status, or a buy whose payment may be on chain (uncertain).
+    return result &&
       typeof result === 'object' &&
       'state' in result &&
-      result.state === 'pending'
+      ((input.command === 'status' && result.state === 'pending') ||
+        (input.command === 'buy' && result.state === 'uncertain'))
       ? 4
       : 0;
   } catch (error) {

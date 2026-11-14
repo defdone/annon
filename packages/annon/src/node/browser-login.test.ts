@@ -1,32 +1,12 @@
 import { execFile } from 'node:child_process';
-import { request } from 'node:http';
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
+import { send } from '../../test/login-http.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
 import { startBrowserSession } from './browser-login.js';
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn() }));
 
-const send = (url: string, path: string, headers: Record<string, string>, body?: unknown) =>
-  new Promise<{ status: number; headers: Record<string, unknown>; body: string }>(
-    (resolve, reject) => {
-      const r = request(
-        new URL(path, url),
-        { method: body === undefined ? 'GET' : 'POST', headers },
-        (res) => {
-          let text = '';
-          res.on('data', (c) => {
-            text += c;
-          });
-          res.on('end', () =>
-            resolve({ status: res.statusCode ?? 0, headers: res.headers, body: text }),
-          );
-        },
-      );
-      r.on('error', reject);
-      r.end(body === undefined ? undefined : JSON.stringify(body));
-    },
-  );
 describe('browser capability session', () => {
   it('binds before opening, checks exact Host/Origin/capability, serves strict headers, consumes once', async () => {
     const open = vi.fn();
@@ -201,12 +181,13 @@ it('serves exactly the intended CSP and offers only connectable NEAR wallets', a
     };
     expect(parse(page.headers['content-security-policy'])).toEqual(intended);
     expect(parse(script.headers['content-security-policy'])).toEqual(intended);
-    expect([...page.body.matchAll(/<option\b[^>]*value="([^"]+)"/g)].map((m) => m[1])).toEqual([
-      'meteor-wallet',
-      'hot-wallet',
-    ]);
-    expect(page.body).toContain('<option id="near-wallet-hot" value="hot-wallet">');
-    expect(page.body).not.toMatch(/my-near-wallet|MyNearWallet/i);
+    // A styled select-only combobox: the listbox offers exactly the connectable wallets.
+    expect(page.body).toContain('id="near-wallet" class="picker-button" role="combobox"');
+    expect(
+      [...page.body.matchAll(/<li id="([^"]+)" class="option" role="option"/g)].map((m) => m[1]),
+    ).toEqual(['near-wallet-meteor', 'near-wallet-hot']);
+    expect(page.body).toContain('HOT Wallet<span class="option-note">Mainnet only</span>');
+    expect(page.body).not.toMatch(/<select|<option|my-near-wallet|MyNearWallet/i);
   } finally {
     await s.close();
   }

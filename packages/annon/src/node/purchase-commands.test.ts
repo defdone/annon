@@ -517,3 +517,43 @@ it('open refuses a purchase backup made for another contract before any key or f
     await ws.remove();
   }
 });
+
+it.each([
+  [undefined, {}],
+  ['11111111111111111111111111111111', { txHash: '11111111111111111111111111111111' }],
+])(
+  'status explains a NEAR send that may be on chain (hash %s) without calling it failed',
+  async (txHash, shown) => {
+    const ws = await workspace('status-uncertain');
+    const r: PurchaseRecord = {
+      ...purchaseRecord(),
+      nearSubmission: { state: 'uncertain', ...(txHash ? { txHash } : {}) },
+    };
+    await saveRecord(ws.dir, r);
+    try {
+      const run = createAdapter(
+        { ANNON_CONFIG: ws.config, ANNON_BACKUP_SECRET: backupSecretHex },
+        { purchase: async () => null, sdk: scriptedSdk(async () => false) },
+      );
+      const result = await run({ command: 'status', target: r.id });
+      expect(result).toMatchObject({
+        purchaseId: r.id,
+        state: 'pending',
+        submission: 'uncertain',
+        ...shown,
+        next: 'The wallet may have sent this payment. Do not pay again. Retry status until it is accepted or the purchase expires.',
+      });
+      if (!txHash) expect(result).not.toHaveProperty('txHash');
+      // Once accepted, the old uncertainty is not shown.
+      const accepted = createAdapter(
+        { ANNON_CONFIG: ws.config, ANNON_BACKUP_SECRET: backupSecretHex },
+        { purchase: async () => null, sdk: scriptedSdk(async () => true) },
+      );
+      const done = await accepted({ command: 'status', target: r.id });
+      expect(done).toMatchObject({ state: 'accepted', next: 'open' });
+      expect(done).not.toHaveProperty('submission');
+    } finally {
+      await ws.remove();
+    }
+  },
+);

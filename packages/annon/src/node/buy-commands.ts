@@ -226,6 +226,9 @@ async function buy(
         const saved = await sdk.store.load(purchaseKey(id));
         if (await (d.purchase ?? getPurchase)(c.nearRpc, c.contractId, id)) return true;
         if (!saved) return Date.now() / 1000 < claimUntil;
+        // A NEAR send that may be on chain blocks another payment until reconciled or --force,
+        // even after the purchase expired: a late transfer still moves tokens.
+        if (saved.nearSubmission?.state === 'uncertain') return true;
         return (
           Number(saved.purchase.expires_at) > Date.now() / 1000 ||
           (saved.purchase.route === 'base-usdc' && saved.attempts.length > 0)
@@ -341,11 +344,14 @@ async function buy(
         : bought.instructions
           ? 'deposit_required'
           : 'submitted',
-      ...(bought.uncertain ? { txHash: bought.uncertain.txHash } : {}),
+      // A browser send that failed after the wallet's send call has no hash to report.
+      ...(bought.uncertain?.txHash ? { txHash: bought.uncertain.txHash } : {}),
       backup: backupPath(c, bought.record.id),
       ...(bought.instructions ? { instructions: bought.instructions } : {}),
       ...(source ? { source } : {}),
-      next: 'Fund the deposit if instructed, then check status and open this purchase.',
+      next: bought.uncertain
+        ? `The wallet may have sent this payment. Do not pay again. Run annon status ${bought.record.id} until it is accepted.`
+        : 'Fund the deposit if instructed, then check status and open this purchase.',
     };
   } catch (error) {
     // Only failures before the SDK returns can release a 1Click reservation.

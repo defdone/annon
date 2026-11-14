@@ -73,14 +73,20 @@ async function status(ctx: CommandSession): Promise<Record<string, unknown>> {
   }
   if (d.agent && !accepted)
     await retryGate({ ...c, purchaseId: o.target }).defer('settlement_pending', 30);
+  // A NEAR send that may be on chain: pending is not proof that it failed.
+  const uncertain = !accepted && record.nearSubmission?.state === 'uncertain';
   return {
     purchaseId: o.target,
     state: accepted ? 'accepted' : 'pending',
+    ...(uncertain ? { submission: 'uncertain' } : {}),
+    ...(uncertain && record.nearSubmission?.txHash ? { txHash: record.nearSubmission.txHash } : {}),
     ...(await paymentDetails(async () => record)),
     ...(accepted ? {} : { retryAfterSeconds: 30 }),
     next: accepted
       ? 'open'
-      : 'Check the payment and retry status. 1Click SUCCESS alone is not acceptance.',
+      : uncertain
+        ? 'The wallet may have sent this payment. Do not pay again. Retry status until it is accepted or the purchase expires.'
+        : 'Check the payment and retry status. 1Click SUCCESS alone is not acceptance.',
   };
 }
 

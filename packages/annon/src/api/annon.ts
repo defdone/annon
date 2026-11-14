@@ -1026,11 +1026,18 @@ export class Annon {
         const next: PurchaseRecord = {
           ...record,
           revision: record.revision + 1,
-          nearSubmission: { state: 'uncertain', txHash: error.txHash },
+          nearSubmission: {
+            state: 'uncertain',
+            ...(error.txHash ? { txHash: error.txHash } : {}),
+          },
         };
         if (!(await store.compareAndSet(purchaseKey(id), record, next)))
           throw new TransactionUncertain(error.txHash, id);
-        return { route, record: next, uncertain: { purchaseId: id, txHash: error.txHash } };
+        return {
+          route,
+          record: next,
+          uncertain: { purchaseId: id, ...(error.txHash ? { txHash: error.txHash } : {}) },
+        };
       }
       return { route, record };
     }

@@ -2981,3 +2981,140 @@ it.each([false, true])(
     expect(identity).not.toHaveBeenCalled();
   },
 );
+
+it('an uncertain NEAR send without a hash is saved as such, never with an invented hash', async () => {
+  const { TransactionUncertain } = await import('../wallet/uncertain.js');
+  const h = harness();
+  await h.sdk.sell({
+    data: body,
+    name: 'x',
+    mime: '',
+    seller: wallet,
+    near: {
+      price: '200000',
+      recipients: [{ identity: wallet.identity, bps: 10000 }],
+      remainder: wallet.identity,
+    },
+    publish: h.publish,
+  });
+  const payer = {
+    identity: { kind: 'near' as const, id: 'buyer.near' },
+    authorize: async () => undefined,
+    call: vi.fn(),
+    transferPurchase: vi.fn(async () => {
+      throw new TransactionUncertain(undefined);
+    }),
+  };
+  const bought = await h.sdk.buy({
+    fileId: h.terms.file_id,
+    header: h.header,
+    recovery: wallet,
+    refund: payer.identity,
+    payer,
+    maxPrice: 200000n,
+  });
+  expect(bought.uncertain).toEqual({ purchaseId: bought.record.id });
+  const restored = await importPurchase(must(h.backups.get(bought.record.id)), h.backupSecret);
+  expect(restored.nearSubmission).toEqual({ state: 'uncertain' });
+  expect(payer.transferPurchase).toHaveBeenCalledTimes(1);
+});
+
+it('a browser result that cannot be verified after an acknowledged send start stays saved as uncertain', async () => {
+  const { startBrowserSession } = await import('../node/browser-login.js');
+  const { signingRequest, verifySigningResult } = await import('../node/signing.js');
+  const { send } = await import('../../test/login-http.js');
+  const { toPublicError } = await import('../errors.js');
+  const { TransactionUncertain } = await import('../wallet/uncertain.js');
+  const h = harness();
+  await h.sdk.sell({
+    data: body,
+    name: 'x',
+    mime: '',
+    seller: wallet,
+    near: {
+      price: '200000',
+      recipients: [{ identity: wallet.identity, bps: 10000 }],
+      remainder: wallet.identity,
+    },
+    publish: h.publish,
+  });
+  const existing = new Set(h.backups.keys());
+  let sends = 0;
+  const payer = {
+    identity: { kind: 'near' as const, id: 'buyer.near' },
+    authorize: async () => undefined,
+    call: vi.fn(),
+    transferPurchase: async (message: string) => {
+      const q = signingRequest('near.signTransaction', 'near:testnet', 'buyer.near', {
+        receiverId: 'usdc.near',
+        method: 'ft_transfer_call',
+        args: { receiver_id: 'annon.near', amount: '200000', msg: message },
+        gas: '150000000000000',
+        deposit: '1',
+      });
+      const s = await startBrowserSession({ noOpen: true, asset: '', notify: () => {} });
+      const u = new URL(s.url);
+      const headers = {
+        host: u.host,
+        origin: u.origin,
+        authorization: `Bearer ${u.hash.slice(1)}`,
+      };
+      const originalFetch = globalThis.fetch;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url, init) => {
+          const rpc = JSON.parse(String(init?.body));
+          if (rpc.method !== 'tx') return originalFetch(url, init);
+          return Response.json({
+            jsonrpc: '2.0',
+            id: rpc.id,
+            error: { name: 'REQUEST_VALIDATION_ERROR' },
+          });
+        }),
+      );
+      try {
+        const pending = s
+          .request(q, (r) => verifySigningResult(q, r as { txHash: string }, 'https://fake.rpc'))
+          .catch((e) => e);
+        expect(
+          (await send(s.url, '/api/report', headers, { id: q.id, reason: 'send_started' })).status,
+        ).toBe(200);
+        sends++;
+        await send(s.url, '/api/result', headers, {
+          id: q.id,
+          result: { txHash: '11111111111111111111111111111111' },
+        });
+        throw await pending;
+      } finally {
+        vi.stubGlobal('fetch', originalFetch);
+        await s.close();
+      }
+    },
+  };
+  const outcome = await h.sdk
+    .buy({
+      fileId: h.terms.file_id,
+      header: h.header,
+      recovery: wallet,
+      refund: payer.identity,
+      payer,
+      maxPrice: 200000n,
+    })
+    .catch((e) => e);
+  const backups = [...h.backups].filter(([id]) => !existing.has(id));
+  expect(backups).toHaveLength(1);
+  const restored = await importPurchase(must(backups[0])[1], h.backupSecret);
+  expect(sends).toBe(1);
+  expect(restored.nearSubmission).toEqual({
+    state: 'uncertain',
+    txHash: '11111111111111111111111111111111',
+  });
+  expect(outcome).not.toBeInstanceOf(Error);
+  expect(outcome).toMatchObject({
+    uncertain: { purchaseId: restored.id, txHash: '11111111111111111111111111111111' },
+  });
+  expect(toPublicError(new TransactionUncertain(undefined, restored.id))).toMatchObject({
+    code: 'transaction_uncertain',
+    exitCode: 4,
+  });
+});
