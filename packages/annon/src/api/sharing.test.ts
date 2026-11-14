@@ -1275,17 +1275,132 @@ it('only a checked publication result can accompany a completed record', async (
     code: 'invalid_record',
   });
 });
-it('refuses hosted publication lifetimes longer than seven days or null', async () => {
-  for (const expiresAt of [now + 604801, null]) {
-    const h = await staged();
-    for (let i = 0; i < 3; i++) await h.engine.next(h.q.fileId, h.input);
-    Object.assign(h.published, { expiresAt });
-    await expect(h.engine.next(h.q.fileId, h.input)).rejects.toMatchObject({
-      code: 'bad_response',
+const DAY = 86400;
+async function publishWith(expiresAt: unknown, path: 'header' | 'status') {
+  const h = await staged();
+  for (let i = 0; i < 3; i++) await h.engine.next(h.q.fileId, h.input);
+  Object.assign(h.published, { expiresAt });
+  if (expiresAt === undefined) delete (h.published as Partial<typeof h.published>).expiresAt;
+  if (path === 'status') {
+    // The header answer is lost; the authenticated status already reports publication.
+    const original = must(h.fetcher.getMockImplementation());
+    let lost = false;
+    h.fetcher.mockImplementation(async (url, options) => {
+      const response = await original(url, options);
+      if (!lost && String(url).endsWith('/header')) {
+        lost = true;
+        throw new Error('lost answer');
+      }
+      return response;
     });
-    expect((await h.engine.load(h.q.fileId)).published).not.toBe(true);
+    await expect(h.engine.next(h.q.fileId, h.input)).rejects.toMatchObject({
+      code: 'operation_failed',
+    });
+    expect(lost).toBe(true);
   }
+  return h;
+}
+it.each(
+  [null, now + 1, now + 604800, now + 604801, now + 30 * DAY, now + 365 * DAY].flatMap((v) =>
+    (['header', 'status'] as const).map((path) => [v, path] as const),
+  ),
+)(
+  'accepts a shop publication expiry of %j through the %s answer and keeps it exactly',
+  async (expiresAt, path) => {
+    const h = await publishWith(expiresAt, path);
+    const steps = (await h.engine.load(h.q.fileId)).hosting.steps;
+    await h.engine.next(h.q.fileId, h.input);
+    const done = await h.engine.load(h.q.fileId);
+    expect(done.published).toBe(true);
+    expect(done.hosting.result).toEqual({ ...h.published, expiresAt });
+    expect(done.hosting.result?.expiresAt).toBe(expiresAt);
+    expect(done.hosting.completed).toEqual(steps);
+    expect(done.hosting.pending).toBeNull();
+    expect([done.fileKey, done.sellerSecret, done.ckdSecret]).toEqual([null, null, null]);
+    const { exportSell, importSell } = await import('../pay/backup.js');
+    const restored = await importSell(
+      await exportSell(done, h.options.backupSecret),
+      h.options.backupSecret,
+    );
+    expect(restored.hosting?.result?.expiresAt).toBe(expiresAt);
+  },
+);
+it.each(
+  [now, now - 1].flatMap((v) => (['header', 'status'] as const).map((path) => [v, path] as const)),
+)(
+  'refuses a new publication expiring at %j through the %s answer as file_expired',
+  async (expiresAt, path) => {
+    const h = await publishWith(expiresAt, path);
+    await expect(h.engine.next(h.q.fileId, h.input)).rejects.toMatchObject({
+      code: 'file_expired',
+    });
+    const saved = await h.engine.load(h.q.fileId);
+    expect(saved.published).not.toBe(true);
+    expect(saved.hosting.result).toBeNull();
+    expect(saved.hosting.completed).not.toContain('publish');
+    expect(saved.sellerSecret).not.toBeNull();
+  },
+);
+it.each([
+  [0, 'bad_response'],
+  [-1, 'operation_failed'],
+  [now + 0.5, 'operation_failed'],
+  [String(now + DAY), 'operation_failed'],
+  [2 ** 53, 'operation_failed'],
+  [undefined, 'operation_failed'],
+] as const)('refuses a malformed publication expiry %j with %s', async (expiresAt, code) => {
+  const h = await publishWith(expiresAt, 'header');
+  await expect(h.engine.next(h.q.fileId, h.input)).rejects.toMatchObject({ code });
+  const saved = await h.engine.load(h.q.fileId);
+  expect(saved.published).not.toBe(true);
+  expect(saved.hosting.result).toBeNull();
+  expect(saved.sellerSecret).not.toBeNull();
 });
+it.each([0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53, '1900000000'])(
+  'the completion check refuses expiry %s regardless of the clock',
+  async (expiresAt) => {
+    const h = harness();
+    h.setNow(-10);
+    const update = vi.fn(async () => {});
+    const finish = (
+      h.engine as unknown as {
+        finishPublication(p: unknown, job: unknown, u: typeof update): Promise<void>;
+      }
+    ).finishPublication.bind(h.engine);
+    await expect(
+      finish({ fileId: '0x', url: '', header: '', expiresAt }, { hosting: null }, update),
+    ).rejects.toMatchObject({ code: 'bad_response' });
+    expect(update).not.toHaveBeenCalled();
+  },
+);
+it.each([null, now + 30 * DAY])(
+  'a completed record with expiry %j stays readable after that time passes',
+  async (expiresAt) => {
+    const h = await publishWith(expiresAt, 'header');
+    await h.engine.next(h.q.fileId, h.input);
+    const done = await h.engine.load(h.q.fileId);
+    h.setNow((expiresAt ?? now) + 400 * DAY);
+    expect(await h.engine.load(h.q.fileId)).toEqual(done);
+    const { exportSell, importSell } = await import('../pay/backup.js');
+    const text = await exportSell(done, h.options.backupSecret);
+    expect((await importSell(text, h.options.backupSecret)).hosting?.result).toEqual(
+      done.hosting.result,
+    );
+    const { Annon } = await import('./annon.js');
+    const sdk = new Annon(h.options);
+    vi.spyOn(sdk.hosted, 'load').mockImplementation(h.engine.load.bind(h.engine));
+    expect(await sdk.resumeShare({ fileId: h.q.fileId, ...h.input })).toEqual(done.hosting.result);
+    for (const bad of [0, -1, 0.5, '1', undefined]) {
+      const changed = structuredClone(done);
+      Object.assign(must(changed.hosting.result), { expiresAt: bad });
+      if (bad === undefined)
+        delete (must(changed.hosting.result) as { expiresAt?: unknown }).expiresAt;
+      await expect(exportSell(changed, h.options.backupSecret)).rejects.toMatchObject({
+        code: 'invalid_record',
+      });
+    }
+  },
+);
 it.each([-1, 0.5, Number.NaN])(
   'rejects invalid replayable source size %s before reading',
   async (size) => {

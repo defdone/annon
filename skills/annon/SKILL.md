@@ -242,7 +242,7 @@ annon share report.pdf --resume 0xFILE_ID --shop example --json
 
 MCP: `annon_share` with `target` and `price`, or `target` and `resume`; optional `shop`, `title`, `description`.
 
-- `share` encrypts the file, uploads it to the shop's host, registers the terms and publishes it. The result is `{fileId,url,header,expiresAt}`, plus `rules` and `shop` when the shop publishes rules. Report the `url` and `expiresAt` to the owner.
+- `share` encrypts the file, uploads it to the shop's host, registers the terms and publishes it. The result is `{fileId,url,header,expiresAt}`, plus `rules` and `shop` when the shop publishes rules. Report the `url` and `expiresAt` to the owner. `expiresAt` is Unix seconds, or `null` when the shop plans no expiry.
 - `--shop` names a local alias or manifest URL; without it the owner's `defaultShop` is used. The owner must have given that shop a deployment `profile` that matches the configuration. Otherwise: `invalid_config` (unknown shop), `trust_required` (no profile), `config_conflict` (mismatch). Discovery never authorizes a shop.
 - `share` takes no split: the price pays the seller, plus the relayer's fee share for EVM and Solana sellers. A fee above `maxProtocolFee` stops it with `protocol_fee_above_max` before anything is saved or signed.
 - EVM listings get a Base route through a split the shop creates. NEAR and Solana listings get `near` and `1click` only; buyers with USDC on Base use 1Click with Base as the source.
@@ -250,4 +250,4 @@ MCP: `annon_share` with `target` and `price`, or `target` and `resume`; optional
 - The pending encrypted backup is saved before any signature or transaction. If a share stops, resume with `--resume` (MCP `resume`) and the same `target`, without `price`, `title`, `description` or storage flags. Never start a second listing for the same file after an uncertain result.
 - Shop limits answer `rate_limited` (host upload count per wallet, per IP or overall; wait `retryAfterSeconds`), `limited` (a relayer admission limit, such as an hourly request limit or a daily sponsorship quota; wait `retryAfterSeconds`, then resume the saved sale, never start a new listing to bypass it), `budget`, `host_capacity` or `too_large`. Report the code and the shop's rules to the owner, then resume later.
 
-Done when the result holds `fileId` and `url`. Hosted files expire at `expiresAt`; the owner keeps the original.
+Done when the result holds `fileId` and `url`. Hosted files expire at `expiresAt` (never, by plan, when it is `null`); the owner keeps the original.

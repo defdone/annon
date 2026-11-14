@@ -458,3 +458,30 @@ it('discard preserves the browser index when another tab holds the engine lease'
   expect((await h.seller.active())?.id).toBe(sale.id);
   expect(await store.load(key)).not.toBeNull();
 });
+it.each([
+  [undefined, undefined],
+  [7, 7],
+  [30, 30],
+  [0, 0],
+  [null, null],
+] as const)(
+  'a quote shows the shop lifetime %j as hostedDays %j without a hidden default',
+  async (fileLifetimeDays, hostedDays) => {
+    const h = harness();
+    const seller = createBrowserSeller(
+      fileLifetimeDays === undefined ? h.options : { ...h.options, fileLifetimeDays },
+    );
+    const quote = await seller.quote(h.connection, h.draft);
+    if (hostedDays === undefined) expect(quote).not.toHaveProperty('hostedDays');
+    else expect(quote.hostedDays).toBe(hostedDays);
+  },
+);
+it.each([-1, 1.5, Number.NaN, 2 ** 53, '7'])(
+  'refuses an invalid display lifetime %s',
+  (fileLifetimeDays) => {
+    const h = harness();
+    expect(() =>
+      createBrowserSeller({ ...h.options, fileLifetimeDays: fileLifetimeDays as number }),
+    ).toThrow(expect.objectContaining({ code: 'invalid_arguments' }));
+  },
+);

@@ -43,7 +43,8 @@ What happens, in order:
 6. The terms are registered on NEAR. EVM and Solana sellers sign once and the shop's relayer submits
    and pays. NEAR sellers send the transactions from their own wallet and pay the storage.
 7. The host publishes the file. The result is `fileId`, the purchase `url`, the `header` URL and
-   `expiresAt`, when the shop stops hosting the file.
+   `expiresAt`, when the shop stops hosting the file (Unix seconds, or `null` when the shop plans no
+   expiry). The lifetime is the shop's policy; the SDK sets no maximum.
 
 Each shop sets its own upload and listing limits and file lifetime. `annon shops` shows the rules a
 shop publishes in its manifest, and `annon share` prints them again with the result. The demo's

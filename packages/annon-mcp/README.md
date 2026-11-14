@@ -93,7 +93,7 @@ Tools take camelCase versions of the CLI flags, with `target` as the positional 
 
 | Tool | Required arguments | Result |
 | --- | --- | --- |
-| `annon_share` | `target` plus `price` or `resume` | File ID, purchase URL, header URL, hosting expiry |
+| `annon_share` | `target` plus `price` or `resume` | File ID, purchase URL, header URL, hosting expiry (Unix seconds or `null`) |
 | `annon_sell` | `target` plus `price`, `split` or `resume` | File ID, PAY2 path, public terms |
 | `annon_buy` | `target` | Purchase ID, route, payment summary, encrypted backup path; 1Click deposit instructions when applicable |
 | `annon_open` | `target`, `output` | Plaintext output path, byte count, payment summary when saved |

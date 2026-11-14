@@ -3132,6 +3132,31 @@ it('annon_share is a spending tool with strict price or resume inputs', async ()
   }
 });
 
+it.each([null, 1800000000 + 365 * 86400])(
+  'annon_share output keeps a hosting expiry of %j',
+  async (expiresAt) => {
+    const result = {
+      fileId: `0x${'11'.repeat(32)}`,
+      url: 'https://host.example/f/synthetic',
+      header: 'https://host.example/f/synthetic/header',
+      expiresAt,
+      shop: { manifest: 'https://shop.test/.well-known/annon-shop.json', name: 'Shop' },
+      rules: { text: 'Shop text', fileLifetimeDays: null },
+    };
+    const connection = await connect(async () => result);
+    try {
+      const response = await connection.client.callTool({
+        name: 'annon_share',
+        arguments: { target: 'file.txt', price: '0.10' },
+      });
+      expect(response.isError).toBeFalsy();
+      expect(response.structuredContent).toEqual({ ok: true, result });
+    } finally {
+      await connection.close();
+    }
+  },
+);
+
 it('preserves seller budget refusal and retry evidence through MCP', async () => {
   const { AnnonError } = await import('../../annon/src/errors.js');
   const id = `0x${'11'.repeat(32)}`;

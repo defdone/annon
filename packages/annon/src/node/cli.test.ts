@@ -162,6 +162,27 @@ it('prints rules verbatim with provenance in human output and retains JSON strin
   expect(JSON.parse(lines[0] ?? '').result).toEqual(result);
 });
 
+it('share output keeps a null hosting expiry in human and JSON output', async () => {
+  const { runCli } = await import('./cli.js');
+  const result = {
+    fileId: `0x${'11'.repeat(32)}`,
+    url: 'https://host.example/f/synthetic',
+    header: 'https://host.example/f/synthetic/header',
+    expiresAt: null,
+  };
+  for (const json of [false, true]) {
+    const lines: string[] = [];
+    expect(
+      await runCli(
+        ['share', 'file.txt', '--price', '0.10', ...(json ? ['--json'] : [])],
+        async () => result,
+        (line) => lines.push(line),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(lines.at(-1) ?? '')).toEqual({ ok: true, result });
+  }
+});
+
 it('prints shop list rules with manifest provenance', async () => {
   const { runCli } = await import('./cli.js');
   const manifest = 'https://shop.test/.well-known/annon-shop.json';

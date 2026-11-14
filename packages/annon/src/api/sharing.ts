@@ -100,7 +100,8 @@ export interface ShareQuote {
   storageBudget: string | null;
 }
 export interface Shared extends UploadPublished {
-  expiresAt: number;
+  /** Hosting expiry in Unix seconds as stated by the shop, or null for no planned expiry. */
+  expiresAt: number | null;
 }
 export interface HostedCheckpoint {
   origin: string;
@@ -292,8 +293,7 @@ export function validateHostedRecord(job: SellRecord): void {
       r.fileId !== t.file_id ||
       r.url !== url ||
       r.header !== `${url}/header` ||
-      !Number.isSafeInteger(r.expiresAt) ||
-      (r.expiresAt as number) <= 0 ||
+      (r.expiresAt !== null && (!Number.isSafeInteger(r.expiresAt) || r.expiresAt <= 0)) ||
       h.completed.at(-1) !== 'publish' ||
       !h.header ||
       !job.published
@@ -1228,9 +1228,12 @@ export class HostedSelling {
     job: SellRecord,
     update: (c: Partial<SellRecord>, h: Partial<HostedCheckpoint>) => Promise<void>,
   ) {
-    if (published.expiresAt === null) throw new AnnonError('bad_response');
-    if (published.expiresAt <= this.now()) throw new AnnonError('file_expired');
-    if (published.expiresAt > this.now() + 604800) throw new AnnonError('bad_response');
+    const expiry = published.expiresAt;
+    if (expiry !== null) {
+      if (!Number.isSafeInteger(expiry) || expiry <= 0) throw new AnnonError('bad_response');
+      const now = this.now();
+      if (expiry <= now) throw new AnnonError('file_expired');
+    }
     await update(
       { published: true, fileKey: null, sellerSecret: null, ckdSecret: null },
       {

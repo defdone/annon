@@ -26,9 +26,16 @@ const master = 12345n;
 const mpc = bls.G2.Point.BASE.multiply(master);
 const mpcKey = `bls12381g2:${base58.encode(mpc.toBytes(true))}`;
 afterEach(() => vi.restoreAllMocks());
-it.each(['evm', 'solana', 'near'] as const)(
-  'browser %s controller signs exact texts, stages a Blob and publishes a usable file',
-  async (kind) => {
+it.each([
+  ['evm', now + 604800],
+  ['solana', now + 604800],
+  ['near', now + 604800],
+  ['evm', null],
+  ['near', null],
+  ['solana', now + 365 * 86400],
+] as const)(
+  'browser %s controller signs exact texts, stages a Blob and publishes a usable file expiring at %j',
+  async (kind, expiresAt) => {
     vi.spyOn(rpc, 'getConfig').mockResolvedValue({
       network: fixture.network,
       nearUsdc: fixture.near.token,
@@ -201,7 +208,7 @@ it.each(['evm', 'solana', 'near'] as const)(
           fileId: must(request).intent.fileId,
           url: `https://host.example/f/${must(request).intent.fileId.slice(2)}`,
           header: `https://host.example/f/${must(request).intent.fileId.slice(2)}/header`,
-          expiresAt: now + 604800,
+          expiresAt,
         };
         return Response.json(result, { status: 201 });
       }
@@ -280,16 +287,18 @@ it.each(['evm', 'solana', 'near'] as const)(
     const sale = await controller.begin(q.quoteId);
     await sale.exportBackup();
     await sale.confirmBackup();
+    const seen: import('./selling.js').SaleView[] = [];
+    sale.subscribe((v) => seen.push(v));
     let view = await sale.view();
     while (view.next) view = await sale.next();
     expect(view.needs).toEqual([]);
     const resumed = await createBrowserSeller(controllerOptions).active();
-    expect((await must(resumed).view()).needs).toEqual([]);
-    expect(view.result).toEqual({
-      fileId: must(request).intent.fileId,
-      url: must(result).url,
-      expiresAt: now + 604800,
-    });
+    const reread = await must(resumed).view();
+    expect(reread.needs).toEqual([]);
+    const shown = { fileId: must(request).intent.fileId, url: must(result).url, expiresAt };
+    expect(view.result).toEqual(shown);
+    expect(reread.result).toEqual(shown);
+    expect(must(seen.at(-1)).result).toEqual(shown);
     expect(exactTexts.map((t) => t.split('\n')[0])).toEqual(
       kind === 'near'
         ? ['Annon: reserve encrypted file hosting']

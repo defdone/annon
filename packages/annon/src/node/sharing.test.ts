@@ -104,14 +104,15 @@ it.each([undefined, 'other', 'https://other.example/.well-known/annon-shop.json'
           fileId: `0x${'11'.repeat(32)}`,
           url: 'https://host.example/f/synthetic',
           header: 'https://host.example/f/synthetic/header',
-          expiresAt: 1800000000,
+          // The shop plans no expiry; the adapter passes it through unchanged.
+          expiresAt: null,
         };
       });
       const resume = vi.fn(async () => ({
         fileId: `0x${'11'.repeat(32)}`,
         url: 'https://host.example/f/synthetic',
         header: 'https://host.example/f/synthetic/header',
-        expiresAt: 1800000000,
+        expiresAt: 1800000000 + 365 * 86400,
       }));
       const selectedManifest = shop
         ? 'https://other.example/.well-known/annon-shop.json'
@@ -153,7 +154,7 @@ it.each([undefined, 'other', 'https://other.example/.well-known/annon-shop.json'
           json: true,
           ...(shop ? { shop } : {}),
         }),
-      ).toMatchObject(expected);
+      ).toMatchObject({ ...expected, expiresAt: null });
       expect(
         await adapter({
           command: 'share',
@@ -162,7 +163,7 @@ it.each([undefined, 'other', 'https://other.example/.well-known/annon-shop.json'
           json: true,
           ...(shop ? { shop } : {}),
         }),
-      ).toMatchObject(expected);
+      ).toMatchObject({ ...expected, expiresAt: 1800000000 + 365 * 86400 });
       expect(resume).toHaveBeenCalledTimes(1);
       expect(share).toHaveBeenCalledTimes(1);
       expect(must(share.mock.calls[0])[0]).toMatchObject({

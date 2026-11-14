@@ -594,6 +594,43 @@ it('checks every successful reservation and publication binding and response byt
   expect(await client.status(id, request)).toMatchObject({ ok: false });
 });
 
+it('publication answers carry a null or long hosting expiry and refuse malformed ones', async () => {
+  const vectors = (await import('../../../../specs/vectors/upload.json')).default;
+  const request = parseUpload(vectors.cases[0]?.request);
+  const id = vectors.reservation.input.uploadId;
+  let response: unknown;
+  const client = new UploadClient(request.intent.hostOrigin, {
+    fetch: (async () => Response.json(response)) as typeof fetch,
+  });
+  const url = `${request.intent.hostOrigin}/f/${request.intent.fileId.slice(2)}`;
+  const base = { fileId: request.intent.fileId, url, header: `${url}/header` };
+  const answers = (expiresAt: unknown) => {
+    const result: Record<string, unknown> = { ...base, expiresAt };
+    if (expiresAt === undefined) delete result.expiresAt;
+    return [
+      [result, () => client.header(id, request, new Uint8Array())],
+      [
+        { uploadId: id, state: 'published', result, baseSplit: null },
+        () => client.status(id, request),
+      ],
+    ] as const;
+  };
+  for (const expiresAt of [null, 1800000000 + 365 * 86400])
+    for (const [answer, call] of answers(expiresAt)) {
+      response = answer;
+      const checked = await call();
+      expect(checked).toMatchObject({ ok: true });
+      const value = (checked as { value: { expiresAt?: unknown; result?: { expiresAt: unknown } } })
+        .value;
+      expect(value.result ? value.result.expiresAt : value.expiresAt).toBe(expiresAt);
+    }
+  for (const expiresAt of [undefined, '1800000000', 1800000000.5, -1, 2 ** 53])
+    for (const [answer, call] of answers(expiresAt)) {
+      response = answer;
+      expect(await call(), String(expiresAt)).toMatchObject({ ok: false });
+    }
+});
+
 it('rejects oversized otherwise valid error JSON before accepting its retry evidence', async () => {
   const f = await fixture();
   const client = new UploadClient(f.request.intent.hostOrigin, {

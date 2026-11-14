@@ -247,8 +247,10 @@ Failures raise `BrowserWalletError` with a code a page can show: `rejected`, `wr
 anything, calls `onSplit` with the split and fee for approval, saves the pending encrypted backup
 (`confirmBackup` must resolve only after you stored it and its separate secret), then uploads,
 creates the shop's Base split for an EVM seller, registers, funds a NEAR seller's storage and
-publishes. It returns `{ fileId, url, header, expiresAt }`. `hosting.origin` is the host of a shop
-you approved; there is no default host. Each step is checkpointed in the encrypted sell record, and
+publishes. It returns `{ fileId, url, header, expiresAt }`. `expiresAt` is the hosting expiry the
+shop states, in Unix seconds, or `null` when the shop plans no expiry; the SDK sets no maximum of its
+own and refuses a time that has already passed with `file_expired`. A saved completed sale stays
+readable after that time. `hosting.origin` is the host of a shop you approved; there is no default host. Each step is checkpointed in the encrypted sell record, and
 `annon.resumeShare({ fileId, data, seller, hosting })` continues a stopped sale with the original
 file and terms, reconciling any uncertain transaction before it sends another.
 
@@ -276,7 +278,9 @@ while (view.next) view = await sale.next();       // the only method that signs 
   running the same sale.
 - After a reload, `active()` returns the open sale. `attachWallet`, `attachFile` and `unlock` supply
   what `view().needs` lists; `discard()` drops a sale.
-- `view().result` holds `{ fileId, url, expiresAt }` once the file is published.
+- `view().result` holds `{ fileId, url, expiresAt }` once the file is published; `expiresAt` may be
+  `null` (no planned expiry). `quote.hostedDays` shows the optional `fileLifetimeDays` option, which
+  a page fills from the selected shop's rules; it is absent when the page does not pass it.
 
 ### Shop discovery
 

@@ -115,7 +115,8 @@ code means: [what-can-go-wrong.md](what-can-go-wrong.md).
 ## Selling from an agent
 
 `annon_share` sells through a shop: it encrypts a file inside `workDir`, uploads it to the shop's
-host, registers it and publishes it, and returns `fileId`, `url`, `header` and `expiresAt`. It takes
+host, registers it and publishes it, and returns `fileId`, `url`, `header` and `expiresAt` (Unix
+seconds, or `null` when the shop plans no expiry). It takes
 `target`, `price` and optional `shop`, `title` and `description`. To resume a stopped sale, call it
 again with the same `target` and `resume` set to the file ID, without new terms. `annon_sell`
 encrypts and registers a file for self-hosting.

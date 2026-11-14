@@ -55,7 +55,8 @@ export interface SellQuote extends SellTerms {
   quoteId: string;
   description: string;
   byteSize: number;
-  hostedDays: number;
+  /** The selected shop's stated lifetime in days, null for no planned expiry, absent when unknown. */
+  hostedDays?: number | null;
 }
 export interface SaleView extends SellTerms {
   id: string;
@@ -65,7 +66,8 @@ export interface SaleView extends SellTerms {
   pending: boolean;
   needs: ('wallet' | 'file' | 'secret')[];
   registered: boolean;
-  result: { fileId: string; url: string; expiresAt: number } | null;
+  /** expiresAt is Unix seconds, or null when the shop plans no hosting expiry. */
+  result: { fileId: string; url: string; expiresAt: number | null } | null;
 }
 export interface SellProgress {
   phase: 'encrypting' | 'uploading';
@@ -107,6 +109,11 @@ export interface BrowserSaleIndex extends Versioned {
 }
 export interface BrowserSellerOptions extends AnnonOptions {
   host: string;
+  /**
+   * Display only: the selected shop's stated file lifetime in days from its validated rules,
+   * null for no planned expiry. The per-file publication response states the actual expiry.
+   */
+  fileLifetimeDays?: number | null;
   indexStore: Store<BrowserSaleIndex>;
   /** Resolve a page-owned handle to its canonical wallet without signing. */
   wallet(connection: SellerConnection): {
@@ -209,6 +216,9 @@ export async function browserSellerStorage(options: { name?: string; factory?: I
   };
 }
 export function createBrowserSeller(options: BrowserSellerOptions): SellerFacade {
+  const days = options.fileLifetimeDays;
+  if (days !== undefined && days !== null && (!Number.isSafeInteger(days) || days < 0))
+    throw new AnnonError('invalid_arguments');
   const sdk = new Annon(options);
   const sessions = new Map<
     string,
@@ -303,7 +313,7 @@ export function createBrowserSeller(options: BrowserSellerOptions): SellerFacade
           ],
       registered: h.completed.includes('register'),
       result: result
-        ? { fileId: result.fileId, url: result.url, expiresAt: present(result.expiresAt) }
+        ? { fileId: result.fileId, url: result.url, expiresAt: result.expiresAt }
         : null,
     };
     return structuredClone(shown);
@@ -500,7 +510,7 @@ export function createBrowserSeller(options: BrowserSellerOptions): SellerFacade
         quoteId: q.quoteId,
         description: q.metadata.description,
         byteSize: draft.file.size,
-        hostedDays: 7,
+        ...(options.fileLifetimeDays === undefined ? {} : { hostedDays: options.fileLifetimeDays }),
       });
     },
     async begin(quoteId) {
