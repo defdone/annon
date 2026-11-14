@@ -278,6 +278,7 @@ Every document is plain Markdown, so an agent can read it directly.
 | [packages/annon/CLI.md](packages/annon/CLI.md) | Every CLI command and option |
 | [packages/annon-mcp](packages/annon-mcp/README.md) | MCP tools, configuration, safety model |
 | [skills/annon/SKILL.md](skills/annon/SKILL.md) | Agent skill: the whole flow, when to wait |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Code map: module layout, where each flow lives, how to check it |
 | [SECURITY.md](SECURITY.md) | Trust model, known limits, reporting |
 
 Specifications, with test vectors checked in CI, so anyone can build a compatible implementation:
