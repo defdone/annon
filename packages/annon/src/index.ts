@@ -7,9 +7,30 @@ export {
   SellError,
   type SellOptions,
 } from './api/annon.js';
+export type {
+  HostedCheckpoint,
+  Shared,
+  ShareHosting,
+  ShareOptions,
+  ShareQuote,
+  ShareStep,
+} from './api/sharing.js';
 export { PurchaseLeaseBusy } from './browser/purchases.js';
 export { BrowserWalletError, type BrowserWalletErrorCode } from './browser/wallets.js';
 export { DownloadError, type DownloadErrorCode } from './download/download.js';
+export {
+  type UploadAuth,
+  type UploadAuthorization,
+  type UploadBaseSplit,
+  type UploadBaseSplitResult,
+  UploadClient,
+  type UploadIntent,
+  type UploadManifest,
+  type UploadMetadata,
+  type UploadPublished,
+  type UploadStatus,
+  uploadText,
+} from './download/upload.js';
 export { Pay2Error, type Pay2ErrorCode } from './envelope/pay2.js';
 export { blobSource, type ReplayableSource, type Spool } from './envelope/replay.js';
 export { SourceChangedError } from './envelope/stream.js';
@@ -97,6 +118,7 @@ export {
   type DiscoveryQuery,
   listShops,
   type Shop,
+  type ShopFailure,
   type ShopManifest,
   type ShopProfile,
 } from './shops/discovery.js';

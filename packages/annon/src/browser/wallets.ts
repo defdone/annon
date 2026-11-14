@@ -1,10 +1,22 @@
 /** Page-owned providers adapted to Annon wallets. No wallet packages or browser globals. */
 import { base58, base64 } from '@scure/base';
+import {
+  parseUploadIntent,
+  type UploadAuth,
+  type UploadIntent,
+  uploadText,
+} from '../download/upload.js';
 import { AnnonError } from '../errors.js';
-import { type NearMessage, type NearSignedMessage, proveNearControl } from '../near/nep413.js';
+import {
+  type NearMessage,
+  type NearSignedMessage,
+  proveNearControl,
+  verifyNearMessage,
+} from '../near/nep413.js';
 import { BASE_CHAIN_ID, digest, signer, type TypedData } from '../pay/eip3009.js';
-import { hex } from '../settle-near/codec.js';
+import { bytes, hex } from '../settle-near/codec.js';
 import { type Authorization, parseIdentity, verifyAuthorization } from '../settle-near/identity.js';
+import { TransactionUncertain } from '../wallet/uncertain.js';
 import {
   type EvmWallet,
   evmWallet,
@@ -12,6 +24,11 @@ import {
   type NearWallet,
   nearSelectorWallet,
 } from '../wallet/wallet.js';
+
+function present<T>(value: T | null | undefined): T {
+  if (value === null || value === undefined) throw new AnnonError('invalid_response');
+  return value;
+}
 
 export type BrowserWalletErrorCode =
   | 'rejected'
@@ -39,7 +56,7 @@ async function checked<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (error) {
-    if (error instanceof BrowserWalletError) throw error;
+    if (error instanceof BrowserWalletError || error instanceof TransactionUncertain) throw error;
     let cause: unknown = error;
     for (let depth = 0; depth < 8 && cause && typeof cause === 'object'; depth++) {
       const e = cause as { code?: unknown; message?: unknown; cause?: unknown };
@@ -235,9 +252,11 @@ export function browserNearWallet(
           })),
         });
         if (result && typeof result === 'object' && 'transaction' in result) {
-          const transaction = result.transaction as { signer_id?: unknown } | null;
-          if (transaction?.signer_id !== identity.id)
+          const transaction = result.transaction as { signer_id?: unknown; hash?: string } | null;
+          if (transaction?.signer_id !== identity.id) {
+            if (transaction?.hash) throw new TransactionUncertain(transaction.hash);
             fail('wrong_identity', 'The transaction names another NEAR identity.');
+          }
         } else fail('invalid_response', 'The wallet returned no NEAR transaction.');
         return result;
       },
@@ -247,7 +266,17 @@ export function browserNearWallet(
   return {
     identity,
     authorize: (text) => checked(() => underlying.authorize(text)),
-    call: (call) => checked(() => underlying.call(call)),
+    call: (call) =>
+      checked(async () => {
+        const value = await underlying.call(call);
+        try {
+          await selected();
+        } catch {
+          const tx = (value as { transaction: { hash: string } }).transaction;
+          throw new TransactionUncertain(tx.hash);
+        }
+        return value;
+      }),
     transferPurchase: (message, assets) =>
       checked(() => underlying.transferPurchase(message, assets)),
     proveControl: (text, context) =>
@@ -285,4 +314,41 @@ export function browserNearWallet(
         await selected();
       }),
   };
+}
+
+/** Sign only the hosting payload; no callback URL or page state is authorized. */
+export async function signNearUpload(
+  provider: BrowserNearProvider,
+  input: UploadIntent,
+  nearRpc: string,
+): Promise<UploadAuth & { kind: 'near' }> {
+  const intent = parseUploadIntent(input);
+  if (intent.seller.kind !== 'near') throw new AnnonError('wrong_identity');
+  return checked(async () => {
+    const selected = async () => {
+      if (!provider.getAccounts || !provider.signMessage)
+        fail('missing_method', 'NEAR hosting requires NEP-413 signing.');
+      const accounts = await provider.getAccounts();
+      if (!accounts.some((a) => a.accountId === intent.seller.id))
+        fail('wrong_identity', 'Select the requested NEAR identity.');
+    };
+    await selected();
+    const payload = {
+      message: uploadText(intent),
+      recipient: intent.hostOrigin,
+      nonce: bytes(intent.nonce, 32),
+    };
+    const result = await present(provider.signMessage).call(provider, {
+      ...payload,
+      nonce: payload.nonce.slice(),
+    });
+    await verifyNearMessage(intent.seller.id, payload, result, nearRpc);
+    await selected();
+    return {
+      kind: 'near',
+      accountId: present(result).accountId,
+      publicKey: present(result).publicKey,
+      signature: present(result).signature,
+    };
+  });
 }

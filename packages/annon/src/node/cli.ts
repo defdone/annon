@@ -8,6 +8,7 @@ export type Command =
   | 'catalog'
   | 'fund'
   | 'budget'
+  | 'share'
   | 'sell'
   | 'buy'
   | 'open'
@@ -25,6 +26,9 @@ export interface Input {
   limit?: number;
   offset?: number;
   storageBudget?: string;
+  listingStorage?: string;
+  title?: string;
+  description?: string;
   fundAmount?: string;
   agent?: boolean;
   noOpen?: boolean;
@@ -107,6 +111,7 @@ const perCommand: Record<Command, string[]> = {
     'new-key',
     'daily-budget',
   ],
+  share: ['resume', 'price', 'shop', 'title', 'description', 'storage-budget', 'listing-storage'],
   sell: ['resume', 'price', 'split', 'base', 'moderator', 'output', 'storage-budget'],
   buy: [
     'force',
@@ -174,6 +179,17 @@ export function parseCli(argv: string[]): Input {
         values[key] = n;
       }
     }
+    if (cmd === 'share') {
+      if (
+        values.resume
+          ? !/^0x[0-9a-f]{64}$/.test(String(values.resume)) ||
+            ['price', 'title', 'description', 'storageBudget', 'listingStorage'].some(
+              (k) => values[k] !== undefined,
+            )
+          : !values.price
+      )
+        throw usage();
+    }
     if (cmd === 'sell') {
       if (values.resume) {
         if (
@@ -207,6 +223,8 @@ shop add <url> [--id <alias>]
 catalog [--shop <id>] [--search <q>] [--limit <n>] [--offset <n>]
 login [--wallet evm|near] [--no-open]
 init --agent --daily-budget <USDC> [--recovery <kind:id>] [--key-env <name> | --keychain-entry <name> | --new-key | --signer <https origin> (--credential-env <name> | --credential-keychain <name>)]
+share <file> --price <USDC> [--shop <id>] [--title <title>] [--description <text>] [--listing-storage <NEAR>] [--storage-budget <NEAR>]
+share <file> --resume <file-id> [--shop <id>]
 sell <file> --resume <file-id> [--output <PAY2>]
 fund <file-id> <NEAR>
 budget <file-id>

@@ -225,6 +225,7 @@ export class AnnonError<C extends AnnonErrorCode = AnnonErrorCode> extends Error
   }
 }
 const waiting = new Set<AnnonErrorCode>([
+  'budget',
   'settlement_pending',
   'transaction_uncertain',
   'transport',

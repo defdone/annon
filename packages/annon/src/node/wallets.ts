@@ -1,9 +1,13 @@
 import { readFile } from 'node:fs/promises';
 import { ed25519 } from '@noble/curves/ed25519.js';
+import { base64 } from '@scure/base';
 import { Account, KeyPair, type KeyPairString } from 'near-api-js';
 import { createPublicClient, createWalletClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base } from 'viem/chains';
+import { signNearUpload } from '../browser/wallets.js';
+import type { UploadAuth, UploadIntent } from '../download/upload.js';
+import { nep413Hash } from '../near/nep413.js';
 import type { SplitCall } from '../pay/split.js';
 import { bytes, hex } from '../settle-near/codec.js';
 import { identityJson, parseIdentity } from '../settle-near/identity.js';
@@ -14,6 +18,7 @@ import { decodeKeychain, type Keychain, osKeychain } from './keychain.js';
 
 export type Environment = Record<string, string | undefined>;
 export type LocalWallet = IdentityWallet & {
+  signUpload?: (intent: UploadIntent) => Promise<UploadAuth>;
   sendBase?: (call: SplitCall, rpc: string) => Promise<void>;
 };
 const credentialsError = () =>
@@ -68,8 +73,15 @@ export async function loadWallet(
         }),
         signTypedData: (data) => account.signTypedData(data as never),
         async sendBase(call, rpc) {
-          const client = createWalletClient({ account, chain: base, transport: http(rpc) });
-          const publicClient = createPublicClient({ chain: base, transport: http(rpc) });
+          const client = createWalletClient({
+            account,
+            chain: base,
+            transport: http(rpc, { fetchOptions: { credentials: 'omit', redirect: 'error' } }),
+          });
+          const publicClient = createPublicClient({
+            chain: base,
+            transport: http(rpc, { fetchOptions: { credentials: 'omit', redirect: 'error' } }),
+          });
           if ((await publicClient.getChainId()) !== base.id) throw new Error('wrong Base chain');
           const hash = await client.sendTransaction({
             to: call.to as `0x${string}`,
@@ -134,8 +146,25 @@ export async function loadWallet(
       if (expected && key.getPublicKey().toString() !== expected) throw credentialsError();
       if ((o.nearAccount ?? env.ANNON_NEAR_ACCOUNT ?? accountId) !== accountId)
         throw credentialsError();
+      // Transport exception near_api_local_wallet: Account owns nonce lookup and broadcast.
+      // Its provider uses the third-party Node fetch transport.
       const account = new Account(accountId, nearRpc, key.toString());
-      wallet = nearKeyPairWallet(account);
+      wallet = {
+        ...nearKeyPairWallet(account),
+        signUpload: (intent) =>
+          signNearUpload(
+            {
+              getAccounts: async () => [{ accountId }],
+              signMessage: async (payload) => ({
+                accountId,
+                publicKey: key.getPublicKey().toString(),
+                signature: base64.encode(key.sign(nep413Hash(payload)).signature),
+              }),
+            },
+            intent,
+            nearRpc,
+          ),
+      };
     } else throw credentialsError();
     if (o.recovery && identityJson(identity(o.recovery)) !== identityJson(wallet.identity))
       throw credentialsError();

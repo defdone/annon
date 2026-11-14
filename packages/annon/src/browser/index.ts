@@ -14,7 +14,28 @@ export {
   type BuyRoute,
   SellError,
 } from '../api/annon.js';
+export type {
+  HostedCheckpoint,
+  Shared,
+  ShareHosting,
+  ShareOptions,
+  ShareQuote,
+  ShareStep,
+} from '../api/sharing.js';
 export { DownloadError, type DownloadErrorCode } from '../download/download.js';
+export {
+  type UploadAuth,
+  type UploadAuthorization,
+  type UploadBaseSplit,
+  type UploadBaseSplitResult,
+  UploadClient,
+  type UploadIntent,
+  type UploadManifest,
+  type UploadMetadata,
+  type UploadPublished,
+  type UploadStatus,
+  uploadText,
+} from '../download/upload.js';
 export { Pay2Error, type Pay2ErrorCode } from '../envelope/pay2.js';
 export { SourceChangedError } from '../envelope/stream.js';
 export { CkdError, type CkdErrorCode } from '../keys/near-ckd.js';
@@ -61,6 +82,7 @@ export {
   type DiscoveryQuery,
   listShops,
   type Shop,
+  type ShopFailure,
   type ShopManifest,
   type ShopProfile,
 } from '../shops/discovery.js';
@@ -92,6 +114,22 @@ export {
   type PurchaseTermsReview,
 } from './purchases.js';
 export {
+  type BrowserSaleIndex,
+  type BrowserSellerOptions,
+  browserSellerSpool,
+  browserSellerStorage,
+  createBrowserSeller,
+  type SaleHandle,
+  type SaleView,
+  type SellDraft,
+  type SellerConnection,
+  type SellerFacade,
+  type SellProgress,
+  type SellQuote,
+  type SellStep,
+  type SellTerms,
+} from './selling.js';
+export {
   type BrowserNearProvider,
   type BrowserNearTransaction,
   BrowserWalletError,
@@ -102,4 +140,5 @@ export {
   type InjectedEvmProvider,
   type InjectedSolanaKey,
   type InjectedSolanaProvider,
+  signNearUpload,
 } from './wallets.js';

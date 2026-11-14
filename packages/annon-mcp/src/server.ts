@@ -46,6 +46,27 @@ export const schemas = {
   budget: z.strictObject({
     target: target.describe('File ID whose purchase storage budget is read'),
   }),
+  share: z
+    .strictObject({
+      target: target.describe('Local plaintext file, at most 50 MB'),
+      price: price.optional(),
+      resume: z
+        .string()
+        .regex(/^0x[0-9a-f]{64}$/)
+        .optional(),
+      shop: z.string().min(1).optional(),
+      title: z.string().optional(),
+      description: z.string().optional(),
+    })
+    .refine(
+      (value) =>
+        value.resume
+          ? value.price === undefined &&
+            value.title === undefined &&
+            value.description === undefined
+          : !!value.price,
+      { message: 'Provide price for a new share, or resume without new terms.' },
+    ),
   sell: z
     .strictObject({
       target: target.describe('Local plaintext file'),
@@ -99,6 +120,8 @@ const descriptions = {
   catalog:
     'Browse a shop catalog with client-side search and paging. Does not grant trust or authorize payment. Buy an entry using its resource URL.',
   budget: 'Read the file purchase storage balance and admission requirement.',
+  share:
+    'Encrypt and host a file at the selected approved shop. Saves a pending seller backup before approvals; creates the shop split for EVM sellers, registers and publishes. Resume preserves the original terms. Requires the same operator policy as selling.',
   sell: 'Encrypt and register a local file with the SDK. Writes a PAY2 file; seller arranges hosting. May send registration and Base split transactions.',
   buy: 'Prepare and submit a purchase using the SDK. Returns deposit instructions for 1Click; fund them externally, then check annon_status. A submitted payment is not final acceptance.',
   open: 'Open a saved final purchase or recovery grant with the SDK. Waits are enforced locally across calls and restarts. Reuse the saved purchase after retryAfterSeconds. Downloads with a grant proof when necessary and writes plaintext to the named output file.',
@@ -167,6 +190,7 @@ export function createServer(
 ) {
   const server = new McpServer({ name: 'annon', version });
   for (const command of [
+    'share',
     'sell',
     'buy',
     'open',

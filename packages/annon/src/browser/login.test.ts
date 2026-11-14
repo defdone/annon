@@ -1,4 +1,5 @@
-import { createContext, runInContext } from 'node:vm';
+import { readFile } from 'node:fs/promises';
+import { createContext, runInContext, runInNewContext } from 'node:vm';
 import { build } from 'esbuild';
 import { expect, it, vi } from 'vitest';
 import { browserBuildOptions } from '../../scripts/build-browser.js';
@@ -307,3 +308,24 @@ it.each(['near.nep413', 'near.signTransaction'])(
     expect(writes).not.toContain('functionCallKey');
   },
 );
+
+it('the approval session API omits credentials and rejects redirects', async () => {
+  const source = await readFile(new URL('./login.ts', import.meta.url), 'utf8');
+  const api = source
+    .slice(source.indexOf('const api = async'), source.indexOf('const used ='))
+    .replace('path: string, body?: unknown', 'path, body');
+  const fetcher = vi.fn(async () => Response.json({ ok: true }));
+  await runInNewContext(`${api}\napi('/api/action')`, {
+    fetch: fetcher,
+    capability: 'synthetic-capability',
+  });
+  expect(fetcher).toHaveBeenCalledWith(
+    '/api/action',
+    expect.objectContaining({
+      credentials: 'omit',
+      redirect: 'error',
+      cache: 'no-store',
+      headers: expect.objectContaining({ authorization: 'Bearer synthetic-capability' }),
+    }),
+  );
+});

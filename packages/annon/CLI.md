@@ -337,3 +337,16 @@ Both listing and catalog results contain `items`, `total`, and `nextOffset` (`nu
 Discovery uses HTTPS, omits credentials, rejects redirects and times out after 10 seconds. Limits are 64 KiB per manifest, 256 KiB and 100 shops per directory, and 8 MiB and 10000 entries per catalog. An oversized response fails with `too_large` without partial results.
 
 For a reviewed deployment, a human can add `profile` to a local shop with `network`, `contract`, `nearRpc`, `baseRpc`, `relayer`, and `host`. RPC URLs and service origins come from that local profile. Manifest deployment changes fail with `config_conflict`. Discovery information does not authorize a purchase. Buy a catalog entry using its resource `url` through the normal `annon buy` workflow, which independently verifies the configured deployment, final chain terms, header and price.
+
+## Hosted sharing
+
+Select a shop whose local deployment profile has been approved, then share a file:
+
+```sh
+annon share ./notes.txt --price 0.10 --shop my-shop --title 'Notes' --description 'A short guide'
+annon share ./notes.txt --resume 0x1111111111111111111111111111111111111111111111111111111111111111 --shop my-shop
+```
+
+The result contains `fileId`, `url`, `header` and `expiresAt`. Hosting comes from the selected shop or configured `defaultShop`. Keep the original file, the pending encrypted seller backup in the state directory and its separately configured backup secret. The backup is written before any signature or transaction. Resume uses the original file and saved terms. An uncertain transaction is reconciled before another submission.
+
+EVM sellers receive Base, NEAR and 1Click routes. The shop creates the predicted Base split after verifying the encrypted body. NEAR and Solana sellers receive NEAR and 1Click routes. NEAR sellers pay separate listing storage and purchase storage funding; use `--listing-storage` and `--storage-budget` to review those amounts before approval. Registration attaches zero. Agent calls require `listingStorage` and `storageBudget` in operator configuration and cannot override them. Noninteractive NEAR CLI calls require those configured amounts or both funding flags. File plaintext is limited to 50,000,000 bytes. Save your own copy before the returned hosting expiry.

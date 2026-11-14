@@ -108,3 +108,40 @@ it('uses only an explicitly named near-cli-rs keychain entry through an injected
   await expect(loadWallet({ wallet: 'near' }, {}, 'https://rpc', keychain)).rejects.toThrow();
   expect(read).not.toHaveBeenCalled();
 });
+
+it('omits credentials and rejects redirects on both Base RPC clients', async () => {
+  const fetcher = vi.fn(async (_url: unknown, options?: RequestInit) => {
+    expect(options?.credentials).toBe('omit');
+    expect(options?.redirect).toBe('error');
+    const request = JSON.parse(String(options?.body));
+    if (request.method === 'eth_chainId')
+      return Response.json({ jsonrpc: '2.0', id: request.id, result: '0x2105' });
+    return Response.json({
+      jsonrpc: '2.0',
+      id: request.id,
+      error: { code: -32602, message: 'synthetic refusal' },
+    });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  try {
+    const wallet = await loadWallet(
+      { wallet: 'evm' },
+      { ANNON_EVM_PRIVATE_KEY: `0x${'42'.repeat(32)}` },
+      'https://near.example',
+    );
+    await expect(
+      wallet.sendBase?.(
+        { to: `0x${'11'.repeat(20)}`, data: '0x' } as never,
+        'https://base.example',
+      ),
+    ).rejects.toThrow();
+    expect(fetcher).toHaveBeenCalled();
+    expect(
+      fetcher.mock.calls.every(
+        ([, options]) => options?.credentials === 'omit' && options?.redirect === 'error',
+      ),
+    ).toBe(true);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

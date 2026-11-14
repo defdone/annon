@@ -37,6 +37,7 @@ import { checkBaseSponsorship } from '../relay/capabilities.js';
 import { type ProtocolFee, protocolFeeAboveMax } from '../relay/fees.js';
 import { bytes, hex } from '../settle-near/codec.js';
 import { identityJson, parseIdentity } from '../settle-near/identity.js';
+import { TransactionUncertain } from '../wallet/uncertain.js';
 import type { NearWallet } from '../wallet/wallet.js';
 import { fundFileStorage } from '../wallet/wallet.js';
 import { agentPolicy, configPath, initAgent, savePublicConfig } from './agent.js';
@@ -59,6 +60,7 @@ import {
 import { claimPurchase, type PurchaseGuard } from './purchase-guard.js';
 import { resourceAllowed } from './resources.js';
 import { retryGate } from './retry-gate.js';
+import { shareHost } from './sharing.js';
 import { discoverShops, isDiscovery } from './shops.js';
 import { assertSignerInput, configuredWallet } from './signer-wallet.js';
 import { type SigningResult, signingRequest, verifySigningResult } from './signing.js';
@@ -91,7 +93,8 @@ export interface Dependencies {
     | 'store'
     | 'accept'
     | 'resumeSell'
-  >;
+  > &
+    Partial<Pick<Annon, 'share' | 'resumeShare'>>;
   wallet?: typeof loadWallet;
   file?: typeof getFile;
   purchase?: typeof getPurchase;
@@ -437,6 +440,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       return { found, f, maxPrice };
     };
     const preparedBuy = o.command === 'buy' ? await prepareBuy() : undefined;
+    const hostedOrigin = o.command === 'share' ? await shareHost(c, o.shop, fetcher) : undefined;
     let selected: LocalWallet | undefined;
     if (o.command === 'fund') {
       if (d.agent) return fail('human_only', 'File funding requires a human CLI session.', 2);
@@ -519,6 +523,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
               new AdapterError(safe.code, safe.message, safe.exitCode),
               safe,
             );
+            if (code === 'budget') throw error;
             if (code === 'settlement_pending')
               throw Object.assign(error, { safetyDelayMs: (safe.retryAfterSeconds ?? 30) * 1000 });
             const waitMs =
@@ -563,6 +568,11 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         try {
           return await call();
         } catch (error) {
+          if (o.command === 'share' && submitted) {
+            if (error instanceof AnnonError && !isTransient(error))
+              throw Object.assign(error, { txHash: submitted.txHash });
+            throw new TransactionUncertain(submitted.txHash);
+          }
           if (error instanceof AdapterError && 'retryAfterMs' in error) {
             if (admissions++ >= 3) throw error;
             await wait((error as AdapterError & { retryAfterMs: number }).retryAfterMs);
@@ -666,6 +676,97 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         next: accepted
           ? 'open'
           : 'Check the payment and retry status. 1Click SUCCESS alone is not acceptance.',
+      };
+    }
+    if (o.command === 'share') {
+      if (!o.target || !hostedOrigin || !sdk.share || !sdk.resumeShare) throw usage();
+      const seller = await wallet();
+      const hosting = {
+        origin: hostedOrigin,
+        ...(seller.signUpload ? { signUpload: seller.signUpload } : {}),
+        spool: <T>(
+          stream: ReadableStream<Uint8Array>,
+          use: (source: import('../envelope/replay.js').ReplayableSource) => Promise<T>,
+        ) => withSpool(join(c.stateDir, 'hosted'), stream, use),
+      };
+      const data = await fileSource(o.target);
+      if (o.resume) {
+        if (
+          !isId(o.resume) ||
+          [o.price, o.title, o.description, o.storageBudget, o.listingStorage].some(
+            (v) => v !== undefined,
+          )
+        )
+          throw usage();
+        return { ...(await sdk.resumeShare({ fileId: o.resume, data, seller, hosting })) };
+      }
+      if (!o.price) throw usage();
+      const near = seller.identity.kind === 'near';
+      if (
+        near &&
+        (d.agent || o.json) &&
+        (!(d.agent ? c.listingStorage : (o.listingStorage ?? c.listingStorage)) ||
+          !(d.agent ? c.storageBudget : (o.storageBudget ?? c.storageBudget)))
+      )
+        throw new AdapterError(
+          'storage_required',
+          'Configure listingStorage and storageBudget, or provide --listing-storage and --storage-budget in a human CLI session, before noninteractive NEAR sharing.',
+          2,
+        );
+      const listingStorage = near
+        ? nearAmount(
+            d.agent
+              ? (c.listingStorage ?? '0.01')
+              : (o.listingStorage ?? c.listingStorage ?? '0.01'),
+          )
+        : undefined;
+      const storageBudget = near
+        ? nearAmount(
+            d.agent ? (c.storageBudget ?? '0.05') : (o.storageBudget ?? c.storageBudget ?? '0.05'),
+          )
+        : undefined;
+      if (!near && (o.listingStorage || o.storageBudget)) throw usage();
+      return {
+        ...(await sdk.share({
+          data,
+          name: basename(o.target),
+          mime: 'application/octet-stream',
+          seller,
+          price: amount(o.price),
+          hosting,
+          ...(o.title !== undefined ? { title: o.title } : {}),
+          ...(o.description !== undefined ? { description: o.description } : {}),
+          ...(listingStorage !== undefined ? { listingStorage } : {}),
+          ...(storageBudget !== undefined ? { storageBudget } : {}),
+          onSplit: async (split, fee, aboveMaximum) => {
+            if (aboveMaximum && (d.agent || o.json))
+              throw new AdapterError(
+                'protocol_fee_above_max',
+                'Review maxProtocolFee in human configuration.',
+                2,
+              );
+            const terms = {
+              seller: seller.identity,
+              host: hostedOrigin,
+              contract: c.contractId,
+              price: split.price,
+              split,
+              fee: fee ?? null,
+              listingStorage: listingStorage?.toString() ?? null,
+              purchaseStorage: storageBudget?.toString() ?? null,
+              registerDeposit: '0',
+            };
+            d.paymentTerms?.(terms);
+            if (
+              !d.agent &&
+              !o.json &&
+              !(await d.prompt?.(`${JSON.stringify(terms)}\nType yes to share: `))
+            )
+              throw new AdapterError('sale_not_approved', 'Sale terms were not approved.', 3);
+          },
+          // The configured secret is separate from the durable backup files.
+          confirmBackup: async () => {},
+        })),
       };
     }
     if (o.command === 'sell') {
@@ -810,7 +911,12 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           'The direct NEAR route requires a NEAR wallet; use 1click for another chain.',
           2,
         );
-      if (route === 'base' && !f.terms.base) throw new AnnonError('route_unavailable');
+      if (route === 'base' && !f.terms.base)
+        throw new AdapterError(
+          o.route ? 'route_unavailable' : 'origin_required',
+          'This file has no direct Base route. Use --route 1click --from-chain base to pay from Base.',
+          2,
+        );
       if (route === 'base' && (buyer.identity.kind !== 'evm' || !('signTypedData' in buyer)))
         return fail('base_wallet_required', 'The Base route requires an EVM payment wallet.', 2);
       if (route === 'base' && !c.baseRpc)

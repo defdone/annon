@@ -10,6 +10,8 @@ describe('versioned remote signer', () => {
     const q = signingRequest('evm.personalSign', 'eip155:8453', identity.id, { message: 'exact' });
     const result = { signature: await a.signMessage({ message: 'exact' }) };
     const fetcher = vi.fn(async (url, init) => {
+      expect(init?.credentials).toBe('omit');
+      expect(init?.redirect).toBe('error');
       expect(init?.headers).toMatchObject({ authorization: 'Bearer credential' });
       if (String(url).endsWith('/v1/capabilities'))
         return Response.json({

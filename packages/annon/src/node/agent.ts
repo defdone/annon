@@ -80,6 +80,7 @@ export async function agentPolicy(o: Input, env: Environment, forced = false): P
         o.moderator,
         o.maxPrice,
         o.storageBudget,
+        o.listingStorage,
         o.fundAmount,
       ].some((v) => v !== undefined))
   )
@@ -127,6 +128,7 @@ export async function savePublicConfig(
     'origins',
     'allowedResources',
     'storageBudget',
+    'listingStorage',
     'maxProtocolFee',
   ];
   const publicConfig = Object.fromEntries(Object.entries(old).filter(([k]) => allowed.includes(k)));

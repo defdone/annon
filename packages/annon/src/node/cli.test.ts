@@ -104,3 +104,35 @@ it('parses discovery commands and strictly validates paging', () => {
   ])
     expect(() => parseCli(args)).toThrow();
 });
+
+it('parses hosted share and resume without allowing new terms on resume', () => {
+  expect(
+    parseCli([
+      'share',
+      'a.txt',
+      '--price',
+      '0.10',
+      '--shop',
+      'mine',
+      '--title',
+      'File',
+      '--description',
+      'Notes',
+    ]),
+  ).toMatchObject({
+    command: 'share',
+    target: 'a.txt',
+    price: '0.10',
+    shop: 'mine',
+    title: 'File',
+    description: 'Notes',
+  });
+  expect(parseCli(['share', 'a.txt', '--resume', `0x${'11'.repeat(32)}`])).toMatchObject({
+    command: 'share',
+    resume: `0x${'11'.repeat(32)}`,
+  });
+  expect(() => parseCli(['share', 'a.txt'])).toThrow();
+  expect(() =>
+    parseCli(['share', 'a.txt', '--resume', `0x${'11'.repeat(32)}`, '--price', '1']),
+  ).toThrow();
+});

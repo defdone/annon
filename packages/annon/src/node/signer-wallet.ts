@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { base58, base64 } from '@scure/base';
 import { Account, actions, PublicKey } from 'near-api-js';
+import { signNearUpload } from '../browser/wallets.js';
 import { proveNearControl } from '../near/nep413.js';
 import { rpcReply, txOutcome } from '../near/rpc.js';
 import type { TypedData } from '../pay/eip3009.js';
@@ -105,7 +106,7 @@ export async function configuredWallet(
   if (id.kind !== 'near') throw new Error('browser/remote Solana signing is not supported');
   const signMessage = async (p: unknown) =>
     (await sign('near.nep413', p)) as { accountId: string; publicKey: string; signature: string };
-  return nearSelectorWallet(
+  const wallet = nearSelectorWallet(
     {
       getAccounts: async () => [{ accountId: id.id }],
       signAndSendTransaction: async (tx) => {
@@ -121,6 +122,8 @@ export async function configuredWallet(
         if (s.mode === 'remote') {
           if (!s.publicKey)
             throw new Error('remote NEAR transactions require the public key in config');
+          // Transport exception near_api_remote_signer: Account builds the unsigned transaction.
+          // Its provider uses the third-party Node fetch transport for nonce and block lookup.
           const unsigned = await new Account(id.id, c.nearRpc).createTransaction({
             receiverId: tx.receiverId,
             publicKey: PublicKey.fromString(s.publicKey),
@@ -186,4 +189,13 @@ export async function configuredWallet(
         signMessage,
       ),
   );
+  return {
+    ...wallet,
+    signUpload: (intent) =>
+      signNearUpload(
+        { getAccounts: async () => [{ accountId: id.id }], signMessage },
+        intent,
+        c.nearRpc,
+      ),
+  };
 }

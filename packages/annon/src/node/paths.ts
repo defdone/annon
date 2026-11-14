@@ -5,7 +5,7 @@ import { AdapterError } from './errors.js';
 
 /** Canonical paths are passed to I/O; tool-relative paths start at the operator directory. */
 export async function confinePaths(input: Input, workDir: string): Promise<Input> {
-  if (!['sell', 'open', 'verify'].includes(input.command)) return input;
+  if (!['sell', 'share', 'open', 'verify'].includes(input.command)) return input;
   if (input.command === 'verify' && /^https?:/.test(input.target ?? '')) return input;
   try {
     const root = await realpath(workDir);
@@ -36,7 +36,10 @@ export async function confinePaths(input: Input, workDir: string): Promise<Input
       }
     };
     const next = { ...input };
-    if (input.command === 'sell') {
+    if (input.command === 'share') {
+      if (!input.target) throw new Error();
+      next.target = await confined(input.target);
+    } else if (input.command === 'sell') {
       if (!input.target) throw new Error();
       next.target = await confined(input.target);
       next.output = await confined(input.output ?? `${input.target}.pay2`, true);

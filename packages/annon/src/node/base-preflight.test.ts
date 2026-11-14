@@ -215,16 +215,25 @@ it.each([
       expect(buy).toHaveBeenCalledTimes(1);
     } else {
       await expect(result).rejects.toMatchObject({
-        code: mode.startsWith('no-base')
-          ? 'route_unavailable'
-          : mode === 'wrong-wallet'
-            ? 'base_wallet_required'
-            : mode === 'self-funded'
-              ? 'transport_required'
-              : ['transport', 'disabled'].includes(mode)
-                ? 'relayer_unavailable'
-                : 'not_sponsored',
+        code:
+          mode === 'no-base-auto'
+            ? 'origin_required'
+            : mode.startsWith('no-base')
+              ? 'route_unavailable'
+              : mode === 'wrong-wallet'
+                ? 'base_wallet_required'
+                : mode === 'self-funded'
+                  ? 'transport_required'
+                  : ['transport', 'disabled'].includes(mode)
+                    ? 'relayer_unavailable'
+                    : 'not_sponsored',
       });
+      if (mode === 'no-base-auto') {
+        const error = await result.catch((e) => e);
+        const { publicError } = await import('./errors.js');
+        expect(publicError(error).message).toContain('no direct Base route');
+        expect(publicError(error).message).toContain('--route 1click --from-chain base');
+      }
       expect(buy).not.toHaveBeenCalled();
       expect(prompt).not.toHaveBeenCalled();
     }

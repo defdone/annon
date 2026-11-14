@@ -1,7 +1,12 @@
-import { AnnonError } from '../errors.js';
+import { AnnonError, type AnnonErrorCode, toPublicError } from '../errors.js';
 import { MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES } from '../limits.js';
 import { account, bytes, exactKeys } from '../settle-near/codec.js';
 import { type Terms, termsHash } from '../settle-near/terms.js';
+
+function present<T>(value: T | null | undefined): T {
+  if (value === null || value === undefined) throw new AnnonError('invalid_record');
+  return value;
+}
 
 export interface ShopManifest {
   version: 1;
@@ -37,6 +42,12 @@ export interface Shop {
   id?: string;
   info: ShopManifest;
   trusted: boolean;
+}
+export interface ShopFailure {
+  manifest: string;
+  id?: string;
+  trusted: boolean;
+  error: AnnonErrorCode;
 }
 export interface CatalogEntry {
   name: string;
@@ -285,7 +296,6 @@ async function configuredShops(
         exactKeys(entry, ['manifest']);
         const manifest = canonicalManifestUrl(entry.manifest as string);
         if (!shops.some((s) => s.manifest === manifest)) shops.push({ manifest });
-        if (shops.length > 100) throw new AnnonError('too_large');
       }
     } catch (cause) {
       if (cause instanceof AnnonError) throw cause;
@@ -298,17 +308,41 @@ export async function listShops(
   config: DiscoveryConfig = {},
   query: DiscoveryQuery = {},
   fetcher: typeof fetch = globalThis.fetch,
-): Promise<DiscoveryPage<Shop>> {
+): Promise<DiscoveryPage<Shop | ShopFailure>> {
   const q = paging(query);
   const c = validateDiscoveryConfig(config);
   const shops = await configuredShops(c, fetcher);
-  const all: Shop[] = [];
-  // Sequential bounded reads avoid a directory creating a request burst.
-  for (const shop of shops) {
-    const found = await readShop(shop, fetcher);
-    if (found.info.name.toLowerCase().includes(q.search)) all.push(found);
-  }
-  return page(all, q);
+  const all: (Shop | ShopFailure)[] = new Array(shops.length);
+  let next = 0;
+  const results = await Promise.allSettled(
+    Array.from({ length: Math.min(4, shops.length) }, async () => {
+      while (next < shops.length) {
+        const index = next++;
+        const shop = present(shops[index]);
+        try {
+          all[index] = await readShop(shop, fetcher);
+        } catch (error) {
+          if (shop.profile && error instanceof AnnonError && error.code === 'config_conflict')
+            throw error;
+          all[index] = {
+            manifest: shop.manifest,
+            ...(shop.id !== undefined ? { id: shop.id } : {}),
+            trusted: !!shop.profile,
+            error: toPublicError(error).code,
+          };
+        }
+      }
+    }),
+  );
+  for (const result of results) if (result.status === 'rejected') throw result.reason;
+  return page(
+    all.filter((shop) =>
+      ('info' in shop ? shop.info.name : (shop.id ?? shop.manifest))
+        .toLowerCase()
+        .includes(q.search),
+    ),
+    q,
+  );
 }
 function validateCatalog(value: unknown, shop: ShopManifest): CatalogEntry[] {
   if (!Array.isArray(value)) throw new TypeError('invalid catalog');

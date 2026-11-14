@@ -50,6 +50,8 @@ it.each([
   'trustContract',
   'moderator',
   'maxPrice',
+  'listingStorage',
+  'storageBudget',
 ] as const)('refuses per-call %s in agent mode', async (flag) => {
   const { agentPolicy } = await import('./agent.js');
   read.mockResolvedValue(JSON.stringify({ agent: true }));

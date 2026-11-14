@@ -886,6 +886,7 @@ describe('stdio MCP tools through SDK adapters (no network)', () => {
         'annon_open',
         'annon_recover',
         'annon_sell',
+        'annon_share',
         'annon_shops',
         'annon_status',
         'annon_verify',
@@ -3082,6 +3083,73 @@ it('returns invalid_arguments for invalid discovery paging', async () => {
         error: { code: 'invalid_arguments', exitCode: 2 },
       });
     }
+  } finally {
+    await connection.close();
+  }
+});
+
+it('annon_share is a spending tool with strict price or resume inputs', async () => {
+  const { schemas } = await import('./server.js');
+  expect(
+    schemas.share.safeParse({
+      target: 'file.txt',
+      price: '0.10',
+      shop: 'mine',
+      title: 'File',
+      description: '',
+    }).success,
+  ).toBe(true);
+  expect(schemas.share.safeParse({ target: 'file.txt' }).success).toBe(false);
+  expect(
+    schemas.share.safeParse({ target: 'file.txt', resume: `0x${'11'.repeat(32)}`, price: '1' })
+      .success,
+  ).toBe(false);
+  expect(
+    schemas.share.safeParse({ target: 'file.txt', price: '1', trustContract: true }).success,
+  ).toBe(false);
+  const execute = vi.fn(async () => ({ fileId: `0x${'11'.repeat(32)}` }));
+  const server = createServer(execute);
+  const client = new Client({ name: 'synthetic', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(a), client.connect(b)]);
+  try {
+    const listed = await client.listTools();
+    const tool = must(listed.tools.find((t) => t.name === 'annon_share'));
+    expect(tool.annotations?.readOnlyHint).toBe(false);
+    await client.callTool({
+      name: 'annon_share',
+      arguments: { target: 'file.txt', price: '0.10' },
+    });
+    expect(execute).toHaveBeenCalledWith({
+      command: 'share',
+      target: 'file.txt',
+      price: '0.10',
+      json: true,
+    });
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+it('preserves seller budget refusal and retry evidence through MCP', async () => {
+  const { AnnonError } = await import('../../annon/src/errors.js');
+  const id = `0x${'11'.repeat(32)}`;
+  const connection = await connect(async () => {
+    throw new SellError(id, {
+      cause: Object.assign(new AnnonError('budget'), { retryAfterSeconds: 37 }),
+    });
+  });
+  try {
+    const response = await connection.client.callTool({
+      name: 'annon_share',
+      arguments: { target: 'file.txt', price: '0.10' },
+    });
+    expect(response.isError).toBe(true);
+    expect(response.structuredContent).toMatchObject({
+      ok: false,
+      error: { code: 'budget', retryAfterSeconds: 37, exitCode: 4, fileId: id },
+    });
   } finally {
     await connection.close();
   }

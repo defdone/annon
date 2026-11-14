@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { terms } from '../../test/fixtures.js';
+import { must, terms } from '../../test/fixtures.js';
 import { canonicalManifestUrl, catalog, listShops, validateDiscoveryConfig } from './discovery.js';
 
 const manifestUrl = 'https://shop.test/.well-known/annon-shop.json';
@@ -201,7 +201,9 @@ it.each(['version', 'format', 'search', 'network', 'extra', 'host'] as const)(
         {},
         vi.fn(async () => Response.json(edited)),
       ),
-    ).rejects.toMatchObject({ code: 'invalid_record' });
+    ).resolves.toMatchObject({
+      items: [{ manifest: manifestUrl, trusted: false, error: 'invalid_record' }],
+    });
   },
 );
 it.each(['contract', 'network', 'relayer', 'host'] as const)(
@@ -246,7 +248,9 @@ it('rejects redirects, failed responses, invalid JSON and upstream details', asy
         {},
         vi.fn(async () => r),
       ),
-    ).rejects.toThrow();
+    ).resolves.toMatchObject({
+      items: [{ trusted: false, error: r.status === 200 ? 'invalid_record' : 'bad_response' }],
+    });
   await expect(
     listShops(
       config,
@@ -255,7 +259,7 @@ it('rejects redirects, failed responses, invalid JSON and upstream details', asy
         throw new Error('PRIVATE');
       }),
     ),
-  ).rejects.toMatchObject({ code: 'transport' });
+  ).resolves.toMatchObject({ items: [{ trusted: false, error: 'transport' }] });
 });
 it('sorts equal timestamps by fileId and binds catalog terms, hashes and service origins', async () => {
   const { termsHash } = await import('../settle-near/terms.js');
@@ -315,8 +319,8 @@ it('applies a 10-second deadline to stalled requests', async () => {
           options?.signal?.addEventListener('abort', () => reject(new Error('TIMEOUT'))),
         ),
     );
-    const pending = expect(listShops(config, {}, fetch)).rejects.toMatchObject({
-      code: 'transport',
+    const pending = expect(listShops(config, {}, fetch)).resolves.toMatchObject({
+      items: [{ trusted: false, error: 'transport' }],
     });
     await vi.waitFor(() => expect(timeout).toHaveBeenCalledWith(10000));
     controller.abort();
@@ -337,7 +341,9 @@ it('rejects an oversized declared response before reading its body', async () =>
         headers: { 'Content-Length': '65537' },
       }),
   );
-  await expect(listShops(config, {}, fetch)).rejects.toMatchObject({ code: 'too_large' });
+  await expect(listShops(config, {}, fetch)).resolves.toMatchObject({
+    items: [{ trusted: false, error: 'too_large' }],
+  });
   expect(read).not.toHaveBeenCalled();
 });
 
@@ -372,7 +378,7 @@ it('rejects valid JSON on error, redirected or substituted responses', async () 
         {},
         vi.fn(async () => response),
       ),
-    ).rejects.toMatchObject({ code: 'bad_response' });
+    ).resolves.toMatchObject({ items: [{ trusted: false, error: 'bad_response' }] });
   }
 });
 it('rejects duplicate local identities, excess local shops and invalid local profiles', () => {
@@ -479,4 +485,148 @@ it('keeps approved RPC profile configuration out of discovery results', async ()
   expect(result.items[0]).toMatchObject({ manifest: manifestUrl, id: 'local', trusted: true });
   expect(result.items[0]).not.toHaveProperty('profile');
   expect(JSON.stringify(result)).not.toContain('operator-key');
+});
+
+it('isolates third-party failures and preserves local aliases without trusting failed shops', async () => {
+  const shops = ['good', 'unreachable', 'invalid'].map((id) => ({
+    id,
+    manifest: `https://${id}.test`,
+  }));
+  const result = await listShops({ shops }, {}, async (url) => {
+    if (String(url).includes('unreachable')) throw new Error('PRIVATE_UPSTREAM');
+    return Response.json(String(url).includes('invalid') ? { version: 99 } : manifest);
+  });
+  expect(result).toMatchObject({
+    total: 3,
+    nextOffset: null,
+    items: [
+      { id: 'good', info: manifest, trusted: false },
+      {
+        id: 'unreachable',
+        manifest: canonicalManifestUrl(must(shops[1]).manifest),
+        trusted: false,
+        error: 'transport',
+      },
+      {
+        id: 'invalid',
+        manifest: canonicalManifestUrl(must(shops[2]).manifest),
+        trusted: false,
+        error: 'invalid_record',
+      },
+    ],
+  });
+  expect(result.items[1]).not.toHaveProperty('info');
+  expect(JSON.stringify(result)).not.toContain('PRIVATE_UPSTREAM');
+});
+it('fetches with bounded concurrency and keeps source order while a shop is slow', async () => {
+  let active = 0,
+    maximum = 0;
+  const releases: (() => void)[] = [];
+  const shops = Array.from({ length: 9 }, (_, n) => ({ manifest: `https://shop-${n}.test` }));
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => {
+    active++;
+    maximum = Math.max(maximum, active);
+    await new Promise<void>((resolve) => releases.push(resolve));
+    active--;
+    return Response.json(manifest);
+  });
+  const pending = listShops({ shops }, {}, fetch);
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+  // Keep the first shop pending while the other workers make progress.
+  const slow = must(releases.shift());
+  while (fetch.mock.calls.length < shops.length) {
+    for (const release of releases.splice(0)) release();
+    await vi.waitFor(() => expect(releases.length).toBeGreaterThan(0));
+  }
+  for (const release of releases.splice(0)) release();
+  slow();
+  expect((await pending).items.map((shop) => shop.manifest)).toEqual(
+    shops.map((shop) => canonicalManifestUrl(shop.manifest)),
+  );
+  expect(maximum).toBe(4);
+});
+it('caps local and directory sources independently while allowing their combined identities', async () => {
+  const shops = Array.from({ length: 100 }, (_, n) => ({ manifest: `https://local-${n}.test` }));
+  const result = await listShops(
+    { shops, shopDirectoryUrl: 'https://directory.test/list' },
+    { limit: 100, offset: 100 },
+    async (url) =>
+      Response.json(
+        String(url) === 'https://directory.test/list'
+          ? {
+              version: 1,
+              shops: Array.from({ length: 100 }, (_, n) => ({
+                manifest: `https://remote-${n}.test`,
+              })),
+            }
+          : manifest,
+      ),
+  );
+  expect(result.total).toBe(200);
+  expect(result.items).toHaveLength(100);
+  expect(result.nextOffset).toBeNull();
+});
+
+it('finishes outstanding manifest requests before surfacing a profiled deployment conflict', async () => {
+  let release!: () => void;
+  let settled = false;
+  const profile = {
+    network: 'near:mainnet' as const,
+    contract: terms.contract,
+    nearRpc: 'https://near.test',
+    relayer: manifest.relayer,
+    host: manifest.host,
+  };
+  const fetch = vi.fn<typeof globalThis.fetch>(async (url) => {
+    if (String(url) === manifestUrl) return Response.json({ ...manifest, contract: 'other.near' });
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return Response.json(manifest);
+  });
+  const pending = listShops(
+    { shops: [{ manifest: manifestUrl, profile }, { manifest: 'https://slow.test' }] },
+    {},
+    fetch,
+  );
+  void pending.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(settled).toBe(false);
+  release();
+  await expect(pending).rejects.toMatchObject({ code: 'config_conflict' });
+});
+
+it('reports an unreachable approved shop per shop while retaining its trust status', async () => {
+  const profile = {
+    network: 'near:mainnet' as const,
+    contract: 'contract.synthetic.near',
+    nearRpc: 'https://near.example',
+    baseRpc: 'https://base.example',
+    relayer: 'https://relay.example',
+    host: 'https://host.example',
+  };
+  const fetcher = vi.fn(async () => {
+    throw new Error('private upstream');
+  });
+  const result = await listShops(
+    { shops: [{ id: 'approved', manifest: 'https://shop.example', profile }] },
+    {},
+    fetcher,
+  );
+  expect(result.items).toEqual([
+    {
+      id: 'approved',
+      manifest: 'https://shop.example/.well-known/annon-shop.json',
+      trusted: true,
+      error: 'transport',
+    },
+  ]);
 });

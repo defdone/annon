@@ -1,9 +1,11 @@
-import { AnnonError } from '../errors.js';
+import { AnnonError, toPublicError } from '../errors.js';
 import type { BuyRoute } from '../routes.js';
+import { HostedSelling, type ShareHosting, type ShareOptions, shareSize } from './sharing.js';
 /** Sell, buy, open, recover and stop, using the single purchase/grant settlement model. */
 
 import { DownloadError } from '../download/download.js';
 import {
+  concat,
   type FileMeta,
   inspectHeader,
   type Listing,
@@ -126,6 +128,8 @@ export interface AnnonOptions {
   maxProtocolFee?: Pick<ProtocolFee, 'fixed' | 'bps'>;
 }
 export interface SellOptions<T extends SellData = Uint8Array> {
+  /** Hosted jobs use the shared reservation sequence; publish remains a post-registration callback. */
+  hosting?: ShareHosting & Pick<ShareOptions, 'listingStorage' | 'confirmBackup'>;
   /** Attached yoctoNEAR for a self-funded listing. */
   storageBudget?: bigint;
   /** Called before registration or Base split transactions. */
@@ -205,6 +209,8 @@ const listing = (fileId: string, f: FileInfo): Listing => ({
   ...(f.headerHash ? { publishedHeaderHash: f.headerHash } : {}),
 });
 export class SellError extends AnnonError {
+  readonly txHash?: string;
+  readonly retryAfterSeconds?: number;
   constructor(
     readonly fileId: string,
     options?: ErrorOptions,
@@ -220,11 +226,16 @@ export class SellError extends AnnonError {
       options,
     );
     this.name = 'SellError';
+    const safe = toPublicError(cause);
+    if (safe.retryAfterSeconds !== undefined) this.retryAfterSeconds = safe.retryAfterSeconds;
+    if (cause instanceof AnnonError && 'txHash' in cause && typeof cause.txHash === 'string')
+      this.txHash = cause.txHash;
   }
 }
 
 export class Annon {
   readonly store: Store<PurchaseRecord>;
+  readonly hosted: HostedSelling;
   private readonly sellerKeys: Store<SellerKeyRecord>;
   private readonly sells: Store<SellRecord>;
   private readonly recoveries: Store<RecoveryRecord>;
@@ -233,6 +244,13 @@ export class Annon {
   constructor(private readonly o: AnnonOptions) {
     account(o.contractId);
     network(o.network);
+    this.hosted = new HostedSelling(o, {
+      config: () => getConfig(o.nearRpc, o.contractId),
+      file: (id) => getFile(o.nearRpc, o.contractId, id),
+      call: (method, args, seller) => this.call(method, args, seller),
+      answer: (value, secret, id) => this.answer(value, secret, id),
+      reopen: (id, seller) => this.reopenSeller({ fileId: id, seller }),
+    });
     this.store = this.withBackup(encryptedPurchaseStore(o.rawStore, o.backupSecret), (r) =>
       exportPurchase(r, o.backupSecret),
     );
@@ -377,7 +395,150 @@ export class Annon {
       throw new PayError('network_mismatch');
     return f;
   }
+  /** Hosted sale with a pending backup saved before the first approval. */
+  private async startShare(options: ShareOptions): Promise<SellRecord> {
+    const quote = await this.hosted.quote(options);
+    await options.onSplit?.(
+      structuredClone(quote.terms.near),
+      quote.fee ?? undefined,
+      quote.fee ? protocolFeeAboveMax(options.price, quote.fee, this.o.maxProtocolFee) : false,
+    );
+    try {
+      const job = await this.hosted.begin(quote.quoteId);
+      if (!options.confirmBackup) throw new AnnonError('backup_secret_required');
+      await options.confirmBackup({
+        fileId: quote.fileId,
+        text: await this.hosted.backup(quote.fileId),
+      });
+      await this.hosted.confirmBackup(job.terms.file_id);
+      return job;
+    } catch (cause) {
+      if (cause instanceof SellError) throw cause;
+      throw new SellError(quote.fileId, { cause });
+    }
+  }
+
+  async share(options: ShareOptions) {
+    const job = await this.startShare(options);
+    return this.resumeShare({ ...options, fileId: job.terms.file_id });
+  }
+  async resumeShare(
+    options: Pick<ShareOptions, 'data' | 'seller' | 'hosting'> & { fileId: string },
+  ) {
+    try {
+      shareSize(options.data);
+      for (;;) {
+        const job = await this.hosted.load(options.fileId);
+        if (job.hosting?.result) return job.hosting.result;
+        await this.hosted.next(options.fileId, options);
+      }
+    } catch (cause) {
+      throw new SellError(options.fileId, { cause });
+    }
+  }
+  private async hostedFile<T extends SellData>(
+    original: SellRecord,
+    data: T,
+    publish: SellOptions<T>['publish'],
+  ) {
+    const job = await this.hosted.load(original.terms.file_id);
+    if (!job.hosting.result || !job.hosting.header || !original.fileKey)
+      throw new AnnonError('invalid_record');
+    const header = bytes(job.hosting.header, (job.hosting.header.length - 2) / 2);
+    const prepared = await prepareSeal(bytes(original.fileKey, 32), data, {
+      fileId: bytes(job.terms.file_id, 32),
+      name: job.name,
+      mime: job.mime,
+      authKind: identityKind(job.terms.seller) as 0 | 1 | 2,
+    });
+    if (hex(prepared.cipherHash) !== job.terms.cipher_hash) throw new SourceChangedError();
+    let consumed = false;
+    let file: import('../envelope/replay.js').SellFile<T>;
+    if (data instanceof Uint8Array) {
+      file = concat(
+        header,
+        new Uint8Array(await new Response(prepared.body()).arrayBuffer()),
+      ) as import('../envelope/replay.js').SellFile<T>;
+      consumed = true;
+    } else {
+      const reader = prepared.body().getReader();
+      let first = true;
+      file = new ReadableStream<Uint8Array>(
+        {
+          async pull(controller) {
+            if (first) {
+              first = false;
+              controller.enqueue(header);
+              return;
+            }
+            try {
+              const part = await reader.read();
+              if (part.done) {
+                consumed = true;
+                controller.close();
+                reader.releaseLock();
+              } else controller.enqueue(part.value);
+            } catch (error) {
+              controller.error(error);
+              reader.releaseLock();
+            }
+          },
+          async cancel(reason) {
+            try {
+              await reader.cancel(reason);
+            } finally {
+              reader.releaseLock();
+            }
+          },
+        },
+        { highWaterMark: 0 },
+      ) as import('../envelope/replay.js').SellFile<T>;
+    }
+    try {
+      await publish({ file, header, terms: job.terms });
+      if (!consumed) throw new AnnonError('upload_incomplete');
+    } catch (error) {
+      if (file instanceof ReadableStream) await file.cancel(error).catch(() => {});
+      throw error;
+    }
+    return {
+      terms: job.terms,
+      ...(job.baseSplit ? { baseSplit: job.baseSplit } : {}),
+      file,
+      header,
+    };
+  }
   async sell<T extends SellData>(o: SellOptions<T>) {
+    if (o.base && parseIdentity(o.seller.identity).kind !== 'evm')
+      throw new AnnonError('route_unavailable');
+    if (o.hosting) {
+      if (
+        o.fileId ||
+        o.moderator ||
+        (o.previewLen ?? 0) !== 0 ||
+        (o.base && o.base.price !== o.near.price)
+      )
+        throw new AnnonError('invalid_arguments');
+      const options: ShareOptions = {
+        data: o.data,
+        name: o.name,
+        mime: o.mime,
+        seller: o.seller,
+        price: o.near.price,
+        near: { recipients: o.near.recipients, remainder: o.near.remainder },
+        hosting: o.hosting,
+        ...(o.storageBudget !== undefined ? { storageBudget: o.storageBudget } : {}),
+        ...(o.hosting.listingStorage !== undefined
+          ? { listingStorage: o.hosting.listingStorage }
+          : {}),
+        ...(o.hosting.confirmBackup ? { confirmBackup: o.hosting.confirmBackup } : {}),
+        ...(o.onSplit ? { onSplit: o.onSplit } : {}),
+      };
+      const job = await this.startShare(options);
+      await this.resumeShare({ ...options, fileId: job.terms.file_id });
+      return this.hostedFile(job, o.data, o.publish);
+    }
+
     if ((o.data instanceof Uint8Array ? o.data.length : o.data.size) > MAX_PLAINTEXT_BYTES)
       throw new DownloadError('too_large');
     if (o.storageBudget !== undefined && (o.storageBudget <= 0n || o.storageBudget >= 2n ** 128n))
@@ -496,11 +657,22 @@ export class Annon {
     data: T;
     seller: IdentityWallet;
     publish: SellOptions<T>['publish'];
+    hosting?: ShareHosting;
   }) {
     if ((o.data instanceof Uint8Array ? o.data.length : o.data.size) > MAX_PLAINTEXT_BYTES)
       throw new DownloadError('too_large');
     const job = await this.sells.load(`annon/sell/${o.fileId}`);
     if (!job) throw new AnnonError('invalid_record', 'no saved sell job');
+    if (job.hosting && !job.published) {
+      if (!o.hosting) throw new AnnonError('transport_required');
+      await this.resumeShare({
+        fileId: o.fileId,
+        data: o.data,
+        seller: o.seller,
+        hosting: o.hosting,
+      });
+      return this.hostedFile(job, o.data, o.publish);
+    }
     if (job.published) {
       await this.o.writeBackup(job.id, await exportSell(job, this.o.backupSecret));
       throw new AnnonError('invalid_record', 'sell already published; secrets cleared');

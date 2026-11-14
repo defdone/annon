@@ -38,6 +38,7 @@ export interface Config extends DiscoveryConfig {
   >;
   allowedResources?: string[];
   storageBudget?: string;
+  listingStorage?: string;
   maxProtocolFee?: { fixed: string; bps: number };
 }
 export async function loadConfig(
@@ -112,6 +113,7 @@ export async function loadConfig(
         throw new Error('invalid protocol fee ceiling');
       c.maxProtocolFee = fee;
     }
+    if (file.listingStorage !== undefined) c.listingStorage = file.listingStorage;
     if (file.storageBudget !== undefined) c.storageBudget = file.storageBudget;
     if (file.signer) c.signer = validateSigner(file.signer);
     if (file.dailyBudget !== undefined) {

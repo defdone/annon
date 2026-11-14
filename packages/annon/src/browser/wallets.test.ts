@@ -342,7 +342,7 @@ it('rejects an absent NEP-413 result and a transaction returned for another acco
   });
   await expect(
     h.wallet().call({ receiverId: context.contractId, method: 'reopen', args: {} }),
-  ).rejects.toMatchObject({ code: 'wrong_identity' });
+  ).rejects.toMatchObject({ code: 'transaction_uncertain', txHash: 'synthetic-hash' });
 });
 
 it('reports an unavailable Base chain as wrong_chain', async () => {
@@ -399,3 +399,68 @@ it.each(['recovery', 'payment'] as const)(
     ).toBe(false);
   },
 );
+
+it('NEAR upload signs the host, intent nonce and exact upload text without callback or state', async () => {
+  const { uploadText } = await import('../download/upload.js');
+  const { signNearUpload } = await import('./wallets.js');
+  const h = near();
+  const signMessage = must(h.provider.signMessage.getMockImplementation());
+  h.provider.signMessage.mockImplementationOnce(async function (this: typeof h.provider, payload) {
+    expect(this).toBe(h.provider);
+    return signMessage(payload);
+  });
+  const intent = {
+    network: 'near:mainnet',
+    contract: 'contract.synthetic.near',
+    seller: { kind: 'near' as const, id: 'buyer.synthetic.near' },
+    fileId: `0x${'11'.repeat(32)}`,
+    cipherHash: `0x${'22'.repeat(32)}`,
+    termsHash: `0x${'33'.repeat(32)}`,
+    byteSize: 1635,
+    plaintextSize: 1024,
+    headerSize: 323,
+    hostOrigin: 'https://host.example',
+    metadataHash: `0x${'44'.repeat(32)}`,
+    nonce: `0x${'55'.repeat(32)}`,
+    expiresAt: 1800000000,
+  };
+  const result = await signNearUpload(h.provider, intent, context.nearRpc);
+  expect(result).toMatchObject({ kind: 'near', accountId: intent.seller.id, publicKey: nearKey });
+  expect(h.provider.signMessage).toHaveBeenCalledWith({
+    message: uploadText(intent),
+    recipient: intent.hostOrigin,
+    nonce: new Uint8Array(32).fill(0x55),
+  });
+  expect(rpc.isFullAccessKey).toHaveBeenCalled();
+});
+
+it('PROBE-F keeps the transaction hash when NEAR selection changes after sending', async () => {
+  const h = near();
+  h.provider.getAccounts
+    .mockResolvedValueOnce([{ accountId: 'buyer.synthetic.near' }])
+    .mockResolvedValue([{ accountId: 'other.synthetic.near' }]);
+  const value = await h
+    .wallet()
+    .call({ receiverId: 'contract.synthetic.near', method: 'register', args: {}, deposit: 0n })
+    .catch((error) => error);
+  if (value && typeof value === 'object' && 'transaction' in value)
+    expect(value).toMatchObject({ transaction: { hash: 'synthetic-transaction' } });
+  else
+    expect(value).toMatchObject({ code: 'transaction_uncertain', txHash: 'synthetic-transaction' });
+});
+
+it('keeps an uncertain NEAR transaction hash for durable reconciliation', async () => {
+  const { TransactionUncertain } = await import('../wallet/uncertain.js');
+  const h = near();
+  h.provider.signAndSendTransaction.mockRejectedValueOnce(
+    new TransactionUncertain('synthetic-near-transaction'),
+  );
+  await expect(
+    h.wallet().call({
+      receiverId: 'contract.synthetic.near',
+      method: 'fund_file_storage',
+      args: {},
+      deposit: 1n,
+    }),
+  ).rejects.toMatchObject({ code: 'transaction_uncertain', txHash: 'synthetic-near-transaction' });
+});

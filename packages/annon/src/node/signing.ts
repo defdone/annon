@@ -215,6 +215,7 @@ export function remoteSigner(o: {
         method: body === undefined ? 'GET' : 'POST',
         headers: { authorization: `Bearer ${credential}`, 'content-type': 'application/json' },
         redirect: 'error',
+        credentials: 'omit',
         cache: 'no-store',
         signal: AbortSignal.timeout(Math.max(1, Math.min(20000, q.expiresAt - Date.now()))),
         ...(body === undefined ? {} : { body: json(body) }),

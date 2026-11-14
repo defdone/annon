@@ -20,6 +20,8 @@ const api = async (path: string, body?: unknown) => {
     method: 'POST',
     headers: { authorization: `Bearer ${capability}`, 'content-type': 'application/json' },
     cache: 'no-store',
+    credentials: 'omit',
+    redirect: 'error',
     body: JSON.stringify(body ?? {}),
   });
   if (!r.ok) throw new Error('Session expired or wallet result rejected. Return to the terminal.');

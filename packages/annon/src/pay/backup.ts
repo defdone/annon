@@ -1,3 +1,5 @@
+/** Portable purchase backups and encrypted CAS storage. The 32-byte secret is user-held randomness. */
+import { type HostedCheckpoint, validateHostedRecord } from '../api/sharing.js';
 import {
   type BrowserPurchaseIndex,
   type BrowserPurchaseRecord,
@@ -6,7 +8,6 @@ import {
   purchaseStates,
   type StoredBrowserPurchase,
 } from '../browser/record.js';
-/** Portable purchase backups and encrypted CAS storage. The 32-byte secret is user-held randomness. */
 import { concat, copy } from '../envelope/pay2.js';
 import { AnnonError } from '../errors.js';
 import { keyFromSecret } from '../keys/near-ckd.js';
@@ -31,6 +32,7 @@ export interface RecoveryRecord extends Versioned {
   grant: number | null;
 }
 export interface SellRecord extends Versioned {
+  hosting?: HostedCheckpoint;
   storageBudget?: string;
   storageFunding?: 'pending' | 'funded' | 'refused';
   kind: 'sell';
@@ -156,6 +158,7 @@ function validateRecord(r: PrivateRecord) {
     return;
   }
   if ('kind' in r && r.kind === 'sell') {
+    validateHostedRecord(r);
     if (
       !Object.hasOwn(r, 'baseSplit') ||
       !(

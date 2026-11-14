@@ -92,7 +92,7 @@ try {
       const root = await import('@defdone/annon');
       for (const name of ['openTo', 'applyProtocolFee', 'applySponsoredFee', 'requiredFeeBps', 'encodeTerms','resetRelayState','verifyPreview']) assert(!(name in root));
       const browser = await import('@defdone/annon/browser');
-      for (const name of ['catalog','listShops','canonicalManifestUrl','importSellerKey','exportSellerKey','AnnonError','PayError','Pay2Error','DownloadError','CkdError','NearError','BaseRpcRateLimited','NearRpcRateLimited','TransactionUncertain','FileFundingRefused','OneClickQuoteExpired','OneClickRefused','SellError','SourceChangedError','BrowserWalletError','PurchaseLeaseBusy']) {
+      for (const name of ['UploadClient','uploadText','catalog','listShops','canonicalManifestUrl','importSellerKey','exportSellerKey','AnnonError','PayError','Pay2Error','DownloadError','CkdError','NearError','BaseRpcRateLimited','NearRpcRateLimited','TransactionUncertain','FileFundingRefused','OneClickQuoteExpired','OneClickRefused','SellError','SourceChangedError','BrowserWalletError','PurchaseLeaseBusy']) {
         assert.equal(typeof root[name], 'function'); assert.equal(root[name], browser[name]);
       }
       for (const [path,names] of [['envelope/pay2',['MAX_PREVIEW','hexBytes','sellerAddress','checkRegistration','previewLengthForLines','verifyPreview']],['pay/seller',['offerFor','ANNON_SCHEMA']],['pay/split',['SPLITS_WAREHOUSE']],['node/cli',['HELP']]]) {
@@ -116,6 +116,8 @@ try {
     `
     ${typeImports.join('\n')}
     import { catalog, listShops, canonicalManifestUrl, importSellerKey, exportSellerKey, type SellerKeyRecord, type DiscoveryConfig, type ShopManifest, type CatalogEntry, fileFundingText, type FileFundingArgs, Annon, checkBaseSponsorship, validBaseSponsorship, type BaseSponsorship, MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES, HTTP_RETRY_MAX_WAIT_SECONDS, BASE_ELIGIBILITY_MAX_AGE_SECONDS, type DownloadErrorCode } from '@defdone/annon';
+    import type { ShareOptions, Shared } from '@defdone/annon';
+    import type { SellerFacade, SaleHandle, BrowserSellerOptions } from '@defdone/annon/browser';
     import { importSellerKey as browserImportSellerKey, catalog as browserCatalog, checkBaseSponsorship as browserCheck } from '@defdone/annon/browser';
     import { RelayLedger, relay, keep, RelayError, type CheckOptions, type RelayRequest, type RelayErrorCode, type RelayState, type Sender, type KeepOptions } from '@defdone/annon/relay';
     import { createAdapter, type Input, publicError } from '@defdone/annon/node';
