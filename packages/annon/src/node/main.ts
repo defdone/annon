@@ -19,12 +19,14 @@ if (
     output: process.stdout,
     terminal: true,
     welcome: await welcome(process.env),
-    adapter: (hooks) => createAdapter(process.env, hooks),
+    adapter: (hooks) => createAdapter(process.env, { ...hooks, human: true }),
   });
   // A confirmed Ctrl-C leaves a command running; exiting ends it as it would end a one-shot run.
   process.exit(await session.run());
 }
+const human = await humanOutput(process.stdout.isTTY === true, process.env);
 const adapter = createAdapter(process.env, {
+  human,
   ...(process.stdin.isTTY && process.stderr.isTTY
     ? {
         prompt: async (message: string) => {
@@ -40,6 +42,6 @@ const adapter = createAdapter(process.env, {
   notify,
 });
 process.exitCode = await runCli(argv, adapter, (text) => process.stdout.write(`${text}\n`), {
-  human: await humanOutput(process.stdout.isTTY === true, process.env),
+  human,
   notify,
 });

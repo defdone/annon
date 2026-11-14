@@ -44,7 +44,7 @@ const shopConfig = {
 const near = 10n ** 24n;
 
 it.each([
-  ['the defaults', {}, {}, near / 100n, (near * 5n) / 100n],
+  ['the defaults', {}, {}, near / 100n, near / 5n],
   [
     'configured amounts',
     { listingStorage: '0.02', storageBudget: '0.03' },
@@ -123,6 +123,116 @@ it.each([
     }
   },
 );
+
+it('a person at a terminal reads the share terms as lines; --json-free piped runs keep the JSON prompt', async () => {
+  const ws = await workspace('share-human', shopConfig);
+  const file = join(ws.dir, 'notes.txt');
+  await writeFile(file, 'notes');
+  const nearSeller = { kind: 'near' as const, id: 'seller.synthetic.near' };
+  const split = { ...terms.near, recipients: [{ identity: nearSeller, bps: 10000 }] };
+  try {
+    const prompts: string[] = [];
+    for (const human of [true, false, undefined]) {
+      const run = createAdapter(
+        { ANNON_CONFIG: ws.config, ANNON_BACKUP_SECRET: backupSecretHex },
+        {
+          ...(human === undefined ? {} : { human }),
+          fetch: async () => Response.json(manifest),
+          prompt: async (message: string) => {
+            prompts.push(message);
+            return true;
+          },
+          wallet: async () => ({ identity: nearSeller, authorize: vi.fn() }),
+          sdk: (options) => {
+            const sdk = new Annon(options);
+            vi.spyOn(sdk, 'share').mockImplementation((async (o: ShareOptions) => {
+              await o.onSplit?.(split, undefined, false);
+              return { fileId: terms.file_id };
+            }) as never);
+            return sdk;
+          },
+        },
+      );
+      await run({ command: 'share', target: file, price: '0.1' });
+    }
+    expect(prompts[0]).toBe(
+      [
+        'Seller: seller.synthetic.near',
+        `Host: ${profile.host}`,
+        `Contract: ${profile.contract}`,
+        'Price: 0.20 USDC',
+        'Split: seller.synthetic.near 100%',
+        'Fee: none',
+        'Listing storage: 0.01 NEAR',
+        'Purchase storage: 0.2 NEAR (covers about 19 sales)',
+        'These storage amounts are proposals. Change them with --listing-storage and --storage-budget.',
+        'Type yes to share: ',
+      ].join('\n'),
+    );
+    // Without human output the prompt is the exact JSON object, byte for byte.
+    const json = `{"seller":{"kind":"near","id":"seller.synthetic.near"},"host":"${profile.host}","contract":"${profile.contract}","price":"200000","split":${JSON.stringify(split)},"fee":null,"listingStorage":"10000000000000000000000","purchaseStorage":"200000000000000000000000","registerDeposit":"0"}\nType yes to share: `;
+    expect(prompts.slice(1)).toEqual([json, json]);
+  } finally {
+    await ws.remove();
+  }
+});
+
+it('a failed seller check names both identities for a person; scripts keep the plain error', async () => {
+  const ws = await workspace('stop-wrong', shopConfig);
+  const required = { kind: 'evm' as const, id: `0xe8cc${'00'.repeat(16)}d86d` };
+  const offered = { kind: 'near' as const, id: 'alice.near' };
+  const { AnnonError, withIdentities } = await import('../errors.js');
+  try {
+    const errors = [];
+    for (const [human, json] of [
+      [true, false],
+      [true, true],
+      [false, false],
+    ] as const) {
+      const run = createAdapter(
+        { ANNON_CONFIG: ws.config, ANNON_BACKUP_SECRET: backupSecretHex },
+        {
+          human,
+          wallet: async () => ({ identity: offered, authorize: vi.fn() }),
+          sdk: (options) => {
+            const sdk = new Annon(options);
+            vi.spyOn(sdk, 'stop').mockRejectedValue(
+              withIdentities(
+                new AnnonError('wrong_identity', 'not the registered seller'),
+                required,
+                offered,
+              ),
+            );
+            return sdk;
+          },
+        },
+      );
+      errors.push(
+        publicError(
+          await run({ command: 'stop', target: terms.file_id, ...(json ? { json } : {}) }).catch(
+            (e) => e,
+          ),
+        ),
+      );
+    }
+    const plain = {
+      code: 'wrong_identity',
+      message: 'The wallet does not control the required identity.',
+      exitCode: errors[2]?.exitCode,
+    };
+    expect(errors).toEqual([
+      {
+        ...plain,
+        message:
+          "Your wallet is near:alice.near. This file's seller is evm:0xe8cc0000...d86d. Use the seller's wallet, then run the command again.",
+      },
+      plain,
+      plain,
+    ]);
+  } finally {
+    await ws.remove();
+  }
+});
 
 it('a declined NEAR share stops with sale_not_approved', async () => {
   const ws = await workspace('share-declined', shopConfig);

@@ -206,6 +206,17 @@ const messages: Partial<Record<AnnonErrorCode, string>> = {
 export function isAnnonErrorCode(code: unknown): code is AnnonErrorCode {
   return typeof code === 'string' && (annonErrorCodes as readonly string[]).includes(code);
 }
+/**
+ * Adds the identity a seller check required and the one the wallet offered to a wrong_identity
+ * error. Public errors never carry them; the CLI names them to a person at a terminal.
+ */
+export function withIdentities<E extends Error>(
+  error: E,
+  required: { kind: string; id: string },
+  offered: { kind: string; id: string },
+): E {
+  return Object.assign(error, { required, offered });
+}
 export function isTransient(error: unknown): boolean {
   const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined;
   return (

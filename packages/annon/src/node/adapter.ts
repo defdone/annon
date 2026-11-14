@@ -11,6 +11,8 @@ import type { Input } from './cli.js';
 import { loadConfig } from './config.js';
 import { AdapterError } from './errors.js';
 import { osKeychain } from './keychain.js';
+import { approvalCounter } from './output/approval-step.js';
+import { sellerIdentityError } from './output/seller-identity.js';
 import { confinePaths } from './paths.js';
 import { catalogRow, discoverShops, isDiscovery } from './shops.js';
 import { assertSignerInput, configuredWallet } from './signer-wallet.js';
@@ -51,11 +53,15 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
     }
     if ((agent || c.agent) && o.command === 'login')
       throw new AdapterError('agent_policy', 'Agent mode refuses interactive login.', 2);
+    const human = d.human === true && !o.json && !agent && c.agent !== true;
     let session: BrowserSession | undefined;
     let terms: unknown = null;
     const browser = async () => {
       if (!session) {
-        session = await (d.browser ?? startBrowserSession)({ noOpen: o.noOpen === true });
+        session = await (d.browser ?? startBrowserSession)({
+          noOpen: o.noOpen === true,
+          ...(human ? { describe: approvalCounter() } : {}),
+        });
         const port = new URL(session.url).port;
         d.notify?.(
           `Annon pairing code ${session.pairingCode}${o.noOpen ? `\n${session.url}` : ''}\nFor SSH: forward this port with ssh -L ${port}:127.0.0.1:${port} host. Use --no-open for a manual pairing URL.`,
@@ -102,6 +108,7 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
       return await createCoreAdapter(env, {
         ...d,
         agent: agent || c.agent === true,
+        human,
         browserApprovals: signer?.mode === 'browser',
         paymentTerms: (value) => {
           terms = value;
@@ -122,6 +129,8 @@ export function createAdapter(env: Environment = process.env, d: Dependencies = 
             }
           : {}),
       })(o);
+    } catch (error) {
+      throw human ? sellerIdentityError(error, c.signer !== undefined) : error;
     } finally {
       await session?.close();
     }

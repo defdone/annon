@@ -799,7 +799,11 @@ it('enforces the canonical wallet identity and selected host before any effect',
       ...h.input,
       seller: { ...seller, identity: { kind: 'evm', id: `0x${'11'.repeat(20)}` } },
     }),
-  ).rejects.toMatchObject({ code: 'wrong_identity' });
+  ).rejects.toMatchObject({
+    code: 'wrong_identity',
+    required: seller.identity,
+    offered: { kind: 'evm', id: `0x${'11'.repeat(20)}` },
+  });
   await expect(
     h.engine.next(h.q.fileId, {
       ...h.input,

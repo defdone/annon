@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import { terms } from '../../../test/fixtures.js';
+import { localTime } from '../../browser/login-format.js';
 import { termsHash } from '../../settle-near/terms.js';
 import { runCli } from '../cli.js';
 import { AdapterError } from '../errors.js';
@@ -346,8 +347,13 @@ it('status, open, verify and recover are one or two lines; other commands list t
     Line two.
     fileId: 0x2222222222222222222222222222222222222222222222222222222222222222
     url: https://files.test/f/one
-    expiresAt: null"
+    expiresAt: no expiry"
   `);
+  const expiring = await both(['share', 'a.txt', '--price', '0.1'], {
+    fileId: terms.file_id,
+    expiresAt: 1795294406,
+  });
+  expect(expiring.text.split('\n')[1]).toBe(`expiresAt: ${localTime(1795294406000)} (1795294406)`);
 });
 
 it('a human error is one readable line with its code, facts and wait; --json keeps the envelope', async () => {

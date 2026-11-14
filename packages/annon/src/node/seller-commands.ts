@@ -6,8 +6,15 @@ import { amount, nearAmount } from './amounts.js';
 import type { CommandSession } from './command-context.js';
 import { AdapterError, usage } from './errors.js';
 import { fileSource, newOutput, withSpool, writeStream } from './io.js';
+import { sellSplitText, shareTermsText } from './output/seller-terms.js';
 import type { selectedShopRules } from './shops.js';
 import { identity } from './wallets.js';
+
+/** What an interactive NEAR share proposes when neither config nor flags set the amounts. */
+const DEFAULT_LISTING_STORAGE = '0.01';
+const DEFAULT_STORAGE_BUDGET = '0.2';
+const PROPOSAL_HINT =
+  'These storage amounts are proposals. Change them with --listing-storage and --storage-budget.';
 
 /**
  * `share`: hosts the file with the selected shop and registers it; in a human session the seller
@@ -58,14 +65,22 @@ async function share(
     );
   const listingStorage = near
     ? nearAmount(
-        d.agent ? (c.listingStorage ?? '0.01') : (o.listingStorage ?? c.listingStorage ?? '0.01'),
+        d.agent
+          ? (c.listingStorage ?? DEFAULT_LISTING_STORAGE)
+          : (o.listingStorage ?? c.listingStorage ?? DEFAULT_LISTING_STORAGE),
       )
     : undefined;
   const storageBudget = near
     ? nearAmount(
-        d.agent ? (c.storageBudget ?? '0.05') : (o.storageBudget ?? c.storageBudget ?? '0.05'),
+        d.agent
+          ? (c.storageBudget ?? DEFAULT_STORAGE_BUDGET)
+          : (o.storageBudget ?? c.storageBudget ?? DEFAULT_STORAGE_BUDGET),
       )
     : undefined;
+  const proposed =
+    near &&
+    !d.agent &&
+    (!(o.listingStorage ?? c.listingStorage) || !(o.storageBudget ?? c.storageBudget));
   if (!near && (o.listingStorage || o.storageBudget)) throw usage();
   return {
     ...shopRules,
@@ -99,11 +114,10 @@ async function share(
           registerDeposit: '0',
         };
         d.paymentTerms?.(terms);
-        if (
-          !d.agent &&
-          !o.json &&
-          !(await d.prompt?.(`${JSON.stringify(terms)}\nType yes to share: `))
-        )
+        const shown = d.human
+          ? `${shareTermsText(terms)}${proposed ? `\n${PROPOSAL_HINT}` : ''}`
+          : JSON.stringify(terms);
+        if (!d.agent && !o.json && !(await d.prompt?.(`${shown}\nType yes to share: `)))
           throw new AdapterError('sale_not_approved', 'Sale terms were not approved.', 3);
       },
       // The configured secret is separate from the durable backup files.
@@ -191,19 +205,21 @@ async function sell(ctx: CommandSession): Promise<Record<string, unknown>> {
           2,
         );
       if (!c.relayer || seller.identity.kind === 'near') return;
-      const description = [
-        'Sponsored sale split:',
-        ...(fee
-          ? [
-              `Protocol fee: ${fee.fixed} USDC base units + ${fee.bps} bps.`,
-              ...(aboveMaximum ? ['This exceeds maxProtocolFee.'] : []),
-            ]
-          : []),
-        ...split.recipients.map(
-          (r, i) =>
-            `${identityJson(r.identity)}: ${(r.bps / 100).toFixed(2)}%${i === split.remainder ? ' (rounding remainder)' : ''}`,
-        ),
-      ].join('\n');
+      const description = d.human
+        ? `Sponsored sale split:\n${sellSplitText(split, fee, aboveMaximum === true)}`
+        : [
+            'Sponsored sale split:',
+            ...(fee
+              ? [
+                  `Protocol fee: ${fee.fixed} USDC base units + ${fee.bps} bps.`,
+                  ...(aboveMaximum ? ['This exceeds maxProtocolFee.'] : []),
+                ]
+              : []),
+            ...split.recipients.map(
+              (r, i) =>
+                `${identityJson(r.identity)}: ${(r.bps / 100).toFixed(2)}%${i === split.remainder ? ' (rounding remainder)' : ''}`,
+            ),
+          ].join('\n');
       if (!d.agent && !o.json) {
         d.notify?.(description);
         if (!(await d.prompt?.(`${description}\nType yes to register: `)))

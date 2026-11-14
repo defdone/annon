@@ -6,6 +6,7 @@ import type { PublicError } from '../../errors.js';
 import type { Input } from '../cli.js';
 import { catalogText, shopAddedText, shopsText } from './discovery.js';
 import { buyText, failure, loginText, openText, recoverText, statusText } from './purchase.js';
+import { hostingExpiry } from './seller-terms.js';
 import { cleanText, fields } from './text.js';
 
 type Result = Record<string, unknown>;
@@ -16,6 +17,9 @@ function shareText(r: Result): string {
     rules?: { text: string };
     shop?: { manifest: string; name: string };
   };
+  const expiry = rest.expiresAt;
+  if (expiry === null || (typeof expiry === 'number' && Number.isSafeInteger(expiry)))
+    rest.expiresAt = hostingExpiry(expiry);
   return [
     ...(rules ? [`Shop rules (${shop?.manifest}):\n${cleanText(rules.text, true)}`] : []),
     fields(rest),

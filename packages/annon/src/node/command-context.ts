@@ -20,6 +20,11 @@ export interface Dependencies {
   browser?: typeof startBrowserSession;
   paymentTerms?: (terms: unknown) => void;
   browserApprovals?: boolean;
+  /**
+   * A person reads the output at a terminal: approval prompts and progress lines are readable
+   * text. The adapter clears it for `--json` and agent mode, which keep their exact output.
+   */
+  human?: boolean;
   sdk?: (
     options: AnnonOptions,
   ) => Pick<

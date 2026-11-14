@@ -17,6 +17,7 @@ import {
   waitingLine,
 } from './approval-status.js';
 import { LOGIN_PAGE_CSS, LOGIN_PAGE_HTML } from './login-page.js';
+import type { SigningRequest } from './signing.js';
 
 const equal = (a: string, b: string) =>
   Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -44,6 +45,8 @@ export async function startBrowserSession(o: {
   timeoutMs?: number;
   /** Human progress lines; stderr by default, never stdout. */
   notify?: (line: string) => void;
+  /** Human mode: a line naming each request, printed before its waiting line. */
+  describe?: (action: SigningRequest) => string;
 }): Promise<BrowserSession> {
   const notify = o.notify ?? ((line: string) => void process.stderr.write(`${line}\n`));
   let asset = o.asset;
@@ -330,6 +333,7 @@ export async function startBrowserSession(o: {
         };
         pending = entry;
         advance(entry.action);
+        if (o.describe) notify(o.describe(action as SigningRequest));
         notify(waitingLine(action.expiresAt - Date.now()));
       }),
   };

@@ -45,7 +45,7 @@ Configure the reviewed deployment, NEAR wallet and backup secret first (see
 [quickstart.md](quickstart.md)). Replace the account, file ID and amounts with your own values. With
 hosted selling (`annon share`), a NEAR seller also sends the registration and the storage funding
 from their own wallet: `--listing-storage` (default 0.01 NEAR) covers the listing and
-`--storage-budget` (default 0.05 NEAR) the file's purchase storage, and both are shown before you
+`--storage-budget` (default 0.2 NEAR, about 19 sales) the file's purchase storage, and both are shown before you
 approve ([selling.md](selling.md)). The steps below are for self-hosted `annon sell`.
 
 1. Prepay contract storage with `storage_deposit` (the [quickstart](quickstart.md#5-open-it-on-another-computer)
