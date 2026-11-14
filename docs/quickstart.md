@@ -91,8 +91,8 @@ the Base payment through it, and the public endpoint rate-limits those reads.
 
 ```sh
 annon login --wallet evm
-annon verify https://host.example/f/FILE --trust-contract
-annon buy https://host.example/f/FILE --route base
+annon verify https://demo.annon.dev/f/what-we-are-building --trust-contract
+annon buy https://demo.annon.dev/f/what-we-are-building --route base
 annon status 0xPURCHASE_ID
 annon open 0xPURCHASE_ID --output file.pdf
 ```
