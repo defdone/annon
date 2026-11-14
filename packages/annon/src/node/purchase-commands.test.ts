@@ -482,3 +482,38 @@ it('open for an agent defers the download after a host download limit', async ()
     await ws.remove();
   }
 });
+
+it('open refuses a purchase backup made for another contract before any key or file work', async () => {
+  const ws = await workspace('open-other-contract');
+  const record = purchaseRecord({ contract: 'other.near' });
+  const backup = join(ws.dir, 'purchase.backup');
+  await writeFile(backup, await exportPurchase(record, backupSecret));
+  const local = join(ws.dir, 'file.pay2');
+  await writeFile(local, 'ciphertext');
+  const output = join(ws.dir, 'out');
+  const wallet = vi.fn();
+  const accept = vi.fn(async () => true);
+  const openTo = vi.fn();
+  try {
+    const run = createAdapter(
+      { ANNON_CONFIG: ws.config, ANNON_BACKUP_SECRET: backupSecretHex, ANNON_WALLET: 'near' },
+      {
+        wallet,
+        sdk: scriptedSdk(accept, (sdk) => vi.spyOn(sdk, 'openTo').mockImplementation(openTo)),
+      },
+    );
+    const error = await run({ command: 'open', target: backup, file: local, output }).catch(
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe('backup contract mismatch');
+    expect(publicError(error)).toMatchObject({ code: 'operation_failed', exitCode: 1 });
+    // No acceptance check, wallet, key claim or decryption, and no output file.
+    expect(accept).not.toHaveBeenCalled();
+    expect(wallet).not.toHaveBeenCalled();
+    expect(openTo).not.toHaveBeenCalled();
+    await expect(access(output)).rejects.toMatchObject({ code: 'ENOENT' });
+  } finally {
+    await ws.remove();
+  }
+});

@@ -626,3 +626,44 @@ it('an agent 1Click buy that fails after the quote returns its budget reservatio
     await h.ws.remove();
   }
 });
+
+it.each([
+  ['network', { network: 'near:testnet' }],
+  ['contract', { contract: 'other.near' }],
+] as const)(
+  'a buy refuses a listing registered for another %s before any wallet or payment',
+  async (_name, change) => {
+    const h = await harness();
+    const listed = { ...h.sealed.info, terms: { ...h.sealed.info.terms, ...change } };
+    const file = vi.fn(async () => listed);
+    const run = createAdapter(
+      { ANNON_CONFIG: h.ws.config, ANNON_BACKUP_SECRET: backupSecretHex },
+      {
+        fetch: h.fetcher,
+        prompt: h.prompt,
+        paymentTerms: h.paymentTerms,
+        wallet: h.wallet,
+        file,
+        purchase: async () => null,
+        sdk: (options) => {
+          const sdk = new Annon(options);
+          vi.spyOn(sdk, 'buy').mockImplementation((o) => h.buy(o, sdk));
+          return sdk;
+        },
+      },
+    );
+    try {
+      const error = await run(h.input()).catch((e) => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toBe('deployment mismatch');
+      expect(publicError(error)).toMatchObject({ code: 'operation_failed', exitCode: 1 });
+      expect(file).toHaveBeenCalledWith('https://near.test', contract, fileId);
+      expect(h.wallet).not.toHaveBeenCalled();
+      expect(h.prompt).not.toHaveBeenCalled();
+      expect(h.paymentTerms).not.toHaveBeenCalled();
+      expect(h.buy).not.toHaveBeenCalled();
+    } finally {
+      await h.ws.remove();
+    }
+  },
+);

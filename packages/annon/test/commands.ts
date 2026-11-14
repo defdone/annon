@@ -120,14 +120,14 @@ export async function sealedFile(
 
 /** A valid saved NEAR-route purchase record for the fixture file. */
 export function purchaseRecord(
-  o: { headerHash?: string; nonce?: string; expiresAt?: string } = {},
+  o: { headerHash?: string; nonce?: string; expiresAt?: string; contract?: string } = {},
 ): PurchaseRecord {
   const secret = new Uint8Array(32).fill(7);
   const p: Purchase = {
     version: 2,
     refund: buyer,
     network: 'near:mainnet',
-    contract,
+    contract: o.contract ?? contract,
     route: 'near-usdc',
     asset: NEAR_USDC,
     file_id: fileId,
@@ -161,7 +161,7 @@ export function purchaseRecord(
     attempts: [],
     terms: {
       network: p.network,
-      contractId: contract,
+      contractId: p.contract,
       fileId,
       buyer: buyer.id,
       seller: initial.seller,
