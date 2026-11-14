@@ -366,7 +366,7 @@ interface crates of [near/mpc](https://github.com/near/mpc). Payments use
 [0xSplits](https://splits.org) contracts on Base and the [1Click API](https://docs.near-intents.org)
 of NEAR Intents. Tooling: TypeScript, Vitest, Biome, esbuild and Changesets.
 
-**AI assistance.** I wrote Annon with AI coding assistants, Claude Code and Codex, for
+**AI assistance.** We wrote Annon with AI coding assistants, Claude Code and Codex, for
 implementation, reviews and tests. Changes are reviewed and tested in CI. Manual mainnet tests of the
 payment paths with small amounts of real USDC are part of the release checklist.
 
