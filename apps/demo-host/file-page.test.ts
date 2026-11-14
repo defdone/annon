@@ -56,9 +56,83 @@ describe('file page', () => {
     expect(html).toContain(`href="https://annon.dev/demo#file=${FILE_ID}"`);
     const clean = filePage({ fileId: FILE_ID, title: 'T', url: 'https://h.example/f/t' }, 'offer');
     expect(clean).not.toMatch(/src=|<link|<script|@import|url\(/i);
-    expect(html.match(/https?:\/\/[^\s"<]+/g)).toEqual([
+    // The resource URL repeats once per command; no other address appears.
+    expect([...new Set(html.match(/https?:\/\/[^\s"<]+/g))]).toEqual([
       `https://annon.dev/demo#file=${FILE_ID}`,
       'https://h.example/f/a&quot;&lt;b&gt;',
     ]);
+    expect(html.split('https://h.example/f/a&quot;&lt;b&gt;')).toHaveLength(3); // near, 1click
+    expect(html).not.toMatch(/(href|src)="\/\//);
+  });
+
+  const file = { fileId: FILE_ID, title: 'T', url: 'https://h.example/f/t' };
+  const offer = (routes: ('near' | 'base' | '1click')[]) =>
+    filePage(file, 'offer', { price: 100000n, seller: { kind: 'near', id: 's.near' }, routes });
+  const near = 'annon buy https://h.example/f/t --route near';
+  const base = 'annon buy https://h.example/f/t --route base';
+  const other = 'annon buy https://h.example/f/t --from-chain solana';
+
+  it('lists one buy command per route the offer has', () => {
+    const all = offer(['near', 'base', '1click']);
+    expect(all).toContain('<h2>Buy with the command line</h2>');
+    for (const command of [near, base, other])
+      expect(all).toContain(`<code class="cmd">${command}</code>`);
+    expect(all.indexOf(near)).toBeLessThan(all.indexOf(base));
+    expect(all.indexOf(base)).toBeLessThan(all.indexOf(other));
+    expect(all).toContain(
+      '<code>--from-chain</code> takes solana, ethereum, arbitrum, optimism, polygon, avalanche and other chains 1Click supports.',
+    );
+    expect(all).toContain(
+      'The route decides which wallet signs: a NEAR account for NEAR, an EVM wallet for Base.',
+    );
+    // The cap sentence sits right below the commands.
+    expect(all).toContain(
+      '</ul>\n<p>Every purchase requires a spending cap. Add --max-price 0.2 to set a 0.20 USDC maximum, or set ANNON_MAX_PRICE or maxPrice in your configuration. Choose a cap appropriate for this file.</p>',
+    );
+    expect(all).toContain(
+      'With --from-chain, the command returns a deposit address on that chain for you to fund.',
+    );
+    // A file without Base terms (a NEAR or Solana seller) gets no Base command.
+    const noBase = offer(['near', '1click']);
+    expect(noBase).toContain(near);
+    expect(noBase).toContain(other);
+    expect(noBase).not.toContain('--route base');
+    expect(noBase).not.toContain('<span class="r">Base</span>');
+    // Without the chain the routes are unknown: only the ones every file has.
+    const unknown = filePage(file, 'offer');
+    expect(unknown).toContain(near);
+    expect(unknown).toContain(other);
+    expect(unknown).not.toContain('--route base');
+  });
+
+  it('wraps commands instead of scrolling them sideways', () => {
+    const html = offer(['near', 'base', '1click']);
+    expect(html.match(/<code class="cmd">/g)).toHaveLength(3);
+    expect(html).toMatch(/\.cmd\{[^}]*overflow-wrap:anywhere/);
+    expect(html).toMatch(/\.cmd\{[^}]*white-space:normal/);
+    expect(html).not.toMatch(/overflow-x|white-space:pre|<pre/);
+  });
+
+  it('tells earlier buyers how to open or recover the file', () => {
+    const line =
+      '<h2>Already bought it?</h2><p>Open it in the demo shop under My purchases in the browser you bought it with, or recover it with the same wallet: <code>annon recover --help</code>.</p>';
+    expect(offer(['near', '1click'])).toContain(line);
+    expect(filePage(file, 'stopped')).toContain(line);
+    for (const state of ['taken_down', 'expired'] as const) {
+      const html = filePage(file, state);
+      expect(html, state).not.toContain('Already bought it?');
+      expect(html, state).not.toContain('annon buy');
+    }
+  });
+
+  it('uses the annon.dev print style and draws the mark inline', () => {
+    const html = offer(['near']);
+    expect(html).toContain('<p class="k">Annon file</p>');
+    expect(html).toContain('<svg width="28" height="28" viewBox="0 0 120 120" aria-hidden="true"');
+    expect(html).not.toMatch(/border-radius/);
+    for (const color of ['#faf8f2', '#111111', '#b3261e', '#d9d3c7', '#f1ede3'])
+      expect(html).toContain(color);
+    expect(html).toContain('Newsreader,"Iowan Old Style",Georgia,serif');
+    expect(html).toContain('"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace');
   });
 });

@@ -876,6 +876,10 @@ describe('file page for browsers', () => {
     );
     expect(html).toContain(`href="https://annon.dev/demo#file=${FILE_ID}"`);
     expect(html).toContain('annon buy https://demo.example/f/hello --route near');
+    expect(html).toContain('annon buy https://demo.example/f/hello --route base');
+    expect(html).toContain('annon buy https://demo.example/f/hello --from-chain solana');
+    expect(html).toContain('Every purchase requires a spending cap. Add --max-price 0.2');
+    expect(html).toContain('Already bought it?');
     // Inline style only: the CSP allows it and nothing else.
     expect(html).toContain('<style>');
     expect(html).not.toMatch(/<script|src=|<link|@import|url\(/i);
@@ -916,6 +920,60 @@ describe('file page for browsers', () => {
     const r = await fetch(`${url}/f/hello`);
     expect(r.headers.get('content-type')).toBeNull();
     expect(await r.text()).toBe('');
+  });
+
+  it('shows no Base command for a file without Base terms; other answers stay byte-identical', async () => {
+    const url = await start(
+      { files: await files(), getFile: async () => info({ base: false }) },
+      offerServe,
+    );
+    const page = await raw(`${url}/f/hello`, { Accept: CHROME });
+    expect(page.status).toBe(402);
+    const html = page.body.toString();
+    expect(html).toContain('NEAR, 1Click (from another chain)');
+    expect(html).toContain('annon buy https://demo.example/f/hello --route near');
+    expect(html).toContain('annon buy https://demo.example/f/hello --from-chain solana');
+    expect(html).not.toContain('--route base');
+    expect(html).toContain('Already bought it?');
+    const baseline = await raw(`${url}/f/hello`);
+    expect(baseline.status).toBe(402);
+    expect(baseline.body.length).toBe(0);
+    expect(
+      without(baseline.headers, [
+        'connection',
+        'keep-alive',
+        'content-length',
+        'transfer-encoding',
+      ]),
+    ).toEqual([
+      'Vary: Origin',
+      'X-Content-Type-Options: nosniff',
+      `Content-Security-Policy: ${CSP}`,
+      'X-Frame-Options: DENY',
+      'Cache-Control: no-store',
+      `PAYMENT-REQUIRED: ${OFFER}`,
+    ]);
+    for (const headers of [
+      { Accept: '*/*' },
+      { Accept: 'application/json' },
+      { Accept: 'application/json, text/html' },
+      { Accept: CHROME, 'Annon-Buyer-Proof': 'proof' },
+      { Accept: CHROME, Range: 'bytes=0-' },
+    ]) {
+      const r = await raw(`${url}/f/hello`, headers);
+      expect(r, JSON.stringify(headers)).toEqual(baseline);
+    }
+  });
+
+  it('shows no Base command when the host has no facilitator', async () => {
+    const url = await start(
+      { files: await files(), getFile: async () => info(), facilitator: undefined } as never,
+      offerServe,
+    );
+    const html = (await raw(`${url}/f/hello`, { Accept: CHROME })).body.toString();
+    expect(html).toContain('NEAR, 1Click (from another chain)');
+    expect(html).toContain('annon buy https://demo.example/f/hello --route near');
+    expect(html).not.toContain('--route base');
   });
 
   it('escapes an injection attempt in the title and description', async () => {
