@@ -459,33 +459,53 @@ async function lastBlock(url: string, from: number, validBefore: bigint, now: He
   }
 }
 
-/** The block of an `AuthorizationCanceled` for this nonce in `[from, to]`, searched in chunks. */
-async function canceledAfter(url: string, e: Expected, from: number, to: number) {
-  // Note: 10,000 blocks per query, the common RPC limit; a long-expired purchase takes several.
-  for (let at = from; at <= to; at += 10_000) {
-    const end = Math.min(to, at + 9_999);
-    const topics = [
-      TOPICS.authorizationCanceled,
-      toHex(addressWord(e.from)),
-      e.nonce.toLowerCase(),
-    ];
+/** Note: blocks per eth_getLogs, the common RPC limit (QuickNode refuses a wider range). */
+const LOG_RANGE = 10_000;
+
+/**
+ * USDC's logs for `topics` (a list in a position matches any of it) in `[from, to]`, read in
+ * chunks of `LOG_RANGE` blocks, earliest first. Each chunk's logs must answer that chunk's query.
+ * Stops after the first chunk with a log `enough` accepts; an empty range reads nothing.
+ */
+async function usdcLogs(
+  url: string,
+  usdc: string,
+  topics: (string | string[])[],
+  from: number,
+  to: number,
+  enough: (l: EvmLog) => boolean,
+): Promise<EvmLog[]> {
+  const all: EvmLog[] = [];
+  for (let at = from; at <= to; at += LOG_RANGE) {
+    const end = Math.min(to, at + LOG_RANGE - 1);
     const found = await ask(url, 'eth_getLogs', [
-      { address: e.usdc, fromBlock: qty(at), toBlock: qty(end), topics },
+      { address: usdc, fromBlock: qty(at), toBlock: qty(end), topics },
     ]);
     if (!Array.isArray(found)) return malformed('eth_getLogs result');
-    for (const l of found.map(evmLog).filter((l) => !l.removed)) {
+    const logs = found.map(evmLog).filter((l) => !l.removed);
+    // Every log must answer the query; anything else is an RPC that can't be believed.
+    for (const l of logs) {
       if (
-        l.address !== strip(e.usdc) ||
-        l.topics.join() !== topics.map(strip).join() ||
+        l.address !== strip(usdc) ||
+        l.topics.length !== topics.length ||
+        !topics.every((t, i) => [t].flat().some((x) => strip(x) === l.topics[i])) ||
         l.block_number < at ||
         l.block_number > end
       ) {
         return malformed('eth_getLogs returned a log the query did not ask for');
       }
-      return l.block_number;
     }
+    all.push(...logs);
+    if (logs.some(enough)) break;
   }
-  return null;
+  return all;
+}
+
+/** The block of an `AuthorizationCanceled` for this nonce in `[from, to]`. */
+async function canceledAfter(url: string, e: Expected, from: number, to: number) {
+  const topics = [TOPICS.authorizationCanceled, toHex(addressWord(e.from)), e.nonce.toLowerCase()];
+  const [first] = await usdcLogs(url, e.usdc, topics, from, to, () => true);
+  return first ? first.block_number : null;
 }
 
 /**
@@ -504,34 +524,21 @@ export async function paymentStatus(
   const final = await block(url, 'finalized');
   const now = await head(url);
   const last = await lastBlock(url, e.block, e.validBefore, now);
-  const query = {
-    address: e.usdc,
-    fromBlock: qty(e.block),
-    toBlock: qty(last),
-    topics: [
+  // A used authorization in any chunk wins over a cancellation, so only that ends the search.
+  const usedTopic = strip(TOPICS.authorizationUsed);
+  const logs = await usdcLogs(
+    url,
+    e.usdc,
+    [
       [TOPICS.authorizationUsed, TOPICS.authorizationCanceled],
       toHex(addressWord(e.from)),
       e.nonce.toLowerCase(),
     ],
-  };
-  const found = await ask(url, 'eth_getLogs', [query]);
-  if (!Array.isArray(found)) return malformed('eth_getLogs result');
-  const logs = found.map(evmLog).filter((l) => !l.removed);
-  // Every log must answer the query; anything else is an RPC that can't be believed.
-  for (const l of logs) {
-    if (
-      l.address !== strip(e.usdc) ||
-      l.topics.length !== 3 ||
-      !(query.topics[0] as string[]).some((t) => strip(t) === l.topics[0]) ||
-      l.topics[1] !== topicOf(e.from) ||
-      l.topics[2] !== strip(e.nonce) ||
-      l.block_number < e.block ||
-      l.block_number > last
-    ) {
-      return malformed('eth_getLogs returned a log the query did not ask for');
-    }
-  }
-  const used = logs.find((l) => l.topics[0] === strip(TOPICS.authorizationUsed));
+    e.block,
+    last,
+    (l) => l.topics[0] === usedTopic,
+  );
+  const used = logs.find((l) => l.topics[0] === usedTopic);
   if (used) {
     const receipt = await ask(url, 'eth_getTransactionReceipt', [`0x${used.transaction_hash}`]);
     const paid = paymentLogs(receipt, e);
