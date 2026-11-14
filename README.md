@@ -356,8 +356,7 @@ We tag the submitted commit `hackathon-submission`, and
 shows everything built in between.
 
 The team is defdone. Before the hackathon we built Payaion, a closed file-selling app on Base, and
-the PAY1 file format that PAY2 extends. No Payaion code is in this repository; Payaion will be the
-first app to adopt Annon.
+the PAY1 file format that PAY2 extends. No Payaion code is in this repository.
 
 **Libraries.** The SDK uses [@noble/curves](https://github.com/paulmillr/noble-curves),
 [@noble/hashes](https://github.com/paulmillr/noble-hashes), [@scure/base](https://github.com/paulmillr/scure-base),
