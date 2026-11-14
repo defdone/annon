@@ -42,12 +42,19 @@ import {
   browserDownload,
   downloadProgress,
 } from './download.js';
+import {
+  checkReconcilable,
+  type ReconcileOptions,
+  type ReconcileResult,
+  reconcileFailed,
+} from './reconcile.js';
 import type {
   BrowserPurchaseIndex,
   BrowserPurchaseRecord,
   BrowserPurchaseState,
 } from './record.js';
 
+export type { ReconcileOptions, ReconcileResult } from './reconcile.js';
 export type { BrowserPurchaseRecord, BrowserPurchaseState } from './record.js';
 export type PurchaseSdk = Pick<Annon, 'buy' | 'accept' | 'open' | 'recover' | 'proveRecovery'>;
 const INDEX = 'annon/browser/index';
@@ -806,6 +813,27 @@ export class BrowserPurchaseController {
       )
         await session.change({ state: 'accepted' });
     });
+  }
+  /** Check a failed purchase again under its lease. Never creates, starts or pays. */
+  async reconcile(options: ReconcileOptions = {}): Promise<ReconcileResult> {
+    const before = await this.read();
+    const busy = this.busy(before);
+    if (busy) throw busy;
+    checkReconcilable(before);
+    return this.withLease((session) =>
+      reconcileFailed(
+        session,
+        {
+          accept: (record) => this.options.sdk.accept(record),
+          restorePurchase: (record) => this.storage.restorePurchase(record),
+          loadCanonical: (id) =>
+            encryptedPurchaseStore(this.storage.rawStore, this.storage.backupSecret).load(
+              purchaseKey(id),
+            ),
+        },
+        options,
+      ),
+    );
   }
   async recover(wallet: IdentityWallet): Promise<void> {
     return this.withLease(async (session) => {
