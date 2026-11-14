@@ -12,6 +12,8 @@ import {
 } from '../shops/discovery.js';
 import { configPath } from './agent.js';
 import type { Input } from './cli.js';
+import { AdapterError } from './errors.js';
+import { cleanText } from './output/text.js';
 import type { Environment } from './wallets.js';
 
 export const isDiscovery = (input: Input) => ['shops', 'shop', 'catalog'].includes(input.command);
@@ -90,4 +92,38 @@ export async function selectedShopRules(
   return shop.info.rules
     ? { shop: { manifest: shop.manifest, name: shop.info.name }, rules: shop.info.rules }
     : {};
+}
+
+/**
+ * `buy <row>`: the resource URL of that row in the listing `catalog` prints for the same `--shop`
+ * and `--search`. The buy then checks the file and its terms as for a URL typed by hand.
+ */
+export async function catalogRow(
+  input: Input,
+  env: Environment,
+  notify: ((message: string) => void) | undefined,
+  fetcher: typeof fetch = globalThis.fetch,
+): Promise<Input> {
+  const row = Number(input.target);
+  const config = validateDiscoveryConfig(await readConfig(configPath(input, env)));
+  const listing = await catalog(
+    config,
+    {
+      offset: row - 1,
+      limit: 1,
+      ...(input.search !== undefined ? { search: input.search } : {}),
+      ...(input.shop !== undefined ? { shop: input.shop } : {}),
+    },
+    fetcher,
+  );
+  const [entry] = listing.items;
+  if (!entry)
+    throw new AdapterError(
+      'invalid_arguments',
+      `The catalog has no row ${row}. Run annon catalog to list the rows.`,
+      2,
+    );
+  notify?.(`Row ${row}: ${cleanText(entry.title)} (${entry.url})`);
+  const { shop: _shop, search: _search, ...rest } = input;
+  return { ...rest, target: entry.url };
 }

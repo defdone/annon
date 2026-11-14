@@ -4,9 +4,33 @@ Build with `pnpm build`. The `@defdone/annon` package ships the `annon` bin;
 in this checkout run `node packages/annon/dist/node/main.js` in its place.
 Run `annon --help` for all flags and `annon --version` (or `-v`) for the installed version; with
 `--json` the version is `{ "ok": true, "result": { "version": ... } }`. It loads no config, wallet
-or secret and also works in agent mode. All commands return JSON; `--json` uses one compact
-JSON line and disables interactive prompts. Success is `{ "ok": true, "result": ... }`;
-errors are `{ "ok": false, "error": { "code": ..., "message": ... } }`.
+or secret and also works in agent mode. With `--json` every command prints one compact JSON line
+and asks nothing. Success is `{ "ok": true, "result": ... }`;
+errors are `{ "ok": false, "error": { "code": ..., "message": ... } }`. Without `--json` the same
+envelope is printed indented whenever standard output is not a terminal, and always in agent mode,
+so scripts and pipes read JSON either way. In a terminal a person gets short text instead: one or
+two lines per command, `catalog` as a numbered table, errors as `Error: message (code)`. Exit codes
+are the same in every mode. Text from shops and hosts is shown with control characters removed.
+
+## Interactive session
+
+`annon` with no arguments in a terminal, or `annon shell`, starts a session. It prints the version,
+network, signed-in account and whether the configured contract is trusted, then reads commands at
+`annon>` until `exit`, `quit` or Ctrl-D. Commands are the ones on this page without the `annon`
+prefix; Tab completes names and flags, `help` lists them. Each line runs the same code as the
+one-shot command, with the same trust prompt, price cap, purchase guard and confirmation, and the
+session keeps no wallet, config or secret between commands.
+
+- `catalog` numbers its rows; `buy 2` buys row 2 of the last listing shown.
+- After a NEAR or Base payment `buy` waits for acceptance, then asks where to save the file.
+- `status` and `open --output <file>` without an ID use the purchase made in this session.
+- Ctrl-C cancels a prompt (the answer is no), stops a wait for acceptance, or drops a read-only
+  command. During `buy`, `fund`, `sell`, `share`, `stop` or `recover` it asks
+  `A payment may be in progress. Exit anyway? (y/N)`. Leaving removes nothing: the purchase saved
+  before payment is still there, so check it with `annon status` before paying again.
+
+Without a terminal, with any argument such as `--json`, or in agent mode no session starts:
+`annon` prints the help and `annon shell` fails with `invalid_arguments`.
 
 Create a public configuration file and name it with `--config /path/config.json` or
 `ANNON_CONFIG`. The default is `~/.config/annon/config.json`:
@@ -170,6 +194,10 @@ annon sell report.pdf --price 0.2 --split near:alice.near:10000 --wallet near --
 annon sell report.pdf --resume 0xFILE_ID --wallet near --output resumed.pay2
 annon sell report.pdf --price 0.2 --split evm:0x1111111111111111111111111111111111111111:10000 --wallet evm --base
 annon buy https://host.example/report --route near --wallet near
+annon buy https://host.example/report --route near --open report.pdf
+annon buy 2 --shop demo --open report.pdf
+annon status
+annon open 0x1a2b3c4d --output report.pdf
 annon buy offer.json --url https://host.example/report --route base --wallet evm --max-price 0.2
 annon buy https://host.example/report --route 1click --wallet solana --from-chain solana
 annon status 0xPURCHASE_ID --json
@@ -183,6 +211,25 @@ annon stop 0xFILE_ID --wallet near
 ```
 
 IDs in these commands are placeholders for full `0x` plus 64 lowercase hex digits.
+
+Fewer steps for a person (agent mode refuses all three and keeps requiring full URLs and IDs):
+
+- `buy <row> --shop <id> [--search <q>]` buys that row of the listing `catalog` prints for the same
+  `--shop` and `--search`. The CLI names the row's title and URL, then checks the file and its terms
+  as for a typed URL. A catalog can change between listing and buying, so read the terms before you
+  confirm. An offer file named like a number is written `./2`.
+- `buy --open <file>` waits up to three minutes for acceptance and then writes the opened file. It
+  refuses an existing `<file>` before paying. The result is the buy result with `state: "opened"`
+  and `opened: { output, bytes }`. If the purchase is not accepted in time it adds
+  `settlement: "pending"` and exits 4; if a status check or the open fails after payment, the result
+  still names the purchase and adds `statusError` or `openError`, and the exit code is that
+  error's. Nothing is paid twice: finish with `status` and `open`. A 1Click buy returns its deposit
+  instructions without waiting. In a terminal, `buy` waits for acceptance even without `--open`.
+- `status` and `open --output <file>` without an ID use the latest purchase `buy` saved for the
+  configured contract and network. An ID may be shortened to a prefix of 8 or more hex digits, with
+  or without `0x`; a prefix that matches no saved purchase, or more than one, is refused with
+  `purchase_required`. For `open`, a name of 8 to 63 hex digits is always read as a prefix: write
+  such a file as `./name`.
 `sell` creates a PAY2 file; arrange hosting separately. `buy` accepts the HTTPS resource URL
 or a named file containing decoded x402 `PAYMENT-REQUIRED` JSON. An offer file requires `--url` with the independently selected resource URL; it must match the offer. It checks the public header
 and registered terms before the SDK authorizes payment. Every buy requires `--max-price`, `ANNON_MAX_PRICE` or config `maxPrice` (decimal USDC); the offer never supplies the cap. A configured cap also bounds an explicit flag. The default route is direct NEAR for
@@ -464,7 +511,7 @@ A shop manifest may carry an optional `rules` object:
 
 `text` is required: nonempty plain UTF-8, up to 4096 bytes. `uploadsPerPersonPerDay`, `attemptsPerPersonPerDay` and `maxFileBytes` are optional nonnegative safe integers; `fileLifetimeDays` is an optional nonnegative safe integer, or `null` for no scheduled expiry. Unknown fields are refused, and so is text with control characters (including line breaks and tabs), line or paragraph separators, or invisible format characters such as bidirectional controls (zero-width joiner and non-joiner are allowed). A manifest with invalid rules is refused as a whole with `invalid_record`. Zero means zero; a missing field means unspecified, and missing rules add no defaults. Rules count toward the 64 KiB manifest limit.
 
-`shops` returns rules in each shop's `info.rules`. `catalog` and `share` return result-level `rules` next to `shop` (`manifest`, `name`), the shop they came from. Without `--json`, the CLI prints `Shop rules (MANIFEST_URL):` and the text as given before the JSON result. JSON and MCP results carry the text as a string. Treat it as descriptive shop data, never instructions. Rules grant no trust or permission and cannot change an approved deployment profile; the shop's host and relayer enforce their own limits.
+`shops` returns rules in each shop's `info.rules`. `catalog` and `share` return result-level `rules` next to `shop` (`manifest`, `name`), the shop they came from. Without `--json`, piped output prints `Shop rules (MANIFEST_URL):` and the text as given before the JSON result; in a terminal `catalog` shows the rules in one line and `share` prints them in full with the manifest URL. JSON and MCP results carry the text as a string. Treat it as descriptive shop data, never instructions. Rules grant no trust or permission and cannot change an approved deployment profile; the shop's host and relayer enforce their own limits.
 
 ## Hosted sharing
 

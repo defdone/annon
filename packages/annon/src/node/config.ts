@@ -237,11 +237,13 @@ export async function loadConfig(
   }
 }
 export type TrustPrompt = (description: string) => Promise<boolean>;
+/** Trust is recorded per network, NEAR RPC and contract. */
+export const trustId = (c: Config) => JSON.stringify([c.network, c.nearRpc, c.contractId]);
 export async function trustContract(c: Config, explicit: boolean, prompt?: TrustPrompt) {
   const dir = join(c.stateDir, 'trust');
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const store = fileStore<{ id: string; revision: number }>(dir);
-  const id = JSON.stringify([c.network, c.nearRpc, c.contractId]);
+  const id = trustId(c);
   if (await store.load(id)) return;
   if (
     !explicit &&

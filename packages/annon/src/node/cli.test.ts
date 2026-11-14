@@ -198,3 +198,27 @@ it('prints shop list rules with manifest provenance', async () => {
   );
   expect(lines[0]).toBe(`Shop rules (${manifest}):\nT`);
 });
+
+it('parses the shorter buyer flow: latest purchase, row numbers and buy --open', () => {
+  expect(parseCli(['status'])).toEqual({ command: 'status' });
+  expect(parseCli(['open', '--output', 'a.bin'])).toEqual({ command: 'open', output: 'a.bin' });
+  expect(parseCli(['buy', '2', '--shop', 'demo', '--search', 'notes', '--open', 'a.bin'])).toEqual({
+    command: 'buy',
+    target: '2',
+    shop: 'demo',
+    search: 'notes',
+    open: 'a.bin',
+  });
+  expect(parseCli(['buy', 'https://files.test/f', '--open', 'a.bin']).open).toBe('a.bin');
+  for (const args of [
+    // --shop and --search only pick the listing a row number refers to.
+    ['buy', 'https://files.test/f', '--shop', 'demo'],
+    ['buy', 'offer.json', '--search', 'notes'],
+    ['buy'],
+    ['verify'],
+    ['stop'],
+    ['status', '--open', 'a.bin'],
+    ['shell'],
+  ])
+    expect(() => parseCli(args)).toThrow(AdapterError);
+});

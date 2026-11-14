@@ -57,6 +57,7 @@ import {
   requestContext,
 } from './command-context.js';
 import { open, recover, status, statusOnChain } from './purchase-commands.js';
+import { withPurchaseRef } from './purchase-ref.js';
 import { createSdk } from './relay-transport.js';
 import { sell, share, stop } from './seller-commands.js';
 import { fileBudget, fund, fundWithNearWallet } from './storage-commands.js';
@@ -77,6 +78,9 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
       o.trustContract === true || c.trustContract === true,
       o.json || d.agent ? undefined : d.prompt,
     );
+    // Agents always name the full purchase ID.
+    if ((o.command === 'status' || o.command === 'open') && !d.agent)
+      o = await withPurchaseRef(o, c);
     const ctx = requestContext(env, d, fetcher, wait, o, c);
     if (o.command === 'budget') return fileBudget(ctx);
     if (o.command === 'verify') return verifyFile(ctx);

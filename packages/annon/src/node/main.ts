@@ -2,7 +2,28 @@
 import { createInterface } from 'node:readline/promises';
 import { createAdapter } from './adapter.js';
 import { runCli } from './cli.js';
+import { createSession } from './shell/session.js';
+import { humanOutput, sessionAllowed, welcome } from './shell/welcome.js';
 
+const argv = process.argv.slice(2);
+const notify = (message: string) => process.stderr.write(`${message}\n`);
+if (
+  await sessionAllowed(
+    argv,
+    process.stdin.isTTY === true && process.stdout.isTTY === true,
+    process.env,
+  )
+) {
+  const session = createSession({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true,
+    welcome: await welcome(process.env),
+    adapter: (hooks) => createAdapter(process.env, hooks),
+  });
+  // A confirmed Ctrl-C leaves a command running; exiting ends it as it would end a one-shot run.
+  process.exit(await session.run());
+}
 const adapter = createAdapter(process.env, {
   ...(process.stdin.isTTY && process.stderr.isTTY
     ? {
@@ -16,8 +37,9 @@ const adapter = createAdapter(process.env, {
         },
       }
     : {}),
-  notify: (message) => process.stderr.write(`${message}\n`),
+  notify,
 });
-process.exitCode = await runCli(process.argv.slice(2), adapter, (text) =>
-  process.stdout.write(`${text}\n`),
-);
+process.exitCode = await runCli(argv, adapter, (text) => process.stdout.write(`${text}\n`), {
+  human: await humanOutput(process.stdout.isTTY === true, process.env),
+  notify,
+});

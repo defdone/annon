@@ -12,7 +12,8 @@ You need Node.js 22.18 or newer.
 npm install -g @defdone/annon@alpha
 ```
 
-The packages are on the npm `alpha` tag. To use a build from source instead (see
+The packages are on the npm `alpha` tag. If npm reports no matching version right after a release,
+retry with `npm i -g @defdone/annon@alpha --prefer-online`. To use a build from source instead (see
 [Build and test](../README.md#build-and-test)), run `node packages/annon/dist/node/main.js` in place
 of `annon`.
 
@@ -76,7 +77,14 @@ MyNearWallet no longer connects to apps.
 ## 4. Buy and open
 
 Check the file, buy it, wait until the purchase is accepted, and open it. Pick the path that matches
-where your money is. Each path starts with `login`; skip it if you already signed in with that
+where your money is. In a terminal the CLI answers in short text and `buy` waits for acceptance
+itself; with `--json`, or when its output is piped, every command prints the JSON envelope and
+returns at once.
+
+Run `annon` with no arguments to work in one session instead: it keeps running until you type
+`exit`, the commands need no `annon` prefix, `catalog` numbers a shop's files and `buy 2` buys row 2
+and asks where to save it.
+ Each path starts with `login`; skip it if you already signed in with that
 wallet in step 3. Login remembers one wallet, so sign in again to switch.
 
 - `--trust-contract` records once that you trust this contract to release keys.
@@ -88,6 +96,8 @@ wallet in step 3. Login remembers one wallet, so sign in again to switch.
   second `annon buy` of the same file is refused with `purchase_open` unless you pass `--force`.
 - If `buy` ends with `state: "uncertain"` (exit code 4), the wallet may have sent the payment. Do not
   pay again: run `annon status` with the purchase ID until it says `accepted`.
+- `annon status` and `annon open --output <file>` without an ID use your latest purchase. An ID can
+  be shortened to its first 8 or more hex digits.
 
 ### Pay on NEAR
 
@@ -96,13 +106,12 @@ You need a NEAR wallet with USDC on NEAR and a little NEAR for gas.
 ```sh
 annon login --wallet near
 annon verify https://demo.annon.dev/f/what-we-are-building --trust-contract
-annon buy https://demo.annon.dev/f/what-we-are-building --route near
-annon status 0xPURCHASE_ID
-annon open 0xPURCHASE_ID --output what-we-are-building.pdf
+annon buy https://demo.annon.dev/f/what-we-are-building --route near --open what-we-are-building.pdf
 ```
 
-You approve the USDC transfer in your wallet, `status` says `accepted`, and `open` writes the
-decrypted file.
+You approve the USDC transfer in your wallet. `--open` waits until NEAR accepts the purchase and
+writes the decrypted file. Without it, or if acceptance takes longer than three minutes (exit code
+4), finish with `annon status` and `annon open --output what-we-are-building.pdf`.
 
 ### Pay on Base
 

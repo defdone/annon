@@ -1,6 +1,11 @@
 import { parseArgs } from 'node:util';
+import type { PublicError } from '../errors.js';
 import type { BuyRoute } from '../routes.js';
-import { publicError, usage } from './errors.js';
+import { isRow } from './adapter-checks.js';
+import { type BuyFollow, buyFlow } from './buy-flow.js';
+import { camel, common, perCommand } from './cli-flags.js';
+import { AdapterError, publicError, usage } from './errors.js';
+import { humanError, humanResult } from './output/human.js';
 import { version } from './version.js';
 
 export type Command =
@@ -74,65 +79,13 @@ export interface Input {
   file?: string;
   url?: string;
   output?: string;
+  /** `buy --open <path>`: wait for acceptance, then write the opened file there. */
+  open?: string;
 }
-const common = [
-  'no-open',
-  'json',
-  'config',
-  'contract-id',
-  'near-rpc',
-  'base-rpc',
-  'network',
-  'state-dir',
-  'relayer',
-  'trust-contract',
-  'wallet',
-  'evm-key-file',
-  'solana-key-file',
-  'near-key-file',
-  'near-account',
-  'near-public-key',
-  'backup-secret-file',
-];
-const perCommand: Record<Command, string[]> = {
-  shops: ['search', 'limit', 'offset'],
-  shop: ['id'],
-  catalog: ['shop', 'search', 'limit', 'offset'],
-  fund: [],
-  budget: [],
-  login: [],
-  init: [
-    'signer',
-    'credential-env',
-    'credential-keychain',
-    'agent',
-    'recovery',
-    'key-env',
-    'keychain-entry',
-    'new-key',
-    'daily-budget',
-  ],
-  share: ['resume', 'price', 'shop', 'title', 'description', 'storage-budget', 'listing-storage'],
-  sell: ['resume', 'price', 'split', 'base', 'moderator', 'output', 'storage-budget'],
-  buy: [
-    'force',
-    'origin',
-    'route',
-    'from-chain',
-    'from-asset',
-    'refund-to',
-    'recovery',
-    'max-price',
-    'moderator',
-    'url',
-  ],
-  open: ['purchase', 'file', 'url', 'output'],
-  recover: ['recovery', 'purchase'],
-  stop: [],
-  verify: [],
-  status: [],
-};
 const bareInit = ['json', 'config', 'stateDir', 'backupSecretFile'];
+/** Without a target `status` and `open` use the latest purchase; these take none at all. */
+const optionalTarget = ['status', 'open'];
+const noTarget = ['recover', 'login', 'init', 'shops', 'catalog'];
 export function parseCli(argv: string[]): Input {
   try {
     const keys = [...new Set([...common, ...Object.values(perCommand).flat()])];
@@ -154,18 +107,15 @@ export function parseCli(argv: string[]): Input {
       throw usage();
     const cmd = command as Command;
     if (
-      (['recover', 'login', 'init', 'shops', 'catalog'].includes(cmd) && target !== undefined) ||
-      (!['recover', 'login', 'init', 'shops', 'catalog'].includes(cmd) && !target)
+      (noTarget.includes(cmd) && target !== undefined) ||
+      (![...noTarget, ...optionalTarget].includes(cmd) && !target)
     )
       throw usage();
     if (cmd === 'shop' && target !== 'add') throw usage();
     const allowed = [...common, ...perCommand[cmd]];
     if (Object.keys(parsed.values).some((k) => !allowed.includes(k))) throw usage();
     const values: Record<string, string | boolean | number | undefined> = Object.fromEntries(
-      Object.entries(parsed.values).map(([k, v]) => [
-        k.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()),
-        v,
-      ]),
+      Object.entries(parsed.values).map(([k, v]) => [camel(k), v]),
     );
     for (const key of ['limit', 'offset']) {
       if (values[key] !== undefined) {
@@ -213,6 +163,13 @@ export function parseCli(argv: string[]): Input {
     )
       throw usage();
     if (cmd === 'recover' && !values.recovery) throw usage();
+    // --shop and --search only select the catalog listing a row number refers to.
+    if (
+      cmd === 'buy' &&
+      (values.shop !== undefined || values.search !== undefined) &&
+      !isRow(target)
+    )
+      throw usage();
     if (values.route && !['near', 'base', '1click'].includes(String(values.route))) throw usage();
     if (values.wallet && !['evm', 'solana', 'near'].includes(String(values.wallet))) throw usage();
     return {
@@ -227,6 +184,7 @@ export function parseCli(argv: string[]): Input {
 }
 const versionFlags = ['--version', '-v'];
 const HELP = `annon <command> [options]
+annon (no arguments, in a terminal) or annon shell: interactive session; type help inside
 shops [--search <q>] [--limit <n>] [--offset <n>]
 shop add <url> [--id <alias>]
 catalog [--shop <id>] [--search <q>] [--limit <n>] [--offset <n>]
@@ -239,12 +197,13 @@ sell <file> --resume <file-id> [--output <PAY2>]
 fund <file-id> <NEAR>
 budget <file-id>
 sell <file> [--storage-budget <NEAR>] --price <USDC> --split <kind:id:bps,...> [--base] [--moderator <account>] [--output <PAY2>]
-buy <url|offer.json> [--route near|base|1click] [--origin <configured name>] [--from-chain <chain>] [--from-asset <1Click asset>] [--refund-to <address>] [--recovery <kind:id>] [--max-price <USDC> or configured cap] [--url <expected resource for offer.json>] [--moderator <trusted account>]
-open <purchase-id|backup|PAY2> [--purchase <id|backup>] [--file <PAY2> | --url <url>] --output <file>
+buy <url|offer.json|catalog row number --shop <id> [--search <q>]> [--open <file>] [--route near|base|1click] [--origin <configured name>] [--from-chain <chain>] [--from-asset <1Click asset>] [--refund-to <address>] [--recovery <kind:id>] [--max-price <USDC> or configured cap] [--url <expected resource for offer.json>] [--moderator <trusted account>]
+open [purchase-id|id prefix|backup|PAY2] [--purchase <id|id prefix|backup>] [--file <PAY2> | --url <url>] --output <file>
 recover --recovery <kind:id> [--purchase <id>]
 stop <file-id>
 verify <PAY2|url>
-status <purchase-id>
+status [purchase-id|id prefix]
+status and open without an id use the latest purchase; an id prefix needs 8 or more hex digits.
 Common: --json --config <file> --contract-id <account> --near-rpc <url> --base-rpc <url>
 --network <near:mainnet> --state-dir <dir> --relayer <url> --trust-contract
 --wallet evm|solana|near --evm-key-file <file> --solana-key-file <file> --near-key-file <file>
@@ -255,12 +214,48 @@ Secrets: env ANNON_EVM_PRIVATE_KEY, ANNON_SOLANA_KEYPAIR, ANNON_NEAR_CREDENTIALS
 named files. See packages/annon/CLI.md. --version prints the installed version.
 Exit: 0 success (buy may need deposit), 1 operation failed, 2 arguments/config, 3 trust required, 4 purchase pending or uncertain.
 `;
+/** How one command line is presented and followed up; the defaults are the script contract. */
+export interface RunOptions extends BuyFollow {
+  /** Readable text in place of the JSON envelope. `--json` always wins. */
+  human?: boolean;
+}
+type Result = Record<string, unknown> | undefined;
+/** 4: not settled. A pending status, or a buy whose payment may be on chain or is not accepted yet. */
+function exitCode(input: Input, result: Result): number {
+  if (!result) return 0;
+  if (input.command === 'status' && result.state === 'pending') return 4;
+  if (input.command !== 'buy') return 0;
+  const failed = (result.openError ?? result.statusError) as PublicError | undefined;
+  if (failed) return failed.exitCode;
+  return result.state === 'uncertain' || result.settlement === 'pending' ? 4 : 0;
+}
+/** The script contract: shop rules as text in pretty mode, then one JSON envelope. */
+function writeJson(input: Input, result: unknown, compact: boolean, write: (text: string) => void) {
+  if (!compact && ['shops', 'catalog', 'share'].includes(input.command)) {
+    const show = (value: unknown) => {
+      const r = value as {
+        rules?: { text: string };
+        shop?: { manifest: string };
+        manifest?: string;
+        info?: { rules?: { text: string } };
+      };
+      const rules = r.info?.rules ?? r.rules;
+      if (rules) write(`Shop rules (${r.shop?.manifest ?? r.manifest}):\n${rules.text}`);
+    };
+    show(result);
+    const items = (result as { items?: unknown[] }).items;
+    if (Array.isArray(items)) for (const item of items) show(item);
+  }
+  write(JSON.stringify({ ok: true, result }, null, compact ? undefined : 2));
+}
 export async function runCli(
   argv: string[],
   execute: (input: Input) => Promise<unknown>,
   write: (text: string) => void,
+  options: RunOptions = {},
 ): Promise<number> {
   const json = argv.includes('--json') || argv.includes('--json=true');
+  const human = options.human === true && !json;
   if (argv.length === 0 || argv.includes('--help')) {
     write(HELP);
     return 0;
@@ -274,35 +269,24 @@ export async function runCli(
     return 0;
   }
   try {
+    if (argv[0] === 'shell')
+      throw new AdapterError(
+        'invalid_arguments',
+        'The interactive session needs a terminal, takes no options and is not available in agent mode.',
+        2,
+      );
     const input = parseCli(argv);
-    const result = await execute(input);
-    if (!json && ['shops', 'catalog', 'share'].includes(input.command)) {
-      const show = (value: unknown) => {
-        const r = value as {
-          rules?: { text: string };
-          shop?: { manifest: string };
-          manifest?: string;
-          info?: { rules?: { text: string } };
-        };
-        const rules = r.info?.rules ?? r.rules;
-        if (rules) write(`Shop rules (${r.shop?.manifest ?? r.manifest}):\n${rules.text}`);
-      };
-      show(result);
-      const items = (result as { items?: unknown[] }).items;
-      if (Array.isArray(items)) for (const item of items) show(item);
-    }
-    write(JSON.stringify({ ok: true, result }, null, json ? undefined : 2));
-    // 4: not settled. A pending status, or a buy whose payment may be on chain (uncertain).
-    return result &&
-      typeof result === 'object' &&
-      'state' in result &&
-      ((input.command === 'status' && result.state === 'pending') ||
-        (input.command === 'buy' && result.state === 'uncertain'))
-      ? 4
-      : 0;
+    const result = await buyFlow(input, execute, human, options);
+    if (human) write(humanResult(input, result as Result));
+    else writeJson(input, result, json, write);
+    return exitCode(input, result as Result);
   } catch (error) {
     const safe = publicError(error);
-    write(JSON.stringify({ ok: false, error: safe }, null, json ? undefined : 2));
+    write(
+      human
+        ? humanError(safe)
+        : JSON.stringify({ ok: false, error: safe }, null, json ? undefined : 2),
+    );
     return safe.exitCode;
   }
 }

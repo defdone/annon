@@ -1,11 +1,10 @@
 /** Buyer commands before a purchase exists: `verify` a file and `buy` it. */
-import { mkdir, readdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { inspect, inspectHeader, MAX_HEADER, parseHeader } from '../envelope/pay2.js';
 import { AnnonError } from '../errors.js';
 import { fileStorageBalance, getConfig, getPurchase } from '../near/rpc.js';
 import { OneClick } from '../oneclick/oneclick.js';
-import type { EncryptedRecord } from '../pay/backup.js';
 import { purchaseKey } from '../pay/purchase.js';
 import { fileStore } from '../pay/store-node.js';
 import { checkBaseSponsorship } from '../relay/capabilities.js';
@@ -25,6 +24,7 @@ import {
   validatePaymentToken,
 } from './payment-terms.js';
 import { claimPurchase, type PurchaseGuard } from './purchase-guard.js';
+import { rememberPurchase, savedRecordIds } from './purchase-ref.js';
 import { resourceAllowed } from './resources.js';
 
 type PreparedBuy = Awaited<ReturnType<typeof prepareBuy>>;
@@ -204,11 +204,9 @@ async function buy(
   const guardDir = join(c.stateDir, 'purchase-guards');
   await mkdir(guardDir, { recursive: true, mode: 0o700 });
   const known: string[] = [];
-  for (const name of await readdir(storeDir)) {
-    if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
-    const envelope = JSON.parse(await readFile(join(storeDir, name), 'utf8')) as EncryptedRecord;
-    if (!isId(envelope.id)) continue;
-    const saved = await sdk.store.load(purchaseKey(envelope.id));
+  for (const id of await savedRecordIds(storeDir)) {
+    if (!isId(id)) continue;
+    const saved = await sdk.store.load(purchaseKey(id));
     if (
       saved?.purchase.file_id === found.fileId &&
       saved.purchase.contract === c.contractId &&
@@ -264,6 +262,7 @@ async function buy(
       beforeSave: async (record) => {
         if (renewalError) throw renewalError;
         await guard.saved(record.id);
+        await rememberPurchase(c, record.id);
       },
       recovery: buyer,
       ...(baseSponsorship ? { baseSponsorship } : {}),
@@ -351,7 +350,9 @@ async function buy(
       ...(source ? { source } : {}),
       next: bought.uncertain
         ? `The wallet may have sent this payment. Do not pay again. Run annon status ${bought.record.id} until it is accepted.`
-        : 'Fund the deposit if instructed, then check status and open this purchase.',
+        : bought.instructions
+          ? 'Fund the deposit as instructed, then check status and open this purchase.'
+          : `Payment sent. Run annon status ${bought.record.id}, then annon open ${bought.record.id} --output <file>.`,
     };
   } catch (error) {
     // Only failures before the SDK returns can release a 1Click reservation.

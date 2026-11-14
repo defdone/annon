@@ -70,6 +70,7 @@ export async function agentPolicy(o: Input, env: Environment, forced = false): P
       o.command === 'login' ||
       (o.config !== undefined && resolve(o.config) !== resolve(pinned)) ||
       o.stateDir !== undefined ||
+      o.open !== undefined ||
       [
         o.contractId,
         o.nearRpc,
@@ -86,7 +87,7 @@ export async function agentPolicy(o: Input, env: Environment, forced = false): P
   )
     throw new AdapterError(
       'agent_policy',
-      'Agent mode pins deployment, trust, price and state policy; per-call overrides, init and login are refused.',
+      'Agent mode pins deployment, trust, price and state policy; per-call overrides, buy --open, init and login are refused.',
       2,
     );
   return agent;
