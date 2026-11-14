@@ -118,7 +118,7 @@ purchases with the wallet you pass in (`evmWallet`, `solanaWallet`, `nearKeyPair
 
 For sponsored calls through a relayer instead of your own NEAR account, `send` posts to the
 relayer's `/v1/relay` endpoint and waits for its result. The CLI's adapter,
-[`packages/annon/src/node/adapter.ts`](https://github.com/defdone/annon/blob/master/packages/annon/src/node/adapter.ts),
+[`packages/annon/src/node/core-adapter.ts`](https://github.com/defdone/annon/blob/master/packages/annon/src/node/core-adapter.ts),
 implements that transport and is the complete reference integration, including trust, prompts and
 backups.
 

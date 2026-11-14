@@ -2,14 +2,8 @@
 import {
   metadataHash,
   normalizeMetadata,
-  parseUpload,
-  type UploadAuth,
-  type UploadAuthorization,
-  type UploadBaseSplit,
   UploadClient,
   type UploadIntent,
-  type UploadManifest,
-  type UploadMetadata,
   type UploadPublished,
   type UploadResult,
   uploadOrigin,
@@ -17,11 +11,11 @@ import {
   verifyUploadAuthorization,
 } from '../download/upload.js';
 import { sha256 } from '../envelope/pay2.js';
-import { type PreparedSeal, prepareSeal, type SellData, type Spool } from '../envelope/replay.js';
+import { type PreparedSeal, prepareSeal, type SellData } from '../envelope/replay.js';
 import { AnnonError } from '../errors.js';
 import { keyFromSecret, oneTimeKey } from '../keys/near-ckd.js';
 import { MAX_PLAINTEXT_BYTES } from '../limits.js';
-import { type FileInfo, readOutcome, txOutcome, view } from '../near/rpc.js';
+import { readOutcome, txOutcome, view } from '../near/rpc.js';
 import { encryptedSellStore, exportSell, type SellRecord } from '../pay/backup.js';
 import { createSplit } from '../pay/split.js';
 import type { Store } from '../pay/store.js';
@@ -31,11 +25,9 @@ import {
   type ProtocolFee,
   protocolFeeAboveMax,
 } from '../relay/fees.js';
-import { type HostingReservation, parseReservation } from '../relay/reservation.js';
 import { bytes, compare, hex } from '../settle-near/codec.js';
 import {
   encodeIdentity,
-  type Identity,
   identityJson,
   identityKind,
   parseIdentity,
@@ -44,115 +36,40 @@ import {
 import { registerTextV2, type Terms, termsHash } from '../settle-near/terms.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
 import type { IdentityWallet, NearWallet } from '../wallet/wallet.js';
-import type { AnnonOptions } from './annon.js';
+import type { AnnonOptions } from './annon-types.js';
+import { assets, salt, shareSteps, validateHostedRecord } from './hosted-record.js';
+import type {
+  HostedCheckpoint,
+  HostedSellRecord,
+  ShareContext,
+  ShareOptions,
+  ShareQuote,
+  ShareStep,
+} from './sharing-types.js';
+
+export { shareSteps, validateHostedRecord } from './hosted-record.js';
+export type {
+  HostedCheckpoint,
+  HostedSellRecord,
+  ShareContext,
+  Shared,
+  ShareHosting,
+  ShareOptions,
+  ShareQuote,
+  ShareStep,
+} from './sharing-types.js';
 
 function present<T>(value: T | null | undefined): T {
   if (value === null || value === undefined) throw new AnnonError('invalid_record');
   return value;
 }
-
 export function shareSize(data: SellData): number {
   const size = data instanceof Uint8Array ? data.length : data.size;
   if (!Number.isSafeInteger(size) || size < 0) throw new AnnonError('invalid_arguments');
   if (size > MAX_PLAINTEXT_BYTES) throw new AnnonError('too_large');
   return size;
 }
-export type ShareStep = 'stage' | 'split' | 'deposit' | 'register' | 'fund' | 'publish';
-export interface ShareHosting {
-  origin: string;
-  /** Required only for a NEAR seller; signs the exact upload-specific NEP-413 payload. */
-  signUpload?: (intent: UploadIntent) => Promise<UploadAuth>;
-  /** Browsers supply a ciphertext Blob spool; Node supplies a disk spool. */
-  spool?: Spool;
-  body?: (
-    source: import('../envelope/replay.js').ReplayableSource,
-  ) => Promise<Blob | ReadableStream<Uint8Array>>;
-}
-export interface ShareOptions {
-  data: SellData;
-  name: string;
-  mime: string;
-  seller: IdentityWallet;
-  /** USDC base units. The default split pays this seller. */
-  price: string;
-  near?: { recipients: { identity: Identity; bps: number }[]; remainder: Identity };
-  title?: string;
-  description?: string;
-  hosting: ShareHosting;
-  listingStorage?: bigint;
-  storageBudget?: bigint;
-  onSplit?: (
-    near: Terms['near'],
-    fee?: ProtocolFee,
-    aboveMaximum?: boolean,
-  ) => Promise<void> | void;
-  /** Resolves only after the pending encrypted backup and separate secret are saved. */
-  confirmBackup?: (backup: { fileId: string; text: string }) => Promise<void>;
-}
-export interface ShareQuote {
-  quoteId: string;
-  fileId: string;
-  terms: Terms;
-  fee: ProtocolFee | null;
-  steps: ShareStep[];
-  metadata: UploadMetadata;
-  listingStorage: string | null;
-  storageBudget: string | null;
-}
-export interface Shared extends UploadPublished {
-  /** Hosting expiry in Unix seconds as stated by the shop, or null for no planned expiry. */
-  expiresAt: number | null;
-}
-export interface HostedCheckpoint {
-  origin: string;
-  metadata: UploadMetadata;
-  fee: ProtocolFee | null;
-  intent: UploadIntent;
-  manifest: UploadManifest;
-  authorization: UploadAuthorization | null;
-  uploadId: string | null;
-  reservation: HostingReservation | null;
-  split: UploadBaseSplit | null;
-  steps: ShareStep[];
-  completed: ShareStep[];
-  pending: {
-    step: ShareStep;
-    token: string;
-    txHash?: string;
-    snapshot?: string;
-    storageAccountExisted?: boolean;
-    validUntil?: number;
-    startedAt?: number;
-    operation?: { method: string; args: object; deposit: string };
-    auth?: import('../settle-near/identity.js').Authorization;
-  } | null;
-  lease: { owner: string; until: number } | null;
-  backupConfirmed: boolean;
-  listingStorage: string | null;
-  header: string | null;
-  result: Shared | null;
-}
-export type HostedSellRecord = SellRecord & { hosting: HostedCheckpoint };
-export interface ShareContext {
-  config(): Promise<{ network: string; nearUsdc: string; usdc: string }>;
-  file(fileId: string): Promise<FileInfo | null>;
-  call(method: string, args: object, wallet: IdentityWallet): Promise<unknown>;
-  answer(value: unknown, secret: Uint8Array, fileId: string): Promise<Uint8Array>;
-  reopen(fileId: string, seller: IdentityWallet): Promise<Uint8Array>;
-}
-const assets = (t: Terms) => ({
-  nearUsdc: t.near.token,
-  ...(t.base ? { baseUsdc: t.base.usdc } : {}),
-});
-const salt = `0x${'00'.repeat(32)}`;
 const nearValiditySeconds = 172800;
-export function shareSteps(seller: Identity): ShareStep[] {
-  return seller.kind === 'near'
-    ? ['stage', 'deposit', 'register', 'fund', 'publish']
-    : seller.kind === 'evm'
-      ? ['stage', 'split', 'register', 'publish']
-      : ['stage', 'register', 'publish'];
-}
 function result<T>(r: UploadResult<T>): T {
   if (!r.ok) throw r.error;
   return r.value;
@@ -161,147 +78,6 @@ function nearWallet(seller: IdentityWallet): NearWallet {
   if (seller.identity.kind !== 'near' || !('call' in seller))
     throw new AnnonError('near_wallet_required');
   return seller as NearWallet;
-}
-/** Validate before any nested access by callers. Encryption authenticates the whole revision. */
-export function validateHostedRecord(job: SellRecord): void {
-  const h = job.hosting;
-  if (!h) return;
-  const t = job.terms;
-  termsHash(t, assets(t));
-  if (
-    !h ||
-    typeof h !== 'object' ||
-    h.origin !== uploadOrigin(h.origin) ||
-    !Array.isArray(h.steps) ||
-    !Array.isArray(h.completed) ||
-    JSON.stringify(h.steps) !== JSON.stringify(shareSteps(t.seller)) ||
-    h.completed.some((s, i) => s !== h.steps[i]) ||
-    h.completed.length > h.steps.length ||
-    typeof h.backupConfirmed !== 'boolean'
-  )
-    throw new Error('Invalid hosted record.');
-  if (
-    t.seller.kind === 'evm' &&
-    (!t.base ||
-      !job.baseSplit ||
-      job.baseSplit.kind !== 'push' ||
-      job.baseSplit.salt !== salt ||
-      job.baseSplit.address !== t.base.pay_to)
-  )
-    throw new Error('Invalid Base terms.');
-  if (t.seller.kind === 'near' && h.fee !== null) throw new Error('Invalid direct fee.');
-  if (h.fee !== null && h.fee === undefined) throw new Error('Missing fee.');
-  if (h.fee) checkProtocolFee(t, h.fee);
-  if (t.seller.kind !== 'evm' && (t.base !== null || job.baseSplit !== null))
-    throw new Error('Invalid seller routes.');
-  if (
-    h.pending !== null &&
-    (!h.pending ||
-      h.pending.step !== h.steps[h.completed.length] ||
-      typeof h.pending.token !== 'string')
-  )
-    throw new Error('Invalid pending operation.');
-  if (h.pending?.operation && ['deposit', 'fund'].includes(h.pending.step)) {
-    const { snapshot, validUntil } = h.pending;
-    if (
-      (h.pending.step === 'deposit' && typeof h.pending.storageAccountExisted !== 'boolean') ||
-      typeof snapshot !== 'string' ||
-      !/^(0|[1-9][0-9]*)$/.test(snapshot) ||
-      BigInt(snapshot) >= 2n ** 128n ||
-      !Number.isSafeInteger(validUntil) ||
-      (validUntil ?? -1) < 0
-    )
-      throw new Error('Invalid funding snapshot.');
-  }
-  if (
-    h.pending?.startedAt !== undefined &&
-    (!Number.isSafeInteger(h.pending.startedAt) || h.pending.startedAt < 0)
-  )
-    throw new Error('Invalid operation checkpoint.');
-  if (
-    h.lease !== null &&
-    (!h.lease || typeof h.lease.owner !== 'string' || !Number.isSafeInteger(h.lease.until))
-  )
-    throw new Error('Invalid lease.');
-  if (h.completed.length && !h.backupConfirmed) throw new Error('Missing backup confirmation.');
-  if (h.uploadId !== null && !/^[0-9a-f]{64}$/.test(h.uploadId)) throw new Error('Invalid upload.');
-  const request = parseUpload({
-    intent: h.intent,
-    manifest: h.manifest,
-    terms: t,
-    metadata: h.metadata,
-    auth:
-      h.authorization?.auth ??
-      (t.seller.kind === 'near'
-        ? { kind: 'near', accountId: t.seller.id, publicKey: '', signature: '' }
-        : { kind: t.seller.kind, sig: `0x${'00'.repeat(t.seller.kind === 'evm' ? 65 : 64)}` }),
-  });
-  if (
-    request.intent.termsHash !== termsHash(t, assets(t)) ||
-    request.intent.fileId !== t.file_id ||
-    request.intent.cipherHash !== t.cipher_hash ||
-    request.intent.hostOrigin !== h.origin ||
-    identityJson(request.intent.seller) !== identityJson(t.seller)
-  )
-    throw new Error('Invalid hosted binding.');
-  if (h.authorization && JSON.stringify(h.authorization.intent) !== JSON.stringify(h.intent))
-    throw new Error('Invalid authorization binding.');
-  if (
-    t.seller.kind === 'near' &&
-    (!h.listingStorage ||
-      !job.storageBudget ||
-      !/^[1-9][0-9]*$/.test(h.listingStorage) ||
-      BigInt(h.listingStorage) >= 2n ** 128n)
-  )
-    throw new Error('Missing approved funding.');
-  if (h.reservation) {
-    const r = parseReservation(h.reservation);
-    for (const k of [
-      'fileId',
-      'termsHash',
-      'cipherHash',
-      'metadataHash',
-      'hostOrigin',
-      'byteSize',
-      'plaintextSize',
-      'headerSize',
-      'network',
-      'contract',
-    ] as const)
-      if (r[k] !== h.intent[k]) throw new Error('Invalid reservation binding.');
-    if (r.uploadId !== h.uploadId || identityJson(r.seller) !== identityJson(t.seller))
-      throw new Error('Invalid reservation.');
-  }
-  if (
-    h.split !== null &&
-    (!h.split ||
-      t.seller.kind !== 'evm' ||
-      !['pending', 'ready'].includes(h.split.state) ||
-      h.split.address.toLowerCase() !== t.base?.pay_to ||
-      h.split.kind !== 'push' ||
-      h.split.salt !== salt ||
-      !(h.split.txHash === null || typeof h.split.txHash === 'string'))
-  )
-    throw new Error('Invalid split checkpoint.');
-  if (h.completed.includes('split') && h.split?.state !== 'ready')
-    throw new Error('Missing split confirmation.');
-  if (h.result !== null) {
-    const r = h.result;
-    const url = `${h.origin}/f/${t.file_id.slice(2)}`;
-    if (
-      !r ||
-      r.fileId !== t.file_id ||
-      r.url !== url ||
-      r.header !== `${url}/header` ||
-      (r.expiresAt !== null && (!Number.isSafeInteger(r.expiresAt) || r.expiresAt <= 0)) ||
-      h.completed.at(-1) !== 'publish' ||
-      !h.header ||
-      !job.published
-    )
-      throw new Error('Invalid publication.');
-  }
-  if (!!job.published !== (h.result !== null)) throw new Error('Invalid completion.');
-  if (h.header !== null) bytes(h.header, (h.header.length - 2) / 2);
 }
 export class HostedSelling {
   private readonly store: Store<SellRecord>;

@@ -1,8 +1,4 @@
-import { AnnonError, toPublicError } from '../errors.js';
-import type { BuyRoute } from '../routes.js';
-import { HostedSelling, type ShareHosting, type ShareOptions, shareSize } from './sharing.js';
 /** Sell, buy, open, recover and stop, using the single purchase/grant settlement model. */
-
 import { DownloadError } from '../download/download.js';
 import {
   concat,
@@ -22,6 +18,7 @@ import {
   withReplay,
 } from '../envelope/replay.js';
 import { SourceChangedError } from '../envelope/stream.js';
+import { AnnonError } from '../errors.js';
 import { fileAppId, keyFromSecret, oneTimeKey, openAnswer } from '../keys/near-ckd.js';
 import { MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES } from '../limits.js';
 import {
@@ -43,16 +40,8 @@ import {
   reopenText,
   stopSalesText,
 } from '../near/texts.js';
+import { OneClick, OneClickQuoteExpired, validateOrigin } from '../oneclick/oneclick.js';
 import {
-  type Deposit,
-  OneClick,
-  type OneClickQuote,
-  OneClickQuoteExpired,
-  type Origin,
-  validateOrigin,
-} from '../oneclick/oneclick.js';
-import {
-  type EncryptedRecord,
   encryptedPurchaseStore,
   encryptedRecoveryStore,
   encryptedSellerKeyStore,
@@ -70,11 +59,9 @@ import { balanceOf, hasCode, head, PayError } from '../pay/base.js';
 import { authorize, preflight } from '../pay/pay.js';
 import { type PurchaseRecord, purchaseKey, randomHex } from '../pay/purchase.js';
 import { nextStep } from '../pay/recover.js';
-import { createSplit, type SplitCall } from '../pay/split.js';
+import { createSplit } from '../pay/split.js';
 import type { Store, Versioned } from '../pay/store.js';
-import type { PaymentRequired } from '../pay/x402.js';
 import {
-  type BaseSponsorship,
   checkBaseSplit,
   checkBaseSponsorship,
   validBaseSponsorship,
@@ -85,6 +72,7 @@ import {
   type ProtocolFee,
   protocolFeeAboveMax,
 } from '../relay/fees.js';
+import type { BuyRoute } from '../routes.js';
 import { account, bytes, compare, hex, network, usdc } from '../settle-near/codec.js';
 import {
   type Authorization,
@@ -104,95 +92,21 @@ import {
 } from '../settle-near/purchase.js';
 import { type Terms, termsHash } from '../settle-near/terms.js';
 import { TransactionUncertain } from '../wallet/uncertain.js';
-import type { EvmWallet, IdentityWallet, NearWallet } from '../wallet/wallet.js';
-import { FileFundingRefused, fundFileStorage } from '../wallet/wallet.js';
+import {
+  type EvmWallet,
+  FileFundingRefused,
+  fundFileStorage,
+  type IdentityWallet,
+  type NearWallet,
+} from '../wallet/wallet.js';
+import type { AnnonOptions, Bought, BuyOptions, SellOptions } from './annon-types.js';
+import { SellError } from './sell-error.js';
+import { HostedSelling, type ShareHosting, type ShareOptions, shareSize } from './sharing.js';
 
-export interface AnnonOptions {
-  relayer?: string;
-  fetch?: typeof fetch;
-  nearRpc: string;
-  baseRpc: string;
-  contractId: string;
-  network: string;
-  rawStore: Store<EncryptedRecord>;
-  backupSecret: Uint8Array;
-  /** Write the encrypted file durably (Node file, download, or an app's backup destination). */
-  writeBackup(name: string, encryptedFile: string): Promise<void>;
-  /** A transaction transport. Wait for final execution and return its decoded result/outcome. NEAR wallets can call directly when omitted. */
-  send?: (method: string, args: object, wallet?: NearWallet) => Promise<unknown>;
-  mpcKey?: string;
-  now?: () => number;
-  /** A relayer capability reader; only sponsored registrations apply its fee. */
-  sponsorship?: () => Promise<{ fee: ProtocolFee }>;
-  /** Maximum advertised fee, in USDC base units plus basis points. */
-  maxProtocolFee?: Pick<ProtocolFee, 'fixed' | 'bps'>;
-}
-export interface SellOptions<T extends SellData = Uint8Array> {
-  /** Hosted jobs use the shared reservation sequence; publish remains a post-registration callback. */
-  hosting?: ShareHosting & Pick<ShareOptions, 'listingStorage' | 'confirmBackup'>;
-  /** Attached yoctoNEAR for a self-funded listing. */
-  storageBudget?: bigint;
-  /** Called before registration or Base split transactions. */
-  onSplit?: (
-    near: Terms['near'],
-    fee?: ProtocolFee,
-    aboveMaximum?: boolean,
-  ) => void | Promise<void>;
-  data: T;
-  name: string;
-  mime: string;
-  seller: IdentityWallet;
-  near: { price: string; recipients: { identity: Identity; bps: number }[]; remainder: Identity };
-  base?: {
-    price: string;
-    kind?: 'push' | 'pull';
-    sendTransaction: (call: SplitCall) => Promise<void>;
-  };
-  moderator?: string;
-  fileId?: string;
-  previewLen?: number;
-  /** Store/host the encrypted file and its public header. Consume streamed files fully before resolving. Called after header authorization. */
-  publish: (file: {
-    file: import('../envelope/replay.js').SellFile<T>;
-    header: Uint8Array;
-    terms: Terms;
-  }) => Promise<void>;
-}
 export type { BuyRoute } from '../routes.js';
-export interface BuyOptions {
-  /** Explicit selection never falls back to another payment route. */
-  route?: BuyRoute;
-  baseUnlock?: 'relayer' | 'self';
-  baseSponsorship?: BaseSponsorship;
-  /** Persist the workflow association before an SDK write can become uncertain. */
-  beforeSave?: (record: PurchaseRecord) => Promise<void>;
-  /** Awaited after each durable purchase and backup write, before external effects. */
-  onSaved?: (record: PurchaseRecord) => Promise<void>;
-  /** Last durable UI checkpoint before payment submission or releasing deposit instructions. */
-  beforePayment?: (record: PurchaseRecord) => Promise<void>;
-  fileId: string;
-  header: Uint8Array;
-  recovery: IdentityWallet;
-  refund: Identity;
-  payer?: IdentityWallet;
-  maxPrice: bigint;
-  moderators?: readonly string[];
-  paymentRequired?: PaymentRequired;
-  url?: string;
-  oneClick?: Pick<OneClick, 'quote'>;
-  origin?: Origin;
-  /** Review the live 1Click quote after its encrypted backup is saved, before recovery proof and deposit instructions. */
-  onQuote?: (quote: OneClickQuote) => void | Promise<void>;
-  /** Submit the saved Base payload to the host/facilitator. Return only after its request completes. */
-  submitBase?: (header: string) => Promise<void>;
-}
-export interface Bought {
-  route: BuyRoute;
-  record: PurchaseRecord;
-  instructions?: Deposit;
-  uncertain?: { purchaseId: string; txHash: string };
-  payment?: string;
-}
+export type { AnnonOptions, Bought, BuyOptions, SellOptions } from './annon-types.js';
+export { SellError } from './sell-error.js';
+
 const asNear = (w: IdentityWallet): NearWallet => {
   if (w.identity.kind !== 'near' || !('call' in w) || typeof w.call !== 'function')
     throw new AnnonError('near_wallet_required', 'a NEAR transaction wallet is required');
@@ -208,31 +122,6 @@ const listing = (fileId: string, f: FileInfo): Listing => ({
   seller: f.seller,
   ...(f.headerHash ? { publishedHeaderHash: f.headerHash } : {}),
 });
-export class SellError extends AnnonError {
-  readonly txHash?: string;
-  readonly retryAfterSeconds?: number;
-  constructor(
-    readonly fileId: string,
-    options?: ErrorOptions,
-  ) {
-    const cause = options?.cause;
-    const code =
-      cause instanceof AnnonError || cause instanceof SourceChangedError
-        ? cause.code
-        : 'sell_incomplete';
-    super(
-      code,
-      cause instanceof Error ? cause.message : 'Sell incomplete; resume with fileId.',
-      options,
-    );
-    this.name = 'SellError';
-    const safe = toPublicError(cause);
-    if (safe.retryAfterSeconds !== undefined) this.retryAfterSeconds = safe.retryAfterSeconds;
-    if (cause instanceof AnnonError && 'txHash' in cause && typeof cause.txHash === 'string')
-      this.txHash = cause.txHash;
-  }
-}
-
 export class Annon {
   readonly store: Store<PurchaseRecord>;
   readonly hosted: HostedSelling;
