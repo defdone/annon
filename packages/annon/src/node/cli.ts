@@ -256,6 +256,21 @@ export async function runCli(
   try {
     const input = parseCli(argv);
     const result = await execute(input);
+    if (!json && ['shops', 'catalog', 'share'].includes(input.command)) {
+      const show = (value: unknown) => {
+        const r = value as {
+          rules?: { text: string };
+          shop?: { manifest: string };
+          manifest?: string;
+          info?: { rules?: { text: string } };
+        };
+        const rules = r.info?.rules ?? r.rules;
+        if (rules) write(`Shop rules (${r.shop?.manifest ?? r.manifest}):\n${rules.text}`);
+      };
+      show(result);
+      const items = (result as { items?: unknown[] }).items;
+      if (Array.isArray(items)) for (const item of items) show(item);
+    }
     write(JSON.stringify({ ok: true, result }, null, json ? undefined : 2));
     return input.command === 'status' &&
       result &&

@@ -136,3 +136,44 @@ it('parses hosted share and resume without allowing new terms on resume', () => 
     parseCli(['share', 'a.txt', '--resume', `0x${'11'.repeat(32)}`, '--price', '1']),
   ).toThrow();
 });
+
+it('prints rules verbatim with provenance in human output and retains JSON strings', async () => {
+  const { runCli } = await import('./cli.js');
+  const result = {
+    shop: { manifest: 'https://shop.test/.well-known/annon-shop.json', name: 'Shop' },
+    rules: { text: '<b>café</b>' },
+  };
+  const lines: string[] = [];
+  expect(
+    await runCli(
+      ['catalog'],
+      async () => result,
+      (line) => lines.push(line),
+    ),
+  ).toBe(0);
+  expect(lines[0]).toBe(`Shop rules (${result.shop.manifest}):\n${result.rules.text}`);
+  lines.length = 0;
+  await runCli(
+    ['catalog', '--json'],
+    async () => result,
+    (line) => lines.push(line),
+  );
+  expect(lines).toHaveLength(1);
+  expect(JSON.parse(lines[0] ?? '').result).toEqual(result);
+});
+
+it('prints shop list rules with manifest provenance', async () => {
+  const { runCli } = await import('./cli.js');
+  const manifest = 'https://shop.test/.well-known/annon-shop.json';
+  const lines: string[] = [];
+  await runCli(
+    ['shops'],
+    async () => ({
+      items: [{ manifest, info: { name: 'Shop', rules: { text: 'T' } }, trusted: false }],
+      total: 1,
+      nextOffset: null,
+    }),
+    (line) => lines.push(line),
+  );
+  expect(lines[0]).toBe(`Shop rules (${manifest}):\nT`);
+});

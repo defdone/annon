@@ -8,7 +8,15 @@ function present<T>(value: T | null | undefined): T {
   return value;
 }
 
+export interface ShopRules {
+  text: string;
+  uploadsPerPersonPerDay?: number;
+  attemptsPerPersonPerDay?: number;
+  fileLifetimeDays?: number | null;
+  maxFileBytes?: number;
+}
 export interface ShopManifest {
+  rules?: ShopRules;
   version: 1;
   name: string;
   shopUrl: string;
@@ -163,9 +171,42 @@ export function validateDiscoveryConfig(value: unknown): DiscoveryConfig {
     throw new AnnonError('invalid_config', undefined, { cause });
   }
 }
+function validateRules(value: unknown): ShopRules {
+  const r = object(value);
+  const keys = [
+    'uploadsPerPersonPerDay',
+    'attemptsPerPersonPerDay',
+    'fileLifetimeDays',
+    'maxFileBytes',
+  ];
+  exactKeys(r, ['text', ...keys.filter((key) => Object.hasOwn(r, key))]);
+  text(r.text);
+  if (
+    !r.text.trim() ||
+    new TextEncoder().encode(r.text).byteLength > 4096 ||
+    /[\p{Cc}\p{Cs}\u2028\u2029]|(?![\u200c\u200d])\p{Cf}/u.test(r.text)
+  )
+    throw new TypeError('invalid rules text');
+  for (const key of keys) {
+    if (!Object.hasOwn(r, key)) continue;
+    if (key === 'fileLifetimeDays' && r[key] === null) continue;
+    integer(r[key]);
+  }
+  return r as unknown as ShopRules;
+}
 function validateManifest(value: unknown): ShopManifest {
   const m = object(value);
-  exactKeys(m, ['version', 'name', 'shopUrl', 'network', 'contract', 'relayer', 'host', 'catalog']);
+  exactKeys(m, [
+    'version',
+    'name',
+    'shopUrl',
+    'network',
+    'contract',
+    'relayer',
+    'host',
+    'catalog',
+    ...(Object.hasOwn(m, 'rules') ? ['rules'] : []),
+  ]);
   const c = object(m.catalog);
   exactKeys(c, ['url', 'format', 'search']);
   if (
@@ -182,6 +223,7 @@ function validateManifest(value: unknown): ShopManifest {
   if (new URL(url).origin !== host) throw new TypeError('catalog origin mismatch');
   return {
     version: 1,
+    ...(Object.hasOwn(m, 'rules') ? { rules: validateRules(m.rules) } : {}),
     name: m.name,
     shopUrl: https(m.shopUrl),
     network: m.network,
@@ -390,7 +432,9 @@ export async function catalog(
   config: DiscoveryConfig,
   query: CatalogQuery = {},
   fetcher: typeof fetch = globalThis.fetch,
-): Promise<DiscoveryPage<CatalogEntry>> {
+): Promise<
+  DiscoveryPage<CatalogEntry> & { shop?: { manifest: string; name: string }; rules?: ShopRules }
+> {
   const q = paging(query);
   const c = validateDiscoveryConfig(config);
   const selected = query.shop ?? c.defaultShop;
@@ -412,5 +456,10 @@ export async function catalog(
   all.sort(
     (a, b) => b.createdAt - a.createdAt || (a.fileId < b.fileId ? -1 : a.fileId > b.fileId ? 1 : 0),
   );
-  return page(all, q);
+  return {
+    ...page(all, q),
+    ...(shop.info.rules
+      ? { shop: { manifest: shop.manifest, name: shop.info.name }, rules: shop.info.rules }
+      : {}),
+  };
 }

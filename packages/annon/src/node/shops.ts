@@ -76,3 +76,18 @@ export async function discoverShops(
     trusted: added.profile !== undefined,
   };
 }
+
+/** Descriptive text retains its canonical shop provenance. */
+export async function selectedShopRules(
+  config: DiscoveryConfig,
+  id: string | undefined,
+  fetcher: typeof fetch,
+) {
+  const selected = id ?? config.defaultShop;
+  const local = config.shops?.find((s) => s.id === selected || s.manifest === selected);
+  if (!local) return {};
+  const shop = await readShop(local, fetcher);
+  return shop.info.rules
+    ? { shop: { manifest: shop.manifest, name: shop.info.name }, rules: shop.info.rules }
+    : {};
+}

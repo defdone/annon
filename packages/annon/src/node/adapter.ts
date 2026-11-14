@@ -61,7 +61,7 @@ import { claimPurchase, type PurchaseGuard } from './purchase-guard.js';
 import { resourceAllowed } from './resources.js';
 import { retryGate } from './retry-gate.js';
 import { shareHost } from './sharing.js';
-import { discoverShops, isDiscovery } from './shops.js';
+import { discoverShops, isDiscovery, selectedShopRules } from './shops.js';
 import { assertSignerInput, configuredWallet } from './signer-wallet.js';
 import { type SigningResult, signingRequest, verifySigningResult } from './signing.js';
 import {
@@ -441,6 +441,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
     };
     const preparedBuy = o.command === 'buy' ? await prepareBuy() : undefined;
     const hostedOrigin = o.command === 'share' ? await shareHost(c, o.shop, fetcher) : undefined;
+    const shopRules = o.command === 'share' ? await selectedShopRules(c, o.shop, fetcher) : {};
     let selected: LocalWallet | undefined;
     if (o.command === 'fund') {
       if (d.agent) return fail('human_only', 'File funding requires a human CLI session.', 2);
@@ -698,7 +699,10 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
           )
         )
           throw usage();
-        return { ...(await sdk.resumeShare({ fileId: o.resume, data, seller, hosting })) };
+        return {
+          ...(await sdk.resumeShare({ fileId: o.resume, data, seller, hosting })),
+          ...shopRules,
+        };
       }
       if (!o.price) throw usage();
       const near = seller.identity.kind === 'near';
@@ -727,6 +731,7 @@ function createCoreAdapter(env: Environment = process.env, d: Dependencies = {})
         : undefined;
       if (!near && (o.listingStorage || o.storageBudget)) throw usage();
       return {
+        ...shopRules,
         ...(await sdk.share({
           data,
           name: basename(o.target),

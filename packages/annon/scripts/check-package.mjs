@@ -115,7 +115,7 @@ try {
     join(temp, 'consumer.ts'),
     `
     ${typeImports.join('\n')}
-    import { catalog, listShops, canonicalManifestUrl, importSellerKey, exportSellerKey, type SellerKeyRecord, type DiscoveryConfig, type ShopManifest, type CatalogEntry, fileFundingText, type FileFundingArgs, Annon, checkBaseSponsorship, validBaseSponsorship, type BaseSponsorship, MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES, HTTP_RETRY_MAX_WAIT_SECONDS, BASE_ELIGIBILITY_MAX_AGE_SECONDS, type DownloadErrorCode } from '@defdone/annon';
+    import { catalog, listShops, canonicalManifestUrl, importSellerKey, exportSellerKey, type SellerKeyRecord, type DiscoveryConfig, type ShopManifest, type ShopRules, type CatalogEntry, fileFundingText, type FileFundingArgs, Annon, checkBaseSponsorship, validBaseSponsorship, type BaseSponsorship, MAX_PAY2_BYTES, MAX_PLAINTEXT_BYTES, HTTP_RETRY_MAX_WAIT_SECONDS, BASE_ELIGIBILITY_MAX_AGE_SECONDS, type DownloadErrorCode } from '@defdone/annon';
     import type { ShareOptions, Shared } from '@defdone/annon';
     import type { SellerFacade, SaleHandle, BrowserSellerOptions } from '@defdone/annon/browser';
     import { importSellerKey as browserImportSellerKey, catalog as browserCatalog, checkBaseSponsorship as browserCheck } from '@defdone/annon/browser';

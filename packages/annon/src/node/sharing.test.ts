@@ -68,57 +68,112 @@ it('reads the selected approved shop and rejects host substitution', async () =>
   });
 });
 
-it('the share adapter passes the selected host, streaming file and backup gate to the SDK', async () => {
-  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
-  const { tmpdir } = await import('node:os');
-  const { join } = await import('node:path');
-  const { createAdapter } = await import('./adapter.js');
-  const { Annon } = await import('../api/annon.js');
-  const dir = await mkdtemp(join(tmpdir(), 'annon-share-'));
-  try {
-    const path = join(dir, 'config.json'),
-      file = join(dir, 'file.txt');
-    await writeFile(file, 'file');
-    await writeFile(path, JSON.stringify({ ...config, stateDir: dir, trustContract: true }));
-    const share = vi.fn(async (options) => {
-      expect(options.hosting.origin).toBe(profile.host);
-      expect(options.data.size).toBe(4);
-      expect(await new Response(options.data.read()).text()).toBe('file');
-      expect(typeof options.confirmBackup).toBe('function');
-      expect(typeof options.hosting.spool).toBe('function');
-      return {
+it.each([undefined, 'other', 'https://other.example/.well-known/annon-shop.json'])(
+  'share and resume retain selected shop rules for %s',
+  async (shop) => {
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { createAdapter } = await import('./adapter.js');
+    const { Annon } = await import('../api/annon.js');
+    const dir = await mkdtemp(join(tmpdir(), 'annon-share-'));
+    try {
+      const path = join(dir, 'config.json'),
+        file = join(dir, 'file.txt');
+      await writeFile(file, 'file');
+      await writeFile(
+        path,
+        JSON.stringify({
+          ...config,
+          shops: [
+            ...must(config.shops),
+            { id: 'other', manifest: 'https://other.example/.well-known/annon-shop.json', profile },
+          ],
+          stateDir: dir,
+          trustContract: true,
+        }),
+      );
+      const share = vi.fn(async (options) => {
+        expect(options.hosting.origin).toBe(profile.host);
+        expect(options.data.size).toBe(4);
+        expect(await new Response(options.data.read()).text()).toBe('file');
+        expect(typeof options.confirmBackup).toBe('function');
+        expect(typeof options.hosting.spool).toBe('function');
+        return {
+          fileId: `0x${'11'.repeat(32)}`,
+          url: 'https://host.example/f/synthetic',
+          header: 'https://host.example/f/synthetic/header',
+          expiresAt: 1800000000,
+        };
+      });
+      const resume = vi.fn(async () => ({
         fileId: `0x${'11'.repeat(32)}`,
         url: 'https://host.example/f/synthetic',
         header: 'https://host.example/f/synthetic/header',
         expiresAt: 1800000000,
-      };
-    });
-    const adapter = createAdapter(
-      { ANNON_CONFIG: path, ANNON_BACKUP_SECRET: '09'.repeat(32) },
-      {
-        fetch: async () => Response.json(manifest),
-        wallet: async () => ({
-          identity: { kind: 'evm', id: `0x${'11'.repeat(20)}` },
-          authorize: vi.fn(),
-        }),
-        sdk: (options) => {
-          const sdk = new Annon(options);
-          vi.spyOn(sdk, 'share').mockImplementation(share);
-          return sdk;
+      }));
+      const selectedManifest = shop
+        ? 'https://other.example/.well-known/annon-shop.json'
+        : must(must(config.shops)[0]).manifest;
+      const rules = { text: shop ? 'Other shop text' : 'Shop text', fileLifetimeDays: 7 };
+      const expected = { shop: { manifest: selectedManifest, name: 'Shop' }, rules };
+      const adapter = createAdapter(
+        { ANNON_CONFIG: path, ANNON_BACKUP_SECRET: '09'.repeat(32) },
+        {
+          fetch: async (url) =>
+            Response.json({
+              ...manifest,
+              rules: {
+                text:
+                  String(url) === 'https://other.example/.well-known/annon-shop.json'
+                    ? 'Other shop text'
+                    : 'Shop text',
+                fileLifetimeDays: 7,
+              },
+            }),
+          wallet: async () => ({
+            identity: { kind: 'evm', id: `0x${'11'.repeat(20)}` },
+            authorize: vi.fn(),
+          }),
+          sdk: (options) => {
+            const sdk = new Annon(options);
+            vi.spyOn(sdk, 'share').mockImplementation(share);
+            vi.spyOn(sdk, 'resumeShare').mockImplementation(resume);
+            return sdk;
+          },
         },
-      },
-    );
-    await adapter({ command: 'share', target: file, price: '0.10', title: 'File', json: true });
-    expect(share).toHaveBeenCalledTimes(1);
-    expect(must(share.mock.calls[0])[0]).toMatchObject({
-      price: '100000',
-      name: 'file.txt',
-      title: 'File',
-    });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+      );
+      expect(
+        await adapter({
+          command: 'share',
+          target: file,
+          price: '0.10',
+          title: 'File',
+          json: true,
+          ...(shop ? { shop } : {}),
+        }),
+      ).toMatchObject(expected);
+      expect(
+        await adapter({
+          command: 'share',
+          target: file,
+          resume: `0x${'11'.repeat(32)}`,
+          json: true,
+          ...(shop ? { shop } : {}),
+        }),
+      ).toMatchObject(expected);
+      expect(resume).toHaveBeenCalledTimes(1);
+      expect(share).toHaveBeenCalledTimes(1);
+      expect(must(share.mock.calls[0])[0]).toMatchObject({
+        price: '100000',
+        name: 'file.txt',
+        title: 'File',
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 it('share source confinement applies without creating a PAY2 output path', async () => {
   const { mkdtemp, writeFile, rm } = await import('node:fs/promises');

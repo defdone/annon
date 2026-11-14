@@ -1,6 +1,12 @@
 import { expect, it, vi } from 'vitest';
 import { must, terms } from '../../test/fixtures.js';
-import { canonicalManifestUrl, catalog, listShops, validateDiscoveryConfig } from './discovery.js';
+import {
+  canonicalManifestUrl,
+  catalog,
+  listShops,
+  readShop,
+  validateDiscoveryConfig,
+} from './discovery.js';
 
 const manifestUrl = 'https://shop.test/.well-known/annon-shop.json';
 const manifest = {
@@ -629,4 +635,96 @@ it('reports an unreachable approved shop per shop while retaining its trust stat
       error: 'transport',
     },
   ]);
+});
+
+it('preserves shop rules verbatim with catalog provenance and no invented defaults', async () => {
+  const rules = {
+    text: '<b>Shop text</b> café',
+    uploadsPerPersonPerDay: 0,
+    attemptsPerPersonPerDay: 3,
+    fileLifetimeDays: null,
+    maxFileBytes: Number.MAX_SAFE_INTEGER,
+  };
+  const fetch = vi.fn<typeof globalThis.fetch>(async (url) =>
+    Response.json(String(url) === manifestUrl ? { ...manifest, rules } : []),
+  );
+  expect((await listShops(config, {}, fetch)).items[0]).toMatchObject({
+    info: { rules },
+    trusted: false,
+  });
+  expect(await catalog(config, {}, fetch)).toMatchObject({
+    shop: { manifest: manifestUrl, name: manifest.name },
+    rules,
+  });
+  expect(await catalog(config, {}, fetcher())).not.toHaveProperty('rules');
+});
+it.each([
+  {},
+  { text: '' },
+  { text: 1 },
+  { text: null },
+  { text: '   ' },
+  { text: 'x', extra: 1 },
+  ...[
+    'uploadsPerPersonPerDay',
+    'attemptsPerPersonPerDay',
+    'fileLifetimeDays',
+    'maxFileBytes',
+  ].flatMap((key) =>
+    [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, '1', true].map((value) => ({ text: 'x', [key]: value })),
+  ),
+  { text: 'x', maxFileBytes: null },
+  { text: 'x', uploadsPerPersonPerDay: null },
+  { text: 'x', attemptsPerPersonPerDay: null },
+  ...[
+    '\n',
+    '\t',
+    '\u001b',
+    '\u007f',
+    '\u0085',
+    '\u061c',
+    '\u200e',
+    '\u200f',
+    '\u202e',
+    '\u2066',
+    '\u2028',
+    '\u2029',
+    '\ud800',
+    '\u{E0041}',
+    '\u{E007F}',
+    '\u200b',
+    '\ufeff',
+    '\u2060',
+    '\u2061',
+    '\u2062',
+    '\u2063',
+    '\u2064',
+  ].map((char) => ({ text: `a${char}b` })),
+  { text: 'a'.repeat(4097) },
+  { text: 'é'.repeat(2049) },
+])('rejects malformed shop rules %j', async (rules) => {
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ ...manifest, rules }));
+  await expect(readShop({ manifest: manifestUrl }, fetch)).rejects.toMatchObject({
+    code: 'invalid_record',
+  });
+});
+it('accepts the exact UTF-8 byte boundary', async () => {
+  const rules = { text: 'é'.repeat(2048) };
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ ...manifest, rules }));
+  expect((await listShops(config, {}, fetch)).items[0]).toMatchObject({ info: { rules } });
+});
+
+it('rejects unknown manifest fields even alongside valid rules', async () => {
+  const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+    Response.json({ ...manifest, rules: { text: 'Shop text' }, extra: true }),
+  );
+  await expect(readShop({ manifest: manifestUrl }, fetch)).rejects.toMatchObject({
+    code: 'invalid_record',
+  });
+});
+
+it.each(['\u200c', '\u200d'])('preserves permitted joining character %j', async (char) => {
+  const rules = { text: `a${char}b` };
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ ...manifest, rules }));
+  expect((await readShop({ manifest: manifestUrl }, fetch)).info.rules).toEqual(rules);
 });

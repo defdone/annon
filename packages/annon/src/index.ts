@@ -121,6 +121,7 @@ export {
   type ShopFailure,
   type ShopManifest,
   type ShopProfile,
+  type ShopRules,
 } from './shops/discovery.js';
 export { TransactionUncertain } from './wallet/uncertain.js';
 export {
