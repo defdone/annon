@@ -1,8 +1,8 @@
 /** Where the CLI backup secret comes from: an explicit source, else the managed default file. */
 import { constants } from 'node:fs';
-import { open, readFile } from 'node:fs/promises';
+import { lstat, open, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { bytes } from '../settle-near/codec.js';
 import type { Input } from './cli.js';
 import { AdapterError } from './errors.js';
@@ -39,14 +39,38 @@ export function parseSecret(text: string): Uint8Array {
   return bytes(value.startsWith('0x') ? value : `0x${value}`, 32);
 }
 
+const unsafeDirectory = () =>
+  secretError(
+    '~/.config/annon must be a directory you own, not a symlink, that group and others cannot write. Fix it; Annon does not change existing directories.',
+  );
+
 /**
- * Reads the managed default without following a symlink and checks the opened file itself.
- * Returns undefined only when nothing exists at the path.
+ * Read-only check of the application directory that holds the managed default; false when it
+ * does not exist. An existing 0755 directory is fine. The user's home ancestry is trusted.
+ */
+export async function checkAppDirectory(dir: string): Promise<boolean> {
+  let s: Awaited<ReturnType<typeof lstat>>;
+  try {
+    s = await lstat(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw unsafeDirectory();
+  }
+  if (!s.isDirectory() || s.uid !== process.getuid?.() || (s.mode & 0o022) !== 0)
+    throw unsafeDirectory();
+  return true;
+}
+
+/**
+ * Reads the managed default inside a private application directory, without following a
+ * symlink or blocking on a FIFO, and checks the opened file itself. Returns undefined only
+ * when nothing exists at the path.
  */
 export async function readDefaultSecret(path = defaultBackupSecretPath()) {
+  if (!(await checkAppDirectory(dirname(path)))) return undefined;
   let handle: Awaited<ReturnType<typeof open>>;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw unsafeDefault();

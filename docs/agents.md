@@ -37,7 +37,9 @@ Every agent origin needs `usdcDecimals` for a USDC source, or `maxSourceAmount` 
 
 Then, once, as the owner: create the backup secret that encrypts the agent's records (or name an
 existing private file with `ANNON_BACKUP_SECRET_FILE`, as in the client example below), and give the
-agent a signer and a daily budget. Agent mode refuses `init` later and never creates the secret:
+agent a signer and a daily budget. Agent mode refuses `init` later and never creates the secret.
+With the default file from `annon init`, leave `ANNON_BACKUP_SECRET_FILE` out of the client example
+or point it at that file: a missing file fails without falling back:
 
 ```sh
 ANNON_CONFIG=/absolute/annon-agent.json annon init

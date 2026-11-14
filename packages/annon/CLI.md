@@ -65,8 +65,8 @@ state directories private. Purchases and recovery grants are encrypted by the SD
 encrypted backups are under `stateDir/backups`. Public headers and resource URLs are saved
 separately for later downloading. Preserve state after timeouts. Losing local state does not
 lose recovery rights: the same recovery wallet can create a fresh grant on a new device with
-a new backup secret in a separate, empty state directory. Keys, signed payment payloads and decrypted file contents are never
-returned in CLI/MCP results. Plaintext is written only to the explicitly named output.
+a new backup secret ([Loss](#backup-secret) explains when `init` creates one). Keys, signed payment
+payloads and decrypted file contents are never returned in CLI/MCP results. Plaintext is written only to the explicitly named output.
 
 ### Backup secret
 
@@ -75,11 +75,13 @@ Run `annon init` once, before buying, selling or enabling agent mode. It creates
 mode 0600, in a directory created with mode 0700. The file is written to an exclusive temporary
 file and published with a hard link, so it never appears half-written and an existing file is
 never replaced. Running `init` again only validates the file and reports `"created": false`. An
-unsafe default (a symlink, not a regular file, not owned by you, group or other permission bits, or
-malformed content) is refused and never repaired.
+unsafe default is refused and never repaired: a symlink, FIFO or other non-regular file, a file not
+owned by you or with group or other permission bits, malformed content, or an `~/.config/annon`
+that is a symlink, is not owned by you, or is writable by group or others. An existing 0755
+directory is fine. Every command that reads the default applies the same checks.
 
-The location is fixed. `XDG_CONFIG_HOME`, `--config`, `ANNON_CONFIG` and `--state-dir` do not move
-it. For another private location, name an existing file with the explicit inputs below.
+The location is fixed. `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `--config`,
+`ANNON_CONFIG` and `--state-dir` do not move it. For another private location, name an existing file with the explicit inputs below.
 
 Sources, in order, as before this file existed:
 
@@ -89,7 +91,9 @@ Sources, in order, as before this file existed:
    child processes.
 3. The default file, only when neither is set.
 
-An optional `0x` prefix and surrounding whitespace are accepted. A selected source that is missing,
+An empty value counts as unset, as before: an empty `--backup-secret-file` selects no file even when
+`ANNON_BACKUP_SECRET_FILE` is set, and moves on to `ANNON_BACKUP_SECRET`. Hex must be lowercase in
+every source; an optional `0x` prefix and surrounding whitespace are accepted. A selected source that is missing,
 unreadable or malformed fails with `backup_secret_required` (exit 2); there is no fallback to a
 later source, the default file or a new secret. `annon init` with an explicit source only validates
 it and never writes, creates or changes that file. Commands other than `init` read the secret but
@@ -117,29 +121,43 @@ node --input-type=module -e '
 The copy keeps mode 0600 when the destination supports POSIX permissions; check it. A secret manager
 that imports files is also fine.
 
-**Restore.** On a new machine, put the saved file in a private directory (mode 0600), copy the
-encrypted record backups separately, and select the file. Do not run `init` first:
+**Restore.** On a new machine, put the saved file in a private directory (directory mode 0700, file
+mode 0600), copy the encrypted record backups separately, and select the file. Do not run `init`
+first:
 
 ```sh
 export ANNON_BACKUP_SECRET_FILE=/absolute/private/restored-annon-backup-secret
 annon open /absolute/private/purchase-backup.json --url https://host.example/file --output restored-file
 ```
 
-Opening one known backup proves the restore. The same copy command can instead restore the file to
-an absent `~/.config/annon/backup-secret` after you create `~/.config/annon` with mode 0700.
+Opening one known backup proves the restore. To restore to the default location instead, create
+`~/.config/annon` with mode 0700 and copy in the other direction, still refusing an existing file:
+
+```sh
+mkdir -p -m 700 "$HOME/.config/annon"
+node --input-type=module -e '
+  import { constants } from "node:fs";
+  import { copyFile } from "node:fs/promises";
+  await copyFile(process.argv[1], process.argv[2], constants.COPYFILE_EXCL);
+' /mounted-private-encrypted-backup/annon-backup-secret "$HOME/.config/annon/backup-secret"
+```
 
 **Loss.** If the secret disappears, commands fail with `backup_secret_required` and a pending
-`status` stays pending; nothing recreates it. Restore the same bytes. Bare `init` refuses to create
-a new secret while the effective state directory, or the default `~/.local/share/annon`, has
-entries in `records` or `backups`. If every copy is lost, keep the old state, choose a new empty
-state directory, run `init`, then `recover` with the same recovery wallet. That creates a fresh
-grant and new records; it cannot decrypt old records or resume pending sell jobs. Use one secret per
-state directory.
+`status` stays pending; nothing recreates it. Restore the same bytes. Bare `init` creates a new
+secret only when both checked state locations are empty: the effective state directory and the
+default `~/.local/share/annon`, each in `records` and `backups`. If every copy is lost and you want
+to recover with a new secret, first move the whole old state, including `~/.local/share/annon`, to
+a separate private archive and keep it. Then use an empty state directory, run `init`, and run
+`recover` with the same recovery wallet. That creates a fresh grant and new records; it cannot
+decrypt the archived records or resume pending sell jobs. An operator can instead provision a
+separate secret file and select it with `ANNON_BACKUP_SECRET_FILE`. Use one secret per state
+directory.
 
 **Agents.** `init --agent` does not create or reference a backup secret. Run bare `init` before it,
 or give the agent an operator-managed file with an absolute `ANNON_BACKUP_SECRET_FILE` in the
-launcher. Once agent mode is active, `init` is refused, so provision or restore the secret outside
-the running agent.
+launcher. A launcher that sets `ANNON_BACKUP_SECRET_FILE` must point it at a file that exists; a
+missing file fails without falling back to the default. Once agent mode is active, `init` is
+refused, so provision or restore the secret outside the running agent.
 
 ## Commands
 

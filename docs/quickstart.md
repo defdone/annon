@@ -154,7 +154,7 @@ from, add `--refund-to` with an address on the source chain. Supported chains an
 ## 5. Open it on another computer
 
 **With your saved secret.** Copy the backup-secret file securely into a private directory on the new
-computer (mode 600), and copy your encrypted purchase backups separately. Do not run `annon init`
+computer (directory mode 700, file mode 600), and copy your encrypted purchase backups separately. Do not run `annon init`
 first; select the restored file instead. The variable holds a path, not the secret:
 
 ```sh
@@ -162,14 +162,16 @@ export ANNON_BACKUP_SECRET_FILE=/absolute/private/restored-annon-backup-secret
 annon open /absolute/private/purchase-backup.json --url https://host.example/file --output restored-file
 ```
 
-Opening one known backup proves the restore worked. You can also copy the saved file to
-`~/.config/annon/backup-secret` with the copy command from step 2, after creating `~/.config/annon`
-with mode 700.
+Opening one known backup proves the restore worked. You can also restore it to
+`~/.config/annon/backup-secret`: create `~/.config/annon` with mode 700, then run the copy command
+from step 2 with the two paths swapped, so the saved copy is the source and the default path the
+destination.
 
 **With a fresh secret.** The same wallet gets the file again without paying a second time. Repeat
-steps 1 to 3 on the new computer, including `annon init`, then recover and open. If old records are
-still in the state directory, keep them and choose a new empty `stateDir`: `annon init` refuses to
-create a new secret over records it cannot decrypt. The example below uses a NEAR account; for an
+steps 1 to 3 on the new computer, including `annon init`, then recover and open. `annon init` creates
+a new secret only when both your `stateDir` and `~/.local/share/annon` hold no records or backups,
+because a new secret cannot decrypt them. If old ones are there, first move the whole old state,
+including `~/.local/share/annon`, to a separate private archive and keep it. The example below uses a NEAR account; for an
 EVM wallet, replace `near:YOUR_ACCOUNT.near` with `evm:0xYOUR_ADDRESS`:
 
 ```sh

@@ -10,7 +10,7 @@ import type { Environment } from './wallets.js';
 const savedState = () =>
   new AdapterError(
     'backup_secret_required',
-    'Saved records or backups already exist. Restore their matching backup secret or select its existing file. A new secret cannot decrypt them. For wallet recovery with a new secret, preserve the old state and choose a separate empty state directory.',
+    'Saved records or backups already exist in the state directory or in ~/.local/share/annon; a new secret needs both empty. Restore their matching backup secret or select its existing file, because a new secret cannot decrypt them. To recover with a new secret instead, first move the whole old state, including ~/.local/share/annon, to a separate private archive and keep it.',
     2,
   );
 const uncheckable = () =>

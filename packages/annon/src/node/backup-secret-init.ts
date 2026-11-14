@@ -1,12 +1,14 @@
 /** `annon init` without --agent: validate the selected backup secret or create the default. */
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { link, lstat, mkdir, open, unlink } from 'node:fs/promises';
+import { link, mkdir, open, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { newBackupSecret } from '../pay/backup.js';
 import { hex } from '../settle-near/codec.js';
+import { agentPolicy } from './agent.js';
 import {
   type BackupSecretSource,
+  checkAppDirectory,
   defaultBackupSecretPath,
   findBackupSecret,
   readDefaultSecret,
@@ -20,16 +22,6 @@ import type { Environment } from './wallets.js';
 
 const setupError = (message: string) => new AdapterError('backup_secret_required', message, 2);
 
-/** The application directory itself must be private; the user's home ancestry is trusted. */
-async function privateDirectory(dir: string) {
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  const s = await lstat(dir);
-  if (!s.isDirectory() || s.uid !== process.getuid?.() || (s.mode & 0o022) !== 0)
-    throw setupError(
-      '~/.config/annon must be a directory you own that group and others cannot write. Fix it; Annon does not change existing directories.',
-    );
-}
-
 /**
  * Writes the secret to an exclusive owner-only temporary file, then publishes it with link(),
  * which never replaces an existing path (rename() would). Returns false when another
@@ -37,7 +29,9 @@ async function privateDirectory(dir: string) {
  */
 async function createDefaultSecret(path: string): Promise<boolean> {
   const dir = dirname(path);
-  await privateDirectory(dir);
+  // Missing parents are created 0700; an existing directory is only checked, never changed.
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await checkAppDirectory(dir);
   const temp = join(dir, `.${basename(path)}.${randomBytes(8).toString('hex')}.tmp`);
   const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
   let published: boolean;
@@ -86,6 +80,21 @@ const result = (source: BackupSecretSource, path: string | undefined, created: b
   configured: true,
   backupSecret: { source, ...(path ? { path } : {}), created },
 });
+
+/**
+ * The agent-policy check for bare init. A config that cannot be read must stop setup with a
+ * setup error, not a generic failure; policy refusals stay as they are.
+ */
+export async function initPolicy(o: Input, env: Environment, forced?: boolean) {
+  try {
+    return await agentPolicy(o, env, forced);
+  } catch (error) {
+    if (error instanceof AdapterError) throw error;
+    throw setupError(
+      'The Annon config could not be read to check agent policy. Fix or restore it before running annon init.',
+    );
+  }
+}
 
 /** Never writes an explicit source; creates the default only when no secret exists at all. */
 export async function initBackupSecret(

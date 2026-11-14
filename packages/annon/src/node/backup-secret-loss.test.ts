@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -118,5 +118,30 @@ it('a second machine restores by explicit file and decrypts a known portable bac
   } finally {
     process.env.HOME = firstHome;
     await rm(secondHome, { recursive: true, force: true });
+  }
+});
+
+it('the documented fresh-secret path: a new state dir alone is refused; archiving the old default state first works', async () => {
+  const legacy = join(homedir(), '.local', 'share', 'annon');
+  const archive = join(homedir(), 'archive', 'annon-old-state');
+  const fresh = join(homedir(), 'fresh-state');
+  await mkdir(join(legacy, 'records'), { recursive: true });
+  await writeFile(join(legacy, 'records', 'old.json'), '{"old":true}');
+  try {
+    const refused = await initBackupSecret({ stateDir: fresh }, {}).catch((e) => e);
+    expect(publicError(refused).message).toMatch(/a new secret needs both empty/);
+    expect(publicError(refused).message).toMatch(
+      /move the whole old state.*to a separate private archive/,
+    );
+
+    await mkdir(dirname(archive), { recursive: true, mode: 0o700 });
+    await rename(legacy, archive);
+    expect(await initBackupSecret({ stateDir: fresh }, {})).toMatchObject({
+      backupSecret: { created: true },
+    });
+    expect(await readFile(join(archive, 'records', 'old.json'), 'utf8')).toBe('{"old":true}');
+  } finally {
+    for (const dir of ['.local', 'archive', 'fresh-state'])
+      await rm(join(homedir(), dir), { recursive: true, force: true });
   }
 });
