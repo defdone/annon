@@ -143,6 +143,16 @@ Tools take camelCase versions of the CLI flags, with `target` as the positional 
   `1click` with a human-configured Base `origin`. An EVM agent that names no route gets
   `origin_required` for such a file.
 
+**1Click and small prices.** 1Click, the NEAR Intents swap service, has a minimum amount, currently
+about 0.15 USDC. The minimum is set by 1Click, not by Annon. A file priced below it, like the 0.10 USDC
+demo file, cannot be bought through `1click`: the quote is refused before there is a deposit address,
+so nothing is sent. Buy it with `near` or `base`, which have no minimum. We kept the demo at 0.10 USDC
+so anyone can try it for a few cents, and we know agents should not have to find this out by trying:
+showing each route's minimum in the catalog, and skipping a route that cannot work, is on the
+[roadmap](https://github.com/defdone/annon/blob/master/ROADMAP.md). If a refused quote left a
+purchase that blocks the next buy with `purchase_open`, buy again with `near` or `base` and
+`force: true` (CLI: `--force`); nothing was sent for the refused one.
+
 - `target` must be a secure resource URL within any configured allowlist. Local offer files are
   refused, and an optional `url` cannot authorize one.
 - The server fetches the offer from that URL and checks that the advertised resource matches it.
