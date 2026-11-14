@@ -5,7 +5,7 @@ it('uses frozen defaults and accepts zero only for disableable caps', () => {
   const s = settings({});
   expect(s.perIpMinute).toBe(600);
   expect(s.paymentsPerClientMinute).toBe(60);
-  expect(s.capacity.ingressPerDay).toBe(1_000_000_000);
+  expect(s.capacity.ingressPerDay).toBe(2_000_000_000);
   expect(s.facilitator.dailyGasBudgetWei).toBe(1_000_000_000_000_000n);
   expect(settings({ POOL_STORAGE_BYTES: '0' }).capacity.poolBytes).toBe(0);
   expect(() => settings({ POOL_STORAGE_BYTES: '' })).toThrow();
@@ -61,15 +61,16 @@ it('defaults split spending off and requires every explicit positive deployment 
 });
 it('uses the final open-pool defaults and ceilings', () => {
   expect(settings({}).capacity).toMatchObject({
-    filesPerDay: 60,
-    filesPerIpDay: 1,
-    filesPerSellerDay: 1,
+    filesPerDay: 200,
+    filesPerIpDay: 10,
+    filesPerSellerDay: 10,
   });
-  expect(() => settings({ SPONSORED_FILES_PER_DAY: '60' })).not.toThrow();
+  expect(() => settings({ SPONSORED_FILES_PER_DAY: '200' })).not.toThrow();
   for (const [name, value] of [
-    ['SPONSORED_FILES_PER_DAY', '61'],
-    ['SPONSORED_FILES_PER_IP_DAY', '2'],
-    ['REGISTRATIONS_PER_SELLER_DAY', '2'],
+    ['UPLOAD_BYTES_PER_DAY', '2000000001'],
+    ['SPONSORED_FILES_PER_DAY', '201'],
+    ['SPONSORED_FILES_PER_IP_DAY', '11'],
+    ['REGISTRATIONS_PER_SELLER_DAY', '11'],
   ] as const)
     expect(() => settings({ [name]: value })).toThrow(name);
 });
@@ -82,4 +83,16 @@ it('reserves the entire configured payment and split budgets at startup', () => 
   expect(() => settings({ ...splitEnv, FACILITATOR_DAILY_GAS_BUDGET_WEI: undefined })).toThrow(
     'BASE_WALLET_DAILY_BUDGET_WEI',
   );
+});
+
+it('accepts each host quota ceiling and tighter independent limits', () => {
+  for (const [name, value, field] of [
+    ['UPLOAD_BYTES_PER_DAY', 2_000_000_000, 'ingressPerDay'],
+    ['SPONSORED_FILES_PER_DAY', 200, 'filesPerDay'],
+    ['SPONSORED_FILES_PER_IP_DAY', 10, 'filesPerIpDay'],
+    ['REGISTRATIONS_PER_SELLER_DAY', 10, 'filesPerSellerDay'],
+  ] as const) {
+    for (const limit of [0, 1, value])
+      expect(settings({ [name]: String(limit) }).capacity[field]).toBe(limit);
+  }
 });

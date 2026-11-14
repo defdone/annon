@@ -15,7 +15,7 @@ it('uses frozen defaults, accepts zero disabling caps and rejects invalid or rai
     facilitator: { maxWaiting: 16 },
     maxFileBytes: 50_000_000,
     maxPay2Bytes: 50_086_016,
-    capacity: { ingressPerDay: 1_000_000_000, ttlSeconds: 604800 },
+    capacity: { ingressPerDay: 2_000_000_000, ttlSeconds: 604800 },
   });
   expect(hostSettings({ ...env, SPONSORED_FILES_PER_DAY: '0' }).capacity.filesPerDay).toBe(0);
   for (const override of [
@@ -72,6 +72,11 @@ it('parses upload defaults and disabling separately from the listed allowance', 
       idleSeconds: 600,
       requestSeconds: 1800,
     },
-    capacity: { listedPerSellerDay: 20, filesPerDay: 60, filesPerIpDay: 1, filesPerSellerDay: 1 },
+    capacity: {
+      listedPerSellerDay: 20,
+      filesPerDay: 200,
+      filesPerIpDay: 10,
+      filesPerSellerDay: 10,
+    },
   });
 });

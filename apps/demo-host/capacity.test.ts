@@ -619,7 +619,7 @@ it.each(['files', 'ip', 'seller'] as const)(
       plaintextSize: 10,
     };
     const cap = await hostCapacity(dir);
-    const limit = guard === 'files' ? 60 : 1;
+    const limit = guard === 'files' ? 200 : 10;
     for (let i = 0; i < limit; i++) {
       await cap.reserve({
         ...input,
@@ -671,3 +671,32 @@ it.each(['total', 'ip', 'seller'])(
     }
   },
 );
+
+it('uses the two-billion-byte ingress fallback for admission, retries and received pieces', async () => {
+  dir = await mkdtemp(join(tmpdir(), 'host-ingress-default-'));
+  const input = {
+    id: 'one',
+    fileId: 'one',
+    slug: 'one',
+    seller: 'seller',
+    ip: 'ip',
+    listed: false,
+    byteSize: 100,
+    bodyBytes: 50,
+    plaintextSize: 10,
+  };
+  const configured = await hostCapacity(dir, { ingressPerDay: 2_000_000_000 });
+  await configured.reserve(input);
+  await expect(configured.received('one', 1_500_000_000)).rejects.toMatchObject({
+    code: 'too_large',
+  });
+  await configured.close('one');
+  await configured.reserve({ ...input, id: 'two', fileId: 'two' });
+  await configured.received('two', 50);
+  await configured.verified('two');
+  const defaults = await hostCapacity(dir);
+  await defaults.begin('two', true);
+  await defaults.received('two', 50);
+  await defaults.end('two');
+  await defaults.reserve({ ...input, id: 'three', fileId: 'three' });
+});

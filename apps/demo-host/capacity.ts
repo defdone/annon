@@ -181,7 +181,7 @@ export async function hostCapacity(dir: string, o: CapacityLimits = {}) {
         if (
           capacity(s, false) + i.byteSize * 2 > (o.hostBytes ?? 80_000_000_000) ||
           (!i.listed && capacity(s, true) + i.byteSize * 2 > (o.poolBytes ?? 40_000_000_000)) ||
-          counts.ingress + ingressHolds + i.bodyBytes > (o.ingressPerDay ?? 1_000_000_000) ||
+          counts.ingress + ingressHolds + i.bodyBytes > (o.ingressPerDay ?? 2_000_000_000) ||
           receiving.length >= (o.concurrency ?? 4) ||
           receiving.filter((r) => r.seller === i.seller).length >= (o.perSeller ?? 1) ||
           receiving.filter((r) => r.ip === i.ip).length >= (o.perIp ?? 1)
@@ -189,10 +189,10 @@ export async function hostCapacity(dir: string, o: CapacityLimits = {}) {
           throw new CapacityError('host_capacity');
         if (
           (!i.listed &&
-            (counts.files >= (o.filesPerDay ?? 60) ||
-              (counts.ips[i.ip] ?? 0) >= (o.filesPerIpDay ?? 1))) ||
+            (counts.files >= (o.filesPerDay ?? 200) ||
+              (counts.ips[i.ip] ?? 0) >= (o.filesPerIpDay ?? 10))) ||
           (counts.sellers[sellerKey] ?? 0) >=
-            (i.listed ? (o.listedPerSellerDay ?? 20) : (o.filesPerSellerDay ?? 1))
+            (i.listed ? (o.listedPerSellerDay ?? 20) : (o.filesPerSellerDay ?? 10))
         ) {
           const error = new CapacityError('rate_limited');
           error.retryAfterSeconds = Math.ceil((86_400_000 - (t % 86_400_000)) / 1000);
@@ -227,7 +227,7 @@ export async function hostCapacity(dir: string, o: CapacityLimits = {}) {
           streams.filter((v) => v.seller === r.seller).length >= (o.perSeller ?? 1) ||
           streams.filter((v) => v.ip === r.ip).length >= (o.perIp ?? 1) ||
           day(s, Math.floor(now() / 86_400_000)).ingress + holds + (body ? r.bodyBytes : 0) >
-            (o.ingressPerDay ?? 1_000_000_000)
+            (o.ingressPerDay ?? 2_000_000_000)
         )
           throw new CapacityError('host_capacity');
         r.attempt = { received: 0, bytes: body ? r.bodyBytes : 0 };
@@ -264,7 +264,7 @@ export async function hostCapacity(dir: string, o: CapacityLimits = {}) {
         r.activityAt = now();
         return (
           (r.attempt ? r.attempt.received > r.attempt.bytes : r.received > r.bodyBytes) ||
-          counts.ingress > (o.ingressPerDay ?? 1_000_000_000)
+          counts.ingress > (o.ingressPerDay ?? 2_000_000_000)
         );
       });
       if (overflow) throw new CapacityError('too_large');

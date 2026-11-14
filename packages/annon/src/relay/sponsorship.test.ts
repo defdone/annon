@@ -248,7 +248,44 @@ it('uses the final shared admission defaults for unlisted sellers', async () => 
   const { relayLimits } = await import('./sponsorship.js');
   expect(relayLimits({ policy: {} } as CheckOptions)).toMatchObject({
     files: 60,
-    filesPerIp: 1,
-    registrationsPerSeller: 1,
+    filesPerIp: 2,
+    registrationsPerSeller: 2,
   });
 });
+
+it.each(['files', 'ip', 'seller'] as const)(
+  'retains finalized failed registrations at the default %s boundary',
+  async (guard) => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+    try {
+      const { relayLimits } = await import('./sponsorship.js');
+      const o = options();
+      const limits = relayLimits(o);
+      const store = memoryStore<RelayState>();
+      const ledger = new RelayLedger(store, 'quota-boundary');
+      const limit = guard === 'files' ? 60 : 2;
+      const input = (i: number) => ({
+        id: String(i),
+        requestHash: String(i),
+        method: 'register',
+        fileId: `0x${i.toString(16).padStart(64, '0')}`,
+        termsHash: termsHash(initial),
+        seller: guard === 'seller' ? 'seller' : String(i),
+        ip: guard === 'ip' ? 'ip' : String(i),
+        listed: false,
+        storage: '0',
+        allocation: '0',
+        limits,
+      });
+      for (let i = 0; i < limit; i++) {
+        await ledger.prepare(input(i), 1000);
+        await ledger.reject(String(i), false);
+      }
+      const restart = new RelayLedger(store, 'quota-boundary');
+      await expect(restart.prepare(input(limit), 1000)).rejects.toMatchObject({ code: 'limited' });
+      expect((await restart.prepare(input(limit), 86400000)).fresh).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+  },
+);

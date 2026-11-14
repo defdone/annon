@@ -223,7 +223,7 @@ async function admission(
         fee: c.policy.fee ?? { fixed: '0', bps: 0, treasuryNear: null, treasuryEvm: null },
         sponsorship: {
           filesPerDay: c.policy.sponsoredFilesPerDay ?? 60,
-          filesPerIpDay: c.sponsoredFilesPerIpDay ?? 1,
+          filesPerIpDay: c.sponsoredFilesPerIpDay ?? 2,
           fileBudget: String(c.policy.fileBudget ?? 41n * 10n ** 21n),
           listedFileBudget: String(c.policy.listedFileBudget ?? 5n * 10n ** 22n),
           topupPerFile: String(c.policy.topupPerFile ?? 82n * 10n ** 21n),
@@ -382,7 +382,7 @@ async function admission(
           unlock: c.perMethodDay?.unlock ?? 500,
           unlockReserved: c.unlockReserved ?? 500,
           unlockListedReserved: c.unlockListedReserved ?? 250,
-          filesPerIp: c.sponsoredFilesPerIpDay ?? 1,
+          filesPerIp: c.sponsoredFilesPerIpDay ?? 2,
           methods: c.perMethodDay ?? {},
         },
       });
@@ -457,7 +457,7 @@ async function admission(
   if (pool === 'register') {
     for (const [key, limit] of [
       ['day:files', c.policy.sponsoredFilesPerDay ?? 60],
-      [`day:files-ip:${ip}`, c.sponsoredFilesPerIpDay ?? 1],
+      [`day:files-ip:${ip}`, c.sponsoredFilesPerIpDay ?? 2],
     ] as const) {
       const counter = allow(key, limit, 86_400_000, now, c.hitsCap);
       if (!counter) {
@@ -668,7 +668,7 @@ export function serve(c: Config, port: number, keeperSeconds = 0) {
       unlock: c.perMethodDay?.unlock ?? 500,
       unlockReserved: c.unlockReserved ?? 500,
       unlockListedReserved: c.unlockListedReserved ?? 250,
-      filesPerIp: c.sponsoredFilesPerIpDay ?? 1,
+      filesPerIp: c.sponsoredFilesPerIpDay ?? 2,
       methods: c.perMethodDay ?? {},
     };
     stopKeeper = keeperSeconds > 0 ? keeper(c, keeperSeconds) : async () => {};
@@ -1090,8 +1090,8 @@ export function fromEnv(e: Record<string, string | undefined>): {
     MAX_DEADLINE_SECONDS: 600,
     TOPUP_MAX_DEADLINE_SECONDS: 600,
     SPONSORED_FILES_PER_DAY: 60,
-    SPONSORED_FILES_PER_IP_DAY: 1,
-    REGISTRATIONS_PER_SELLER_DAY: 1,
+    SPONSORED_FILES_PER_IP_DAY: 2,
+    REGISTRATIONS_PER_SELLER_DAY: 2,
     LISTED_REGISTRATIONS_PER_SELLER_DAY: 20,
     CORS_MAX_AGE_SECONDS: 600,
   })) {
@@ -1278,7 +1278,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
         },
         maxDeadlineSeconds: count('MAX_DEADLINE_SECONDS', '600'),
         claimsPerGrant: count('CLAIMS_PER_GRANT_DAY', '3'),
-        registrationsPerSeller: count('REGISTRATIONS_PER_SELLER_DAY', '1'),
+        registrationsPerSeller: count('REGISTRATIONS_PER_SELLER_DAY', '2'),
         reopensPerWalletFile: count('REOPENS_PER_PURCHASE_DAY', '10'),
         holdMs: count('HOLD_SECONDS', '900') * 1000,
         maxWaiting: count('MAX_WAITING', '32'),
@@ -1287,7 +1287,7 @@ export function fromEnv(e: Record<string, string | undefined>): {
       },
       ...(keeperConfig ? { keeper: keeperConfig } : {}),
       disabled: flag('DISABLED', '0'),
-      sponsoredFilesPerIpDay: count('SPONSORED_FILES_PER_IP_DAY', '1'),
+      sponsoredFilesPerIpDay: count('SPONSORED_FILES_PER_IP_DAY', '2'),
       perIpHour: count('PER_IP_HOUR', '600'),
       perDay,
       unlockReserved,

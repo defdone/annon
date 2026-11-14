@@ -1002,7 +1002,7 @@ it('opens sponsorship without SELLERS and publishes bounded budgets and the prot
   const result = await handle(c, 'GET', '/v1/capabilities', '192.0.2.10', '');
   expect(result.body).toMatchObject({
     fee: { fixed: '30000', bps: 100 },
-    sponsorship: { filesPerDay: 60, filesPerIpDay: 1, fileBudget: '41000000000000000000000' },
+    sponsorship: { filesPerDay: 60, filesPerIpDay: 2, fileBudget: '41000000000000000000000' },
   });
 });
 
