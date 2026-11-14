@@ -22,7 +22,8 @@ no arguments.
 The server uses the CLI configuration and secret sources
 ([CLI.md](https://github.com/defdone/annon/blob/master/packages/annon/CLI.md)). Set `ANNON_CONFIG`
 to the owner's configuration file and pass credential and backup-secret references in the server
-environment. With this custom-config setup, put deployment, trust, moderators and origins in the
+environment. The server never creates a backup secret: run `annon init` as the owner first, or set
+an absolute `ANNON_BACKUP_SECRET_FILE` (best for a service account with another home). With this custom-config setup, put deployment, trust, moderators and origins in the
 file: their environment overrides are ignored. `ANNON_MAX_PRICE` and `ANNON_ALLOWED_RESOURCES` can
 still tighten policy. `ANNON_AGENT=true` instead pins the home configuration and enables
 launcher-owned deployment overrides. A client configuration:

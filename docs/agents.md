@@ -35,9 +35,12 @@ Create a working directory and a configuration file, for example `/absolute/anno
 
 Every agent origin needs `usdcDecimals` for a USDC source, or `maxSourceAmount` in source base units. Without one, configuration fails with `origin_not_allowed`.
 
-Then give the agent a signer and a daily budget, once, as the owner:
+Then, once, as the owner: create the backup secret that encrypts the agent's records (or name an
+existing private file with `ANNON_BACKUP_SECRET_FILE`, as in the client example below), and give the
+agent a signer and a daily budget. Agent mode refuses `init` later and never creates the secret:
 
 ```sh
+ANNON_CONFIG=/absolute/annon-agent.json annon init
 ANNON_CONFIG=/absolute/annon-agent.json annon init --agent --wallet evm --recovery evm:0xAGENT_ADDRESS --evm-key-file /absolute/private/agent-evm.key --daily-budget 2
 ```
 

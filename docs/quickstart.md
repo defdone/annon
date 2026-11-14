@@ -34,16 +34,34 @@ Create `~/.config/annon/config.json`:
 `maxPrice` is the most a single purchase may cost, in USDC. To pay on Base, also add `"baseRpc"`
 ([Pay on Base](#pay-on-base)).
 
-Create the backup secret that encrypts your local purchase records, and keep it outside any
-repository:
+Create the backup secret that encrypts your local purchase records:
 
 ```sh
-openssl rand -hex 32 > "$HOME/.annon-backup-secret" && chmod 600 "$HOME/.annon-backup-secret"
-export ANNON_BACKUP_SECRET_FILE="$HOME/.annon-backup-secret"
+annon init
 ```
 
+It writes 32 random bytes to `~/.config/annon/backup-secret`, readable only by you, and prints where
+the file is. It never prints the secret and never replaces an existing file: run it again and it only
+checks the file. Other commands read the file but never create it. To keep the secret somewhere
+else, point `ANNON_BACKUP_SECRET_FILE` at that file instead.
+
+Back up the file now, separately from your records, to private encrypted storage you have mounted.
+This copies it without displaying it and refuses to overwrite an existing copy:
+
+```sh
+node --input-type=module -e '
+  import { constants } from "node:fs";
+  import { copyFile } from "node:fs/promises";
+  await copyFile(process.argv[1], process.argv[2], constants.COPYFILE_EXCL);
+' "$HOME/.config/annon/backup-secret" /mounted-private-encrypted-backup/annon-backup-secret
+```
+
+Check that the copy has mode 600. If a copy already exists, keep it and choose another name.
+Encrypted record backups in your state directory do not include this secret.
+
 Keep this secret and your purchase IDs. With them you can check, resume and open a purchase. If you
-lose them, the same wallet can still recover the file (step 5).
+lose the secret, your saved records cannot be decrypted, but the same wallet can still recover the
+file (step 5).
 
 ## 3. Sign in with your wallet
 
@@ -135,9 +153,24 @@ from, add `--refund-to` with an address on the source chain. Supported chains an
 
 ## 5. Open it on another computer
 
-The same wallet gets the file again without paying a second time. Repeat steps 1 to 3 on the new
-computer, then recover and open. The example below uses a NEAR account; for an EVM wallet, replace
-`near:YOUR_ACCOUNT.near` with `evm:0xYOUR_ADDRESS`:
+**With your saved secret.** Copy the backup-secret file securely into a private directory on the new
+computer (mode 600), and copy your encrypted purchase backups separately. Do not run `annon init`
+first; select the restored file instead. The variable holds a path, not the secret:
+
+```sh
+export ANNON_BACKUP_SECRET_FILE=/absolute/private/restored-annon-backup-secret
+annon open /absolute/private/purchase-backup.json --url https://host.example/file --output restored-file
+```
+
+Opening one known backup proves the restore worked. You can also copy the saved file to
+`~/.config/annon/backup-secret` with the copy command from step 2, after creating `~/.config/annon`
+with mode 700.
+
+**With a fresh secret.** The same wallet gets the file again without paying a second time. Repeat
+steps 1 to 3 on the new computer, including `annon init`, then recover and open. If old records are
+still in the state directory, keep them and choose a new empty `stateDir`: `annon init` refuses to
+create a new secret over records it cannot decrypt. The example below uses a NEAR account; for an
+EVM wallet, replace `near:YOUR_ACCOUNT.near` with `evm:0xYOUR_ADDRESS`:
 
 ```sh
 annon recover --recovery near:YOUR_ACCOUNT.near

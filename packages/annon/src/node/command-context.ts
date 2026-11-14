@@ -154,7 +154,7 @@ async function pendingSetup(ctx: RequestContext, purchaseId: string) {
   return {
     purchaseId,
     state: 'pending',
-    next: 'Check the payment; configure readable saved state and the matching backup secret to resume Base unlock. 1Click SUCCESS alone is not acceptance.',
+    next: 'Check the payment. To resume Base unlock, keep the saved state readable and restore its matching backup secret (or select its existing copy with ANNON_BACKUP_SECRET_FILE). 1Click SUCCESS alone is not acceptance.',
   };
 }
 

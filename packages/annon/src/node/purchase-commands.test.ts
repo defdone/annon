@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 const pendingNext =
-  'Check the payment; configure readable saved state and the matching backup secret to resume Base unlock. 1Click SUCCESS alone is not acceptance.';
+  'Check the payment. To resume Base unlock, keep the saved state readable and restore its matching backup secret (or select its existing copy with ANNON_BACKUP_SECRET_FILE). 1Click SUCCESS alone is not acceptance.';
 const purchaseId = `0x${'77'.repeat(32)}`;
 const agentConfig = (dir: string) => ({ workDir: dir, maxPrice: '1', dailyBudget: '1' });
 

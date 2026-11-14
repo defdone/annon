@@ -9,13 +9,14 @@ import { signNearUpload } from '../browser/wallets.js';
 import type { UploadAuth, UploadIntent } from '../download/upload.js';
 import { nep413Hash } from '../near/nep413.js';
 import type { SplitCall } from '../pay/split.js';
-import { bytes, hex } from '../settle-near/codec.js';
+import { hex } from '../settle-near/codec.js';
 import { identityJson, parseIdentity } from '../settle-near/identity.js';
 import { type EvmWallet, type IdentityWallet, nearKeyPairWallet } from '../wallet/wallet.js';
 import type { Input } from './cli.js';
 import { AdapterError } from './errors.js';
 import { decodeKeychain, type Keychain, osKeychain } from './keychain.js';
 
+export { readBackupSecret } from './backup-secret.js';
 export type Environment = Record<string, string | undefined>;
 export type LocalWallet = IdentityWallet & {
   signUpload?: (intent: UploadIntent) => Promise<UploadAuth>;
@@ -35,21 +36,6 @@ async function source(file: string | undefined, env: string | undefined): Promis
   if (file) return (await readFile(file, 'utf8')).trim();
   if (env) return env.trim();
   throw credentialsError();
-}
-export async function readBackupSecret(o: Partial<Input>, env: Environment): Promise<Uint8Array> {
-  try {
-    const text = await source(
-      o.backupSecretFile ?? env.ANNON_BACKUP_SECRET_FILE,
-      env.ANNON_BACKUP_SECRET,
-    );
-    return bytes(text.startsWith('0x') ? text : `0x${text}`, 32);
-  } catch {
-    throw new AdapterError(
-      'backup_secret_required',
-      'Provide a 32-byte random backup secret as 64 hex characters in ANNON_BACKUP_SECRET or a named backup secret file.',
-      2,
-    );
-  }
 }
 export async function loadWallet(
   o: Partial<Input>,

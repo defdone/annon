@@ -203,6 +203,7 @@ const { meta, data } = await controller.open({ onProgress: renderDownload });
   before an expired key is replaced. Portable receipts carry those archives too.
 - The local random backup secret is persisted in IndexedDB for reload recovery. It protects
   encrypted storage from accidental disclosure and shares the embedding page's trust boundary.
+  This is the browser's secret; the CLI keeps its own in a file ([CLI.md](CLI.md#backup-secret)).
 - Export with `controller.exportReceipt(portableSecret)`, using a separate random 32-byte
   `newBackupSecret()` that you keep separately. Import with
   `storage.importReceipt(file, portableSecret)`. Import restores the header, resource URL and
@@ -294,6 +295,9 @@ shop-provided data: on each shop's `info` from `listShops`, and as `rules` with 
 [CLI.md](CLI.md#shop-discovery).
 
 ## CLI browser wallet login
+
+Run `annon init` once first. It creates the CLI backup secret file that encrypts local records
+([CLI.md](CLI.md#backup-secret)); login neither creates nor exports it.
 
 ```sh
 annon login --wallet evm
@@ -405,8 +409,11 @@ Order matters, because agent mode refuses `init`, `login` and per-call trust or 
 2. Write the deployment, `maxPrice`, `workDir` and, after reviewing the contract,
    `trustContract: true` (or trust it once with a human command and `--trust-contract`). Do not set
    `agent: true` yourself.
-3. Run one `annon init --agent ...` from the examples above. It saves the signer, the daily budget
-   and `agent: true`.
+3. Run bare `annon init` to create the backup secret, or give the launcher an absolute
+   `ANNON_BACKUP_SECRET_FILE` you manage ([CLI.md](CLI.md#backup-secret)). Agent mode never creates
+   one.
+4. Run one `annon init --agent ...` from the examples above. It saves the signer, the daily budget
+   and `agent: true`. It does not create or reference a backup secret.
 
 - Agents never prompt. Missing trust, price cap or daily budget causes a refusal.
 - `allowedResources` is optional. Without it, any secure resource URL is allowed within the
@@ -447,7 +454,8 @@ Before a human payment the CLI confirms the current price, split recipients and 
 and file, token and network. Browser mode shows these exact terms with each signing request for
 approval in the page and the wallet. Local and remote human signing require an explicit terminal
 confirmation. Purchase and recovery secrets still need the independent backup secret described in
-CLI.md; login does not derive one from a signature.
+[CLI.md](CLI.md#backup-secret) and created by `annon init`; login does not derive one from a
+signature.
 
 ## Remote signer, HTTP JSON v1
 

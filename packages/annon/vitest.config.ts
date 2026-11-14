@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    setupFiles: ['test/isolated-home.ts'],
     // Allow CPU contention during exhaustive crypto checks and optional multi-GiB round trips.
     testTimeout:
       process.env.ANNON_LARGE_FILES === '1'

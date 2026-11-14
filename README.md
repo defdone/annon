@@ -173,8 +173,10 @@ wallet with USDC on Base. Install the CLI from the npm `alpha` tag:
 npm install -g @defdone/annon@alpha
 ```
 
-Write `~/.config/annon/config.json` with the deployment and your price cap, create a backup secret,
-and sign in with your wallet: [docs/quickstart.md](docs/quickstart.md) has each command. Then:
+Write `~/.config/annon/config.json` with the deployment and your price cap, run `annon init` once to
+create the backup secret that encrypts your local records, back that file up
+([how](docs/quickstart.md#2-configure)), and sign in with your wallet:
+[docs/quickstart.md](docs/quickstart.md) has each command. Then:
 
 ```sh
 annon verify https://demo.annon.dev/f/what-we-are-building --trust-contract
