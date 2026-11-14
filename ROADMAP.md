@@ -102,6 +102,11 @@ It suits agents that need to hand a file to another agent they already know.
 - A local purchases panel, started from the CLI, that shows your purchases and sales from your
   local records.
 
+### Our own apps as the first shops
+
+Once Annon is stable, our existing products will list their files through it and be the first shops
+in `annon shops`, so people and agents can buy from them with the same flow.
+
 ### Agents
 
 - Funding errors that say exactly what to send: chain, token, paying address, price, balance and
