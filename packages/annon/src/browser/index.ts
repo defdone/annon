@@ -113,6 +113,8 @@ export {
   type PurchaseProgress,
   type PurchaseSdk,
   type PurchaseTermsReview,
+  type ReconcileOptions,
+  type ReconcileResult,
 } from './purchases.js';
 export {
   type BrowserSaleIndex,
