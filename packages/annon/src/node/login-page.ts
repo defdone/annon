@@ -12,9 +12,11 @@ export const LOGIN_PAGE_HTML = `<!doctype html><html lang="en"><head><meta chars
 <header class="brand">${MARK}<p class="eyebrow">ANNON CLI</p></header>
 <h1 id="title">Waiting for the CLI</h1>
 <section class="pair" aria-labelledby="pair-label"><p class="label" id="pair-label">Pairing code</p><p id="pair" class="code">------</p><p class="hint">Check that your terminal shows the same code.</p></section>
+<div id="steps" aria-label="Finished approvals"></div>
+<p class="label" id="step-state">In progress</p>
 <section id="summary" class="summary" hidden><p id="amount" class="amount" hidden></p><dl id="rows" class="rows"></dl><div id="message-box" class="message" hidden><p id="message-label" class="label"></p><pre id="message"></pre></div><ul id="warnings" class="warnings" hidden></ul><div id="terms-box" class="terms" hidden><p class="label">Terms from the CLI</p><p class="hint">For review. Your wallet signs only the request above.</p><dl id="terms" class="rows"></dl></div><p id="note" class="note"></p></section>
 <section class="act"><div id="wallet-field" class="field" hidden><span class="label" id="near-wallet-label">NEAR wallet</span><div class="picker"><div id="near-wallet" class="picker-button" role="combobox" tabindex="0" aria-haspopup="listbox" aria-expanded="false" aria-controls="near-wallet-list" aria-labelledby="near-wallet-label near-wallet-value"><span id="near-wallet-value">Meteor Wallet</span></div><ul id="near-wallet-list" class="picker-list" role="listbox" aria-labelledby="near-wallet-label" hidden><li id="near-wallet-meteor" class="option" role="option" aria-selected="true">Meteor Wallet<span class="option-note">Extension or web popup</span></li><li id="near-wallet-hot" class="option" role="option" aria-selected="false">HOT Wallet<span class="option-note">Mainnet only</span></li></ul></div></div><div class="buttons"><button id="approve" class="primary" disabled>Review in wallet</button><button id="cancel" class="secondary" hidden>Cancel</button></div><p id="status" class="status" role="status" aria-live="polite"></p></section>
-<details class="details"><summary>Technical details</summary><pre id="action"></pre></details>
+<details id="current-technical" class="details"><summary>Technical details</summary><pre id="action"></pre></details>
 </main></body></html>`;
 
 export const LOGIN_PAGE_CSS = `:root{--paper:#FAF8F2;--alt:#F1EDE3;--ink:#111111;--soft:#2E2C28;--muted:#4A4741;--line:#D9D3C7;--red:#B3261E;--serif:Newsreader,"Iowan Old Style",Georgia,serif;--mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace}
@@ -31,6 +33,10 @@ h1{font-weight:500;font-size:clamp(28px,6vw,36px);line-height:1.15;margin:0 0 24
 .hint{margin:6px 0 0;color:var(--muted);font-size:15px}
 .pair{border:1px solid var(--ink);background:var(--alt);padding:16px 20px;margin-bottom:28px}
 .code{margin:0;font:600 clamp(30px,9vw,40px)/1.1 var(--mono);letter-spacing:.18em;word-break:break-all}
+.step{border-top:1px solid var(--line);padding:12px 0;margin-bottom:16px}
+.step>summary{cursor:pointer;display:flex;gap:16px;align-items:baseline}
+.done-mark{color:#23643B;font:12px var(--mono);white-space:nowrap}
+.step[open]>summary{margin-bottom:16px}
 .summary{border-top:1px solid var(--line);padding-top:20px}
 .amount{margin:0 0 12px;font-size:clamp(30px,8vw,42px);line-height:1.1}
 .rows{margin:0}

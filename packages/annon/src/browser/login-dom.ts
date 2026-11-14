@@ -7,6 +7,8 @@ import type { Status } from './login-status.js';
 import type { Row, Summary } from './login-view.js';
 
 const IDS = [
+  'current-technical',
+  'step-state',
   'title',
   'pair',
   'summary',
@@ -75,7 +77,9 @@ export function renderSummary(
   el.note.textContent = s.note;
   el.action.textContent = technical;
   el.summary.hidden = false;
-  return dds[dds.length - 1] as HTMLElement;
+  const expiry = dds[dds.length - 1] as HTMLElement;
+  expiry.setAttribute('data-expiry', '');
+  return expiry;
 }
 
 export function showStatus(el: PageElements, status: Status): void {

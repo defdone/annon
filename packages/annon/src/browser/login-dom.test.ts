@@ -11,6 +11,10 @@ class Element {
   className = '';
   hidden = true;
   children: Element[] = [];
+  attributes = new Map<string, string>();
+  setAttribute(name: string, value: string) {
+    this.attributes.set(name, value);
+  }
   constructor(readonly tag: string) {}
   set innerHTML(_: string) {
     throw new Error('markup assignment');
