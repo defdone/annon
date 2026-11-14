@@ -274,6 +274,8 @@ fn seller_and_buyer_texts_match() {
                 &bytes::<48>(s(&a["key"]), "key"),
                 a["deadline"].as_u64().unwrap(),
             ),
+            // Signed by sellers for the relayer's sponsored top-up; the contract never verifies it.
+            "fund_file_storage" => continue,
             k => panic!("unknown text kind {k}"),
         };
         assert_eq!(text, s(&c["text"]), "{}", c["id"]);

@@ -576,13 +576,31 @@ it('omits the public route when final chain state has no local payment summary',
 });
 
 it('requires a funding amount as invalid input before loading a wallet', async () => {
-  const wallet = vi.fn();
-  const run = createAdapter({}, { wallet });
-  const error = await run({ command: 'fund', target: initialTerms.file_id }).catch((e) => e);
-  expect(publicError(error)).toEqual({
-    code: 'invalid_arguments',
-    message: 'Provide the NEAR amount to allocate.',
-    exitCode: 2,
-  });
-  expect(wallet).not.toHaveBeenCalled();
+  // Its own config, so the result does not depend on a config in the user's home directory.
+  const dir = await mkdtemp(join(tmpdir(), 'annon-fund-amount-'));
+  try {
+    const path = join(dir, 'config.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        contractId: 'v1.annon.defdone.near',
+        network: 'near:mainnet',
+        nearRpc: 'https://rpc.mainnet.fastnear.com',
+        relayer: 'https://relayer.mainnet.annon.dev',
+        stateDir: join(dir, 'state'),
+        trustContract: true,
+      }),
+    );
+    const wallet = vi.fn();
+    const run = createAdapter({ ANNON_CONFIG: path }, { wallet });
+    const error = await run({ command: 'fund', target: initialTerms.file_id }).catch((e) => e);
+    expect(publicError(error)).toEqual({
+      code: 'invalid_arguments',
+      message: 'Provide the NEAR amount to allocate.',
+      exitCode: 2,
+    });
+    expect(wallet).not.toHaveBeenCalled();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
