@@ -14,7 +14,7 @@ the terms registered on NEAR before it publishes them.
 |---|---|
 | `GET /` | The files and the commands to buy them (HTML) |
 | `GET /files.json` | The catalog for clients and agents: name, file ID, title, description, URL, header URL, sizes, creation and expiry time, registered terms, and whether sales stopped or the file was taken down |
-| `GET /f/<name>` | The PAY2 file: `402` with the offer until paid, `410 file_expired` after expiry |
+| `GET /f/<name>` | The PAY2 file: `402` with the offer until paid, `410 file_expired` after expiry. A browser that asks for `text/html` gets the same status and headers with a short page about the file in the body |
 | `GET /f/<name>/header` | Its public header, checked by the buyer before paying |
 | `POST /v1/uploads` | Start a hosted upload with a seller-signed request |
 | `PUT /v1/uploads/<id>/body`, `PUT /v1/uploads/<id>/header` | Send the encrypted body, then the signed header |
