@@ -162,12 +162,12 @@ it('starts a wallet action only once even with repeated clicks while approval is
   ).toHaveLength(1);
 });
 
-const nearAction = (operation: string) => ({
+const nearAction = (operation: string, chain = 'near:testnet') => ({
   id: 'near-once',
   version: 1,
   operation,
   account: 'bot.near',
-  chain: 'near:testnet',
+  chain,
   expiresAt: Date.now() + 10000,
   payload:
     operation === 'near.nep413'
@@ -206,10 +206,14 @@ async function approveNear(
     listeners?: Set<(e: unknown) => void>;
   };
   const results: unknown[] = [];
+  const logs: unknown[][] = [];
+  const capture = (...args: unknown[]) => {
+    logs.push(args);
+  };
   const stored = new Map<string, string>();
   const context = createContext(
     {
-      console: { ...console, log: () => {} },
+      console: { log: capture, info: capture, warn: capture, error: capture, debug: capture },
       TextEncoder,
       TextDecoder,
       Uint8Array,
@@ -262,7 +266,7 @@ async function approveNear(
       fetch: async (url: string, init?: RequestInit) => {
         if (url === '/api/result') results.push(JSON.parse(String(init?.body)).result);
         if (url.startsWith('/')) return Response.json({ pairingCode: '123', action });
-        if (url.startsWith('https://test.rpc.fastnear.com')) {
+        if (/^https:\/\/(free|test)\.rpc\.fastnear\.com\/?$/.test(url)) {
           const q = JSON.parse(String(init?.body));
           return Response.json({ jsonrpc: '2.0', id: q.id, result: rpc(q.method, q.params) });
         }
@@ -279,7 +283,44 @@ async function approveNear(
   runInContext(asset, context);
   await new Promise((resolve) => setTimeout(resolve, 0));
   await elements.get('approve')?.onclick?.();
-  return { status: elements.get('status')?.textContent ?? '', results };
+  return { status: elements.get('status')?.textContent ?? '', results, logs, stored, elements };
+}
+
+/** Every string and property name reachable from logged values (cycle safe, any depth). */
+function logged(logs: unknown[][]): string[] {
+  const out: string[] = [];
+  const seen = new Set<unknown>();
+  const walk = (v: unknown) => {
+    if (typeof v === 'string') out.push(v);
+    else if (typeof v === 'bigint' || typeof v === 'number') out.push(String(v));
+    else if (v && (typeof v === 'object' || typeof v === 'function') && !seen.has(v)) {
+      seen.add(v);
+      if (v instanceof Uint8Array) out.push(base58.encode(v), Buffer.from(v).toString('hex'));
+      for (const key of Object.getOwnPropertyNames(v)) {
+        out.push(key);
+        try {
+          walk((v as Record<string, unknown>)[key]);
+        } catch {}
+      }
+      try {
+        out.push(String(v));
+      } catch {}
+    }
+  };
+  for (const args of logs) for (const a of args) walk(a);
+  return out;
+}
+
+/** No logged value may carry a key pair or any private key the page stored. */
+function expectNoSecretLogged(logs: unknown[][], stored: Map<string, string>) {
+  const secrets = [...stored.values()].filter((v) => /^ed25519:[1-9A-HJ-NP-Za-km-z]{80,}$/.test(v));
+  const text = logged(logs);
+  expect(text.filter((t) => /secretKey|extendedSecretKey/.test(t))).toEqual([]);
+  for (const secret of secrets) {
+    const raw = secret.slice(8);
+    expect(text.filter((t) => t.includes(raw))).toEqual([]);
+  }
+  return secrets;
 }
 
 const accessKey = `ed25519:${base58.encode(new Uint8Array(32).fill(7))}`;
@@ -306,7 +347,7 @@ it.each(['near.nep413', 'near.signTransaction'])(
       sign_message: { accountId: 'bot.near', publicKey: accessKey, signature: 'fake' },
       sign: { executionOutcomes: [{ transaction: { hash: 'FAKE-TX-HASH' } }] },
     };
-    const { status, results } = await approveNear(action, 'meteor-wallet', {
+    const { status, results, logs, stored } = await approveNear(action, 'meteor-wallet', {
       rpc: nearRpc,
       listeners,
       open: (url: string) => {
@@ -336,6 +377,8 @@ it.each(['near.nep413', 'near.signTransaction'])(
       },
     });
     expect(status).toContain('Verified');
+    // Meteor's SDK stores a generated connector key; it must never reach the console.
+    expect(expectNoSecretLogged(logs, stored)).toHaveLength(1);
     expect(opened.map((u) => `${u.origin}${u.pathname}`)).toEqual([
       'https://wallet.meteorwallet.app/connect/testnet/login',
       `https://wallet.meteorwallet.app/connect/testnet/${operation === 'near.nep413' ? 'sign_message' : 'sign'}`,
@@ -381,7 +424,7 @@ it.each(['near.nep413', 'near.signTransaction'])(
 it.each(['near.nep413', 'near.signTransaction'])(
   'bundled HOT Wallet %s signs in account-only and sends the exact payload through its widget',
   async (operation) => {
-    const action = nearAction(operation);
+    const action = nearAction(operation, 'near:mainnet');
     const secret = new Uint8Array(32).fill(9);
     const publicKey = `ed25519:${base58.encode(ed25519.getPublicKey(secret))}`;
     const requests: { method: string; request: Record<string, unknown>; origin: string }[] = [];
@@ -412,7 +455,7 @@ it.each(['near.nep413', 'near.signTransaction'])(
       };
       return e;
     };
-    const { status, results } = await approveNear(action, 'hot-wallet', {
+    const { status, results, logs, stored } = await approveNear(action, 'hot-wallet', {
       rpc: nearRpc,
       setTimeout: (fn: () => void, ms: number) => (ms === 3000 || ms < 100 ? setTimeout(fn, 0) : 0),
       document: {
@@ -433,6 +476,7 @@ it.each(['near.nep413', 'near.signTransaction'])(
       },
     });
     expect(status).toContain('Verified');
+    expectNoSecretLogged(logs, stored);
     expect(mounted.map((c) => c.children[0]?.src?.split('?')[0])).toEqual([
       'https://hot-labs.org/hot-widget/index.html',
       'https://hot-labs.org/hot-widget/index.html',
@@ -496,6 +540,55 @@ it('refuses a NEAR wallet the page does not offer', async () => {
   expect(open).not.toHaveBeenCalled();
   expect(results).toEqual([]);
 });
+
+it.each(['near:testnet', 'near:sandbox'])(
+  'HOT Wallet on %s never reaches its extension, relay or widget, and its choice is disabled',
+  async (chain) => {
+    const action = nearAction('near.signTransaction', chain);
+    const hotExtension = { autoRun: true, request: vi.fn(), subscribe: vi.fn() };
+    const createElement = vi.fn();
+    const relay = vi.fn();
+    const open = vi.fn();
+    const { status, results, elements } = await approveNear(action, 'hot-wallet', {
+      rpc: nearRpc,
+      hotExtension,
+      open,
+      fetch: relay,
+      document: { createElement, body: { appendChild: createElement } },
+    });
+    expect(status).toMatch(
+      chain === 'near:testnet' ? /HOT Wallet is offered for near:mainnet only/ : /not near:sandbox/,
+    );
+    expect(elements.get('near-wallet-hot')?.disabled).toBe(true);
+    expect(hotExtension.request).not.toHaveBeenCalled();
+    expect(hotExtension.subscribe).not.toHaveBeenCalled();
+    expect(createElement).not.toHaveBeenCalled();
+    expect(relay).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+    expect(results).toEqual([]);
+  },
+);
+
+it('a mainnet NEAR action leaves the HOT Wallet choice enabled', async () => {
+  const action = nearAction('near.nep413', 'near:mainnet');
+  const { elements } = await approveNear(action, 'meteor-wallet', {
+    rpc: nearRpc,
+    open: () => null,
+  });
+  expect(elements.get('near-wallet-hot')?.disabled).toBe(false);
+});
+
+it.each(['near:foo', 'near:Mainnet', 'eip155:8453'])(
+  'refuses an unknown NEAR chain %s before any wallet runs',
+  async (chain) => {
+    const action = nearAction('near.nep413', chain);
+    const open = vi.fn();
+    const { status, results } = await approveNear(action, 'meteor-wallet', { rpc: nearRpc, open });
+    expect(status).toContain(`not ${chain}`);
+    expect(open).not.toHaveBeenCalled();
+    expect(results).toEqual([]);
+  },
+);
 
 it('the approval session API omits credentials and rejects redirects', async () => {
   const source = await readFile(new URL('./login.ts', import.meta.url), 'utf8');

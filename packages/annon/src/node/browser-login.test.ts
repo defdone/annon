@@ -169,20 +169,43 @@ it('retains known transaction evidence when browser submission cannot be verifie
   }
 });
 
-it('offers only connectable NEAR wallets and frames only the HOT widget origin', async () => {
+it('serves exactly the intended CSP and offers only connectable NEAR wallets', async () => {
   const s = await startBrowserSession({ open: vi.fn() });
   try {
     const u = new URL(s.url);
     const page = await send(s.url, '/', { host: u.host });
-    const csp = String(page.headers['content-security-policy'] ?? '');
-    expect(csp.split('; ').filter((d: string) => d.startsWith('frame-src'))).toEqual([
-      'frame-src https://hot-labs.org',
-    ]);
-    expect(csp).toContain("default-src 'none'");
-    expect([...page.body.matchAll(/<option value="([^"]+)">/g)].map((m) => m[1])).toEqual([
+    const script = await send(s.url, '/app.js', { host: u.host });
+    const parse = (header: unknown) =>
+      Object.fromEntries(
+        String(header ?? '')
+          .split(';')
+          .map((d) => d.trim().split(/\s+/))
+          .filter(([name]) => name)
+          .map(([name, ...sources]) => [name, sources.sort()]),
+      );
+    const intended = {
+      'default-src': ["'none'"],
+      'script-src': ["'self'"],
+      'connect-src': [
+        "'self'",
+        'https://free.rpc.fastnear.com',
+        'https://h4n.app',
+        'https://test.rpc.fastnear.com',
+      ],
+      'frame-src': ['https://hot-labs.org'],
+      'style-src': ["'self'"],
+      'img-src': ["'self'", 'data:'],
+      'frame-ancestors': ["'none'"],
+      'base-uri': ["'none'"],
+      'form-action': ["'none'"],
+    };
+    expect(parse(page.headers['content-security-policy'])).toEqual(intended);
+    expect(parse(script.headers['content-security-policy'])).toEqual(intended);
+    expect([...page.body.matchAll(/<option\b[^>]*value="([^"]+)"/g)].map((m) => m[1])).toEqual([
       'meteor-wallet',
       'hot-wallet',
     ]);
+    expect(page.body).toContain('<option id="near-wallet-hot" value="hot-wallet">');
     expect(page.body).not.toMatch(/my-near-wallet|MyNearWallet/i);
   } finally {
     await s.close();

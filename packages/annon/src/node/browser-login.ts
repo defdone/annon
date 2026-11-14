@@ -7,6 +7,14 @@ import { TransactionUncertain } from '../wallet/uncertain.js';
 
 const equal = (a: string, b: string) =>
   Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+/**
+ * The approval page talks only to this loopback server, the NEAR RPC its Wallet Selector uses
+ * (fixed per network in browser/login.ts, independent of the CLI's configured RPC) and HOT
+ * Wallet's relay; it frames only the HOT widget. EVM wallets are reached through the injected
+ * provider, which needs no connection from the page.
+ */
+export const LOGIN_PAGE_CSP =
+  "default-src 'none'; script-src 'self'; connect-src 'self' https://free.rpc.fastnear.com https://test.rpc.fastnear.com https://h4n.app; frame-src https://hot-labs.org; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 export interface BrowserSession {
   url: string;
   pairingCode: string;
@@ -73,8 +81,7 @@ export async function startBrowserSession(o: {
         'cache-control': 'no-store',
         'referrer-policy': 'no-referrer',
         'x-content-type-options': 'nosniff',
-        'content-security-policy':
-          "default-src 'none'; script-src 'self'; connect-src 'self' https:; frame-src https://hot-labs.org; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+        'content-security-policy': LOGIN_PAGE_CSP,
       };
       const send = (status: number, body: string, type = 'application/json') =>
         res.writeHead(status, { ...headers, 'content-type': type }).end(body);
@@ -149,7 +156,7 @@ export async function startBrowserSession(o: {
       if (path === '/' || path === '/callback')
         return void send(
           200,
-          '<!doctype html><html><head><meta charset="utf-8"><title>Annon wallet approval</title><script src="/app.js" defer></script></head><body><h1>Annon wallet approval</h1><p id="pair"></p><pre id="action"></pre><p><label for="near-wallet">NEAR wallet</label> <select id="near-wallet"><option value="meteor-wallet">Meteor Wallet</option><option value="hot-wallet">HOT Wallet</option></select></p><button id="approve">Review in wallet</button><p id="status"></p></body></html>',
+          '<!doctype html><html><head><meta charset="utf-8"><title>Annon wallet approval</title><script src="/app.js" defer></script></head><body><h1>Annon wallet approval</h1><p id="pair"></p><pre id="action"></pre><p><label for="near-wallet">NEAR wallet</label> <select id="near-wallet"><option value="meteor-wallet">Meteor Wallet</option><option id="near-wallet-hot" value="hot-wallet">HOT Wallet (mainnet)</option></select></p><button id="approve">Review in wallet</button><p id="status"></p></body></html>',
           'text/html; charset=utf-8',
         );
       send(404, '{}');
