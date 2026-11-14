@@ -140,6 +140,9 @@ it('refuses a wallet other than the file seller with wrong_identity before signi
   wallet.identity = { kind: 'evm', id: `0x${'11'.repeat(20)}` };
   await expect(sdk.fund(terms.file_id, 1n, wallet)).rejects.toMatchObject({
     code: 'wrong_identity',
+    // The CLI names both identities to a person; public errors drop them.
+    required: expect.objectContaining({ kind: expect.any(String) }),
+    offered: wallet.identity,
   });
   expect(wallet.authorize).not.toHaveBeenCalled();
   expect(send).not.toHaveBeenCalled();

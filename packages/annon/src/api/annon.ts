@@ -1,4 +1,4 @@
-import { AnnonError, toPublicError } from '../errors.js';
+import { AnnonError, toPublicError, withIdentities } from '../errors.js';
 import type { BuyRoute } from '../routes.js';
 import { HostedSelling, type ShareHosting, type ShareOptions, shareSize } from './sharing.js';
 /** Sell, buy, open, recover and stop, using the single purchase/grant settlement model. */
@@ -251,7 +251,7 @@ export class Annon {
     if (file.terms.network !== this.o.network || file.terms.contract !== this.o.contractId)
       throw new PayError('network_mismatch');
     if (identityJson(parseIdentity(seller.identity)) !== identityJson(file.seller))
-      throw new PayError('wrong_identity');
+      throw withIdentities(new PayError('wrong_identity'), file.seller, seller.identity);
     if (file.takenDown !== null) throw new PayError('taken_down');
     if (file.salesStoppedAt !== null) throw new PayError('sales_stopped');
     if (seller.identity.kind === 'near')
@@ -620,7 +620,11 @@ export class Annon {
   async reopenSeller(o: { fileId: string; seller: IdentityWallet }): Promise<Uint8Array> {
     const f = await this.file(o.fileId);
     if (identityJson(f.seller) !== identityJson(o.seller.identity))
-      throw new AnnonError('wrong_identity', 'not the registered seller');
+      throw withIdentities(
+        new AnnonError('wrong_identity', 'not the registered seller'),
+        f.seller,
+        o.seller.identity,
+      );
     const keyName = `annon/seller-key/${o.fileId}`;
     const previous = await this.sellerKeys.load(keyName);
     const key = oneTimeKey();
@@ -1350,7 +1354,11 @@ export class Annon {
   async stop(o: { fileId: string; seller: IdentityWallet }): Promise<void> {
     const f = await this.file(o.fileId);
     if (identityJson(f.seller) !== identityJson(o.seller.identity))
-      throw new AnnonError('wrong_identity', 'not the registered seller');
+      throw withIdentities(
+        new AnnonError('wrong_identity', 'not the registered seller'),
+        f.seller,
+        o.seller.identity,
+      );
     const args = { file_id: o.fileId, key: null, deadline: this.now() + 540 };
     const auth = await this.auth(o.seller, stopSalesText(this.o.contractId, args, f.seller));
     await this.call('stop_sales', { args, ...(auth ? { auth } : {}) }, o.seller);

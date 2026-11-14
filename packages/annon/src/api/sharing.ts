@@ -12,7 +12,7 @@ import {
 } from '../download/upload.js';
 import { sha256 } from '../envelope/pay2.js';
 import { type PreparedSeal, prepareSeal, type SellData } from '../envelope/replay.js';
-import { AnnonError, present } from '../errors.js';
+import { AnnonError, present, withIdentities } from '../errors.js';
 import { keyFromSecret, oneTimeKey } from '../keys/near-ckd.js';
 import { MAX_PLAINTEXT_BYTES } from '../limits.js';
 import { readOutcome, txOutcome, view } from '../near/rpc.js';
@@ -378,7 +378,11 @@ export class HostedSelling {
     if (input.expectedRevision !== undefined && input.expectedRevision !== job.revision)
       throw new AnnonError('store_conflict');
     if (identityJson(parseIdentity(input.seller.identity)) !== identityJson(job.terms.seller))
-      throw new AnnonError('wrong_identity');
+      throw withIdentities(
+        new AnnonError('wrong_identity'),
+        job.terms.seller,
+        input.seller.identity,
+      );
     if (uploadOrigin(input.hosting.origin) !== job.hosting.origin)
       throw new AnnonError('config_conflict');
     if (job.published) return job;

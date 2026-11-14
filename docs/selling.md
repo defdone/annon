@@ -57,8 +57,8 @@ The whole price goes to you, minus the relayer's fee share on a sponsored listin
 `--split`; for several recipients, use `annon sell`.
 
 A NEAR seller pays two amounts in NEAR: listing storage (`--listing-storage`, default 0.01) and the
-file's purchase storage (`--storage-budget`, default 0.05). With `--json`, give both flags or set
-`listingStorage` and `storageBudget` in the configuration. Agents always use the configured values.
+file's purchase storage (`--storage-budget`, default 0.2, enough for about 19 sales). With
+`--json`, give both flags or set `listingStorage` and `storageBudget` in the configuration. Agents always use the configured values.
 
 If a step stops, resume the saved sale with the same file; never start a second one for the same
 file:
