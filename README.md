@@ -255,9 +255,9 @@ limit. The agent runs `annon_catalog` or `annon_verify`, then `annon_buy`, then 
 also sell with `annon_share` or `annon_sell`, under the same owner policy. Full setup:
 [docs/agents.md](docs/agents.md).
 
-Agents should buy the 0.10 USDC demo file with `near` or `base`: 1Click has a minimum of about 0.15
-USDC, so its quote is refused for cheaper files and nothing is sent
-([details](docs/agents.md)).
+Agents should buy the 0.10 USDC demo file with `near` or `base`: 1Click sets its own minimum per
+route (about 0.15 USDC from Base when we checked), so it refuses the quote for cheaper files and no
+payment is sent ([details](docs/agents.md)).
 
 ## For developers
 

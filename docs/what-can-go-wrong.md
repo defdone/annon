@@ -68,9 +68,9 @@ An EVM wallet without `--route` gets `origin_required` for such a file, with the
 another available payment route if the file's price cannot be quoted. The demo file costs 0.10 USDC,
 below the usual 1Click minimum, so buy it with `near` or `base`.
 
-A refused quote can leave a saved purchase that stays `pending`, so the next buy of the same file
-stops with `purchase_open` although nothing was sent. When there was no deposit address, no deposit
-can have been sent: buy with another route and `--force` (MCP: `force: true`).
+A refused quote still leaves a saved purchase, so until it expires (within an hour) the next buy of
+the same file stops with `purchase_open`, although no payment was sent. When there was no deposit
+address, no deposit can have been sent: buy with another route and `--force` (MCP: `force: true`).
 
 ### The relayer refuses or is busy
 
