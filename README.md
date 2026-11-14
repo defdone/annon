@@ -196,13 +196,17 @@ the file on another computer: [docs/quickstart.md](docs/quickstart.md#5-open-it-
 
 ### Sell a file
 
-The simplest path is hosted selling through a shop, with a NEAR, EVM or Solana wallet. Add the shop,
-approve its deployment profile in your configuration ([docs/selling.md](docs/selling.md)), then:
+The simplest path is hosted selling through a shop, with a NEAR, EVM or Solana wallet. The demo
+shop is already in the [quickstart configuration](docs/quickstart.md#2-configure), with its
+deployment profile approved, so you can sell on it right away:
 
 ```sh
-annon shop add https://shop.example --id SHOP_ID
-annon share report.pdf --price 1.00 --shop SHOP_ID --title "Q3 report"
+annon share report.pdf --price 0.10 --shop demo --title "Q3 report"
 ```
+
+For another shop, add it with `annon shop add https://shop.example --id SHOP_ID` and approve its
+deployment profile in your configuration ([docs/selling.md](docs/selling.md)) before the first
+`share`.
 
 The CLI encrypts the file locally and shows the final terms: the price, the split with any fee share,
 and for a NEAR seller the storage it pays. After you type `yes` it saves a backup, uploads the

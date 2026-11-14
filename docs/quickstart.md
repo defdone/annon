@@ -28,12 +28,31 @@ Create `~/.config/annon/config.json`:
   "nearRpc": "https://rpc.mainnet.fastnear.com",
   "relayer": "https://relayer.mainnet.annon.dev",
   "stateDir": "/absolute/path/to/annon-state",
-  "maxPrice": "0.10"
+  "maxPrice": "0.10",
+  "shops": [
+    {
+      "id": "demo",
+      "manifest": "https://annon.dev/.well-known/annon-shop.json",
+      "profile": {
+        "network": "near:mainnet",
+        "contract": "v1.annon.defdone.near",
+        "nearRpc": "https://rpc.mainnet.fastnear.com",
+        "relayer": "https://relayer.mainnet.annon.dev",
+        "host": "https://demo.annon.dev"
+      }
+    }
+  ],
+  "defaultShop": "demo"
 }
 ```
 
 `maxPrice` is the most a single purchase may cost, in USDC. To pay on Base, also add `"baseRpc"`
-([Pay on Base](#pay-on-base)).
+([Pay on Base](#pay-on-base)), and add the same `"baseRpc"` to the demo shop's `profile`.
+
+The `shops` entry adds the demo shop, so `annon catalog` lists its files and `annon buy 2` buys row
+2. Its `profile` is your approval of the deployment the shop uses: `annon share` uploads only to a
+shop with a profile that matches this configuration, and stops with `trust_required` without one or
+`config_conflict` when a value differs.
 
 Create the backup secret that encrypts your local purchase records:
 
