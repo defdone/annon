@@ -1,6 +1,6 @@
 {
   "name": "@defdone/annon-relayer",
-  "version": "0.1.0-beta.0",
+  "version": "0.1.0-alpha.0",
   "private": true,
   "description": "A public Annon relayer: sends register, unlock, claim_key, reopen, reopen_seller, stop_sales and fund_file_storage for wallets without a NEAR account; optional settlement keeper.",
   "license": "Apache-2.0",
