@@ -97,8 +97,9 @@ annon status 0xPURCHASE_ID
 annon open 0xPURCHASE_ID --output file.pdf
 ```
 
-`status` says `pending` until the payment reaches Safe finality on Base and NEAR has verified it. Run
-it again after `retryAfterSeconds` until it says `accepted`, then `open` writes the decrypted file.
+Until the payment reaches Safe finality on Base and NEAR has verified it, `status` can report
+`pending` or return `settlement_pending` (exit code 4). Wait for `retryAfterSeconds` when provided,
+then run it again until it says `accepted`. Then `open` writes the decrypted file.
 
 This route works only for a file whose on-chain terms include a Base payee; only files from EVM
 sellers can have one. For any other file, `buy --route base` stops with
@@ -118,13 +119,15 @@ annon open 0xPURCHASE_ID --output what-we-are-building.pdf
 ```
 
 `buy` returns deposit instructions: an address, an amount in the token's base units, the asset, a
-memo if one is needed, and `depositBefore`. Send exactly that amount, with the memo, from your own
-wallet before `depositBefore`. Then run `status` until it says `accepted`; a 1Click `SUCCESS` alone
-is not acceptance. `open` writes the decrypted file.
+memo if one is needed, and `depositBefore`. Send exactly that amount to that address, with the memo
+if required, from your own wallet. The deposit must be confirmed on the source chain before
+`depositBefore`; allow time for confirmation and do not fund an expired quote. Then run `status`
+until it says `accepted`; a 1Click `SUCCESS` alone is not acceptance. `open` writes the decrypted file.
 
 For another chain, change `--from-chain` (for example `arbitrum`, `ethereum`, `polygon` or
-`solana`). Without `--from-asset` the CLI picks that chain's USDC; for any other token pass
-`--from-asset` with its exact 1Click `nep141:` asset ID. Source-chain refunds go to your signed-in
+`solana`). Without `--from-asset`, the CLI selects USDC only when 1Click lists exactly one USDC
+asset for that chain. For another token, or if it returns `origin_asset_required`, pass
+`--from-asset` with the exact 1Click `nep141:` asset ID. Source-chain refunds go to your signed-in
 wallet when it is on the same kind of chain. Otherwise, or to get refunds at the wallet you pay
 from, add `--refund-to` with an address on the source chain. Supported chains and options:
 [CLI.md](../packages/annon/CLI.md).
@@ -132,7 +135,8 @@ from, add `--refund-to` with an address on the source chain. Supported chains an
 ## 5. Open it on another computer
 
 The same wallet gets the file again without paying a second time. Repeat steps 1 to 3 on the new
-computer, then recover and open:
+computer, then recover and open. The example below uses a NEAR account; for an EVM wallet, replace
+`near:YOUR_ACCOUNT.near` with `evm:0xYOUR_ADDRESS`:
 
 ```sh
 annon recover --recovery near:YOUR_ACCOUNT.near
