@@ -8,8 +8,8 @@ and [packages/annon-mcp/CHANGELOG.md](packages/annon-mcp/CHANGELOG.md). Dates ar
 
 - Contract build: `contracts/annon/build.sh` remaps local file paths and prints the NEAR code hash.
   `build.sh --release` builds with `cargo near build reproducible-wasm` in a NEAR container pinned
-  by digest, so the same commit gives the same wasm on any machine; CI uses it and publishes the
-  wasm as an artifact. The deployed contract is unchanged.
+  by digest, so the same commit gives the same wasm (checked on macOS arm64 and Linux x86-64). CI
+  uses it and publishes the wasm as an artifact. The deployed contract is unchanged.
 - [specs/README.md](specs/README.md): status, versioning rules and reading order of the
   specifications. Proposals for the protocol go to
   [GitHub Discussions](https://github.com/defdone/annon/discussions).

@@ -1030,26 +1030,42 @@ async fn a_near_purchase_is_split_through_intents_and_releases_the_key() -> anyh
 }
 
 /// A code-only upgrade from older contract code to this build keeps every record and finishes
-/// what the old code started. Runs only with ANNON_UPGRADE_FROM set to the old wasm, for example
-/// the code on mainnet:
+/// what the old code started. Runs only with ANNON_UPGRADE_FROM set to the old wasm; a release
+/// runs it against the code on mainnet with ANNON_UPGRADE_FROM_HASH set to its code hash and
+/// ANNON_RELEASE=1 to require the build metadata of the current commit:
 ///   curl -s https://rpc.mainnet.fastnear.com -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"view_code","finality":"final","account_id":"v1.annon.defdone.near"}}' | jq -r .result.code_base64 | base64 -d > target/deployed.wasm
-///   ANNON_UPGRADE_FROM=target/deployed.wasm cargo test -p annon --test sandbox upgrade -- --nocapture
+///   ANNON_UPGRADE_FROM=target/deployed.wasm ANNON_UPGRADE_FROM_HASH=<hash> ANNON_RELEASE=1 cargo test -p annon --test sandbox upgrade -- --nocapture
 #[tokio::test]
 async fn an_upgrade_keeps_state_and_finishes_what_the_old_code_started() -> anyhow::Result<()> {
     let Ok(old) = std::env::var("ANNON_UPGRADE_FROM") else {
         eprintln!("Skipped; set ANNON_UPGRADE_FROM to the old wasm.");
         return Ok(());
     };
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(old);
-    let w = world_with(&std::fs::read(path)?).await?;
+    let old = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(old),
+    )?;
+    let old_hash = bs58::encode(Sha256::digest(&old)).into_string();
+    println!("upgrading from code hash {old_hash}");
+    if let Ok(expected) = std::env::var("ANNON_UPGRADE_FROM_HASH") {
+        assert_eq!(old_hash, expected, "not the expected old code");
+    }
+    let w = world_with(&old).await?;
+
+    // Under the old code, before any reserve: a payment the contract cannot store becomes a
+    // refund leaf.
+    let d = w.file(23);
+    w.register(&d).await?.into_result()?;
+    let pd = w.purchase(&d, 0).await?;
+    let out = w.pay_near(PRICE, &pd.message()).await?;
+    let leaf = events(&out, "refund_leaf")[0].clone();
     w.fund_reserve().await?;
 
-    // Under the old code: one purchase paid and its key released, one paid and not yet claimed,
-    // its delivery not funded.
-    let (a, b) = (w.file(20), w.file(21));
-    for f in [&a, &b] {
+    // One purchase paid and its key released, one paid and not yet claimed with its delivery not
+    // funded, and one file whose sales are stopped.
+    let (a, b, s) = (w.file(20), w.file(21), w.file(24));
+    for f in [&a, &b, &s] {
         w.register(f).await?.into_result()?;
         w.fund_file(f).await?;
     }
@@ -1062,6 +1078,14 @@ async fn an_upgrade_keeps_state_and_finishes_what_the_old_code_started() -> anyh
         .keeper("claim_key", json!({ "purchase_id": pa.id_hex() }), 100)
         .await?;
     assert_eq!(answer(&out)["big_y"], "bls12381g1:mockY");
+    let stop = json!({ "file_id": s, "deadline": DEADLINE });
+    let text = w.text("stop_sales_text", &stop).await?;
+    w.relayer
+        .call(w.annon.id(), "stop_sales")
+        .args_json(json!({ "args": stop, "auth": w.seller.auth(&text) }))
+        .transact()
+        .await?
+        .into_result()?;
 
     // Code-only upgrade: deploy without calling `new`.
     w.annon
@@ -1071,14 +1095,26 @@ async fn an_upgrade_keeps_state_and_finishes_what_the_old_code_started() -> anyh
         .into_result()?;
     let meta: Value = w.annon.view("contract_source_metadata").await?.json()?;
     println!("contract_source_metadata after the upgrade: {meta}");
+    if std::env::var("ANNON_RELEASE").as_deref() == Ok("1") {
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()?;
+        let rev = String::from_utf8(head.stdout)?.trim().to_string();
+        assert_eq!(
+            meta["build_info"]["source_code_snapshot"],
+            format!("git+https://github.com/defdone/annon?rev={rev}"),
+            "a release build of the current commit"
+        );
+    }
 
-    // Records survive; the new code finishes the old purchase and its delivery.
+    // Records survive; the new code finishes the old purchase and both deliveries.
     assert!(w.bought(&pa).await? && w.bought(&pb).await?);
     let out = w
         .keeper("claim_key", json!({ "purchase_id": pb.id_hex() }), 100)
         .await?;
     assert_eq!(answer(&out)["big_y"], "bls12381g1:mockY");
-    for id in 0..2 {
+    let first: u64 = leaf["delivery_id"].as_u64().unwrap() + 1;
+    for id in first..first + 2 {
         let out = w
             .keeper("fund_delivery", json!({ "delivery_id": id }), 150)
             .await?;
@@ -1093,6 +1129,37 @@ async fn an_upgrade_keeps_state_and_finishes_what_the_old_code_started() -> anyh
     }
     assert_eq!(w.intents_balance(&w.pay_to()).await?, 2 * 9_500);
     assert_eq!(w.intents_balance(w.platform.id().as_str()).await?, 2 * 500);
+
+    // The refund leaf from the old code is materialized under the new one: a one-leaf tree, so
+    // its proof is the empty subtrees.
+    let mut zero = [0u8; 32];
+    let mut proof = vec![];
+    for _ in 0..32 {
+        proof.push(hex0x(&zero));
+        let mut h = Sha256::new();
+        h.update([1u8]);
+        h.update(zero);
+        h.update(zero);
+        zero = h.finalize().into();
+    }
+    let out = w.relayer.call(w.annon.id(), "materialize_refund")
+        .args_json(json!({ "leaf": { "delivery_id": leaf["delivery_id"], "refund": w.buyer.id(), "amount": PRICE.to_string() },
+            "index": 0, "proof": proof }))
+        .deposit(NearToken::from_millinear(20)).gas(Gas::from_tgas(100)).transact().await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+
+    // The stop made under the old code still holds: a new purchase of that file is refused.
+    let ps = w.purchase(&s, 0).await?;
+    let out = w.pay_near(PRICE, &ps.message()).await?;
+    assert_eq!(
+        events(&out, "refund_due").len(),
+        1,
+        "the payment is owed back"
+    );
+    assert!(
+        !w.bought(&ps).await?,
+        "a stopped file sold after the upgrade"
+    );
 
     // A new purchase under the new code.
     let c = w.file(22);

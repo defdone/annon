@@ -11,7 +11,8 @@ crate-type = ["cdylib", "rlib"]
 
 # Release build (`contracts/annon/build.sh --release`): cargo near build reproducible-wasm runs this
 # command in the image pinned by digest, on the committed source mounted at /home/near/code, so the
-# same commit gives the same wasm on any machine. The recipe is recorded in contract_source_metadata.
+# same commit gives the same wasm (checked on macOS arm64 and Linux x86-64). The recipe is recorded
+# in contract_source_metadata.
 # RUSTFLAGS keeps the local build's flags (cargo-near adds --cfg near); --no-abi because the MPC
 # interface types have no JSON schema without its abi feature.
 [package.metadata.near.reproducible_build]
