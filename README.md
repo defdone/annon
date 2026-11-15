@@ -327,7 +327,8 @@ cargo test
 
 These run locally and send no transactions. `build.sh` builds the contract's wasm, which the sandbox
 tests use. CI runs the same steps, plus formatting, lint, a dependency audit, the spec-vector check
-and container tests of the relayer and the demo host.
+and container tests of the relayer and the demo host. CI builds the contract with
+`build.sh --release` instead: the same commit gives the same wasm on any machine (needs Docker).
 
 | Path | Contents |
 |---|---|

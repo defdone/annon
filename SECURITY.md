@@ -50,10 +50,11 @@ curl -fsS https://rpc.mainnet.fastnear.com -H 'Content-Type: application/json' \
 With `"request_type":"view_access_key_list"` the same request lists the account's keys. The account
 is also on [NearBlocks](https://nearblocks.io/address/v1.annon.defdone.near).
 
-`contracts/annon/build.sh` prints the code hash of the wasm it builds. The deployed code was built
-before the build remapped local file paths and contains the builder's paths, so the remapped build
-gives a different hash. We have not yet checked that a build gives the same hash on different
-machines (`"reproducible": false`).
+`contracts/annon/build.sh --release` builds the contract with `cargo near build reproducible-wasm`
+in the NEAR container pinned by digest in `contracts/annon/Cargo.toml` and prints its code hash; CI
+publishes that wasm as the `annon-wasm` artifact. The deployed code was built earlier, locally, and
+contains the builder's file paths, so no release build gives its hash (`"reproducible": false`).
+The next contract upgrade will deploy a release build.
 
 ## Trust model
 

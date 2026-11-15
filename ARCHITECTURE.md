@@ -198,7 +198,8 @@ ANNON_TEST_CONTAINER=1 pnpm --filter @defdone/annon-demo-host exec vitest run -t
 ```
 
 Contract format check, lint, wasm build and tests. `build.sh` builds the wasm the sandbox tests
-deploy:
+deploy; CI passes `--release`, which builds it with cargo-near in the pinned NEAR container (needs
+Docker):
 
 ```sh
 cargo fmt --check
