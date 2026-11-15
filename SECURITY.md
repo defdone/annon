@@ -29,7 +29,31 @@ In scope:
 During the alpha defdone keeps a full-access key to the contract account so that a bug can be fixed
 in place. That key can change the contract's code, and therefore its rules. It is the largest trust
 Annon asks for. After an independent audit we will remove the key and lock the contract; a later fix
-then ships as a new contract that sellers move to.
+then ships as a new contract that sellers move to. We do not give a date for the audit yet.
+
+The contract will still change during the alpha, and we take responsibility for those changes.
+Annon is an open protocol: start a [discussion](https://github.com/defdone/annon/discussions) with
+any proposal for the specifications or the contract. We review every proposal and either adopt it
+or work it out there in the open.
+
+### Checking the deployed contract
+
+[contracts/annon/mainnet.json](contracts/annon/mainnet.json) lists the contract's code hash, the
+source tag and the keys that can change its code. To read the code hash from the chain:
+
+```sh
+curl -fsS https://rpc.mainnet.fastnear.com -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"view_account","finality":"final","account_id":"v1.annon.defdone.near"}}' \
+  | jq -er .result.code_hash
+```
+
+With `"request_type":"view_access_key_list"` the same request lists the account's keys. The account
+is also on [NearBlocks](https://nearblocks.io/address/v1.annon.defdone.near).
+
+`contracts/annon/build.sh` prints the code hash of the wasm it builds. The deployed code was built
+before the build remapped local file paths and contains the builder's paths, so the remapped build
+gives a different hash. We have not yet checked that a build gives the same hash on different
+machines (`"reproducible": false`).
 
 ## Trust model
 
@@ -40,7 +64,11 @@ then ships as a new contract that sellers move to.
 | Host | Refuse to serve a file | Read it, see keys, redirect payouts |
 | Relayer | Refuse to sponsor a transaction | Sign as the buyer or seller, redirect payouts, see keys |
 | NEAR MPC network | Derive keys when the contract asks | Release a key the contract did not request |
-| defdone | Upgrade the contract during the alpha | Read a file key from the chain |
+| defdone | Upgrade the contract during the alpha, which can change any rule, including who may receive a file key | Decrypt a buyer's existing key answer from public chain data alone |
+
+A file key depends on the contract account and the file, not on the buyer. An upgrade could
+therefore release the same file key to a recipient chosen by the upgrade-key holder, including a
+key already released to a buyer.
 
 The buyer's one-time key and the decrypted file stay on the buyer's device. Buyer records never
 keep a released file key or decrypted content: the browser decrypts in memory, and the CLI writes
@@ -56,10 +84,11 @@ us if you can make one worse than described.
 - **Takedown after a key request.** A moderator's takedown refuses new key requests. A request
   already sent to the MPC network can still complete, because the network publishes its answer on
   chain.
-- **Refund proof window.** When the contract cannot pay a refund right away it records it in an
-  on-chain accumulator, and the refund is claimed later with a proof against a recent root. Only a
-  bounded number of recent roots are kept, so a refund left unclaimed for very long needs a newer
-  proof. Checkpoints that remove this window are planned.
+- **Refund proof window.** When the contract rejects a payment and its storage reserve is too low
+  to record the refund, it adds a refund leaf to an on-chain accumulator instead, and the refund is
+  claimed later with a proof. Proofs against the current root and the previous 31 roots are
+  accepted: a proof goes stale once 32 more leaves are added, and the claim then needs a proof
+  against a newer root.
 - **A failed payout callback** leaves that step marked in flight. It is never reset automatically:
   a timeout cannot tell a completed transfer from a delayed one, and a reset could pay twice. During
   the alpha a reviewed upgrade can repair a provable accounting error.

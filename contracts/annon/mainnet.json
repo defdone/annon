@@ -1,0 +1,13 @@
+{
+  "network": "near:mainnet",
+  "contract": "v1.annon.defdone.near",
+  "codeHash": "FFuE8TCvuVTtLK7vVAsmBoj4BSHq1X64fzpuiF2MrKNU",
+  "deployedAt": "2026-11-12",
+  "source": "hackathon-submission",
+  "sourceCommit": "951dc72397c704a3eca2360fac173f4af3fa5e41",
+  "build": "contracts/annon/build.sh",
+  "reproducible": false,
+  "upgradeable": true,
+  "fullAccessKeys": ["ed25519:7HhkRnyjJkMzkZfKqg1wLbwfKYgadxuHpNyxKgnQZG4G"],
+  "audit": null
+}
