@@ -68,12 +68,15 @@ else
   fi
 fi
 node contracts/annon/check-imports.mjs "$WASM"
-# The release build records three fixed paths of the NEAR build container in its metadata; any
-# other /Users/ or /home/ path fails the build.
+# The release build records fixed paths of the NEAR build container in its metadata: the RUSTFLAGS
+# remaps and output_wasm_path, matched here with their JSON quotes. Any other /Users/ or /home/
+# path fails the build.
 node -e '
   let s = require("fs").readFileSync(process.argv[1], "latin1");
-  for (const ok of ["/home/near/.cargo=/cargo", "/home/near/code=/annon",
-    "/home/near/code/target/near/annon/annon.wasm"]) s = s.split(ok).join("");
+  for (const ok of [
+    " --remap-path-prefix=/home/near/.cargo=/cargo --remap-path-prefix=/home/near/code=/annon\"]",
+    "\"output_wasm_path\":\"/home/near/code/target/near/annon/annon.wasm\"}",
+  ]) s = s.split(ok).join("");
   if (/\/(Users|home)\//.test(s)) { console.error("annon.wasm contains a local path"); process.exit(1); }
 ' "$WASM"
 ls -l "$WASM" | awk '{ printf "annon.wasm: %d bytes, %.2f NEAR of storage\n", $5, $5 / 100000 }'
