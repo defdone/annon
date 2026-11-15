@@ -167,11 +167,15 @@ struct World {
 }
 
 async fn world() -> anyhow::Result<World> {
+    world_with(&wasm("annon")).await
+}
+
+async fn world_with(annon_code: &[u8]) -> anyhow::Result<World> {
     let worker = near_workspaces::sandbox().await?;
     let mpc = worker.dev_deploy(&wasm("mock_mpc")).await?;
     let usdc = worker.dev_deploy(&wasm("mock_token")).await?;
     let intents = worker.dev_deploy(&wasm("mock_token")).await?;
-    let annon = worker.dev_deploy(&wasm("annon")).await?;
+    let annon = worker.dev_deploy(annon_code).await?;
     annon
         .call("new")
         .args_json(
@@ -1022,6 +1026,85 @@ async fn a_near_purchase_is_split_through_intents_and_releases_the_key() -> anyh
         .keeper("pay_slot", json!({ "delivery_id": 0, "slot": 0 }), 80)
         .await?;
     assert!(again.is_failure(), "a paid slot was paid again");
+    Ok(())
+}
+
+/// A code-only upgrade from older contract code to this build keeps every record and finishes
+/// what the old code started. Runs only with ANNON_UPGRADE_FROM set to the old wasm, for example
+/// the code on mainnet:
+///   curl -s https://rpc.mainnet.fastnear.com -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"view_code","finality":"final","account_id":"v1.annon.defdone.near"}}' | jq -r .result.code_base64 | base64 -d > target/deployed.wasm
+///   ANNON_UPGRADE_FROM=target/deployed.wasm cargo test -p annon --test sandbox upgrade -- --nocapture
+#[tokio::test]
+async fn an_upgrade_keeps_state_and_finishes_what_the_old_code_started() -> anyhow::Result<()> {
+    let Ok(old) = std::env::var("ANNON_UPGRADE_FROM") else {
+        eprintln!("Skipped; set ANNON_UPGRADE_FROM to the old wasm.");
+        return Ok(());
+    };
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(old);
+    let w = world_with(&std::fs::read(path)?).await?;
+    w.fund_reserve().await?;
+
+    // Under the old code: one purchase paid and its key released, one paid and not yet claimed,
+    // its delivery not funded.
+    let (a, b) = (w.file(20), w.file(21));
+    for f in [&a, &b] {
+        w.register(f).await?.into_result()?;
+        w.fund_file(f).await?;
+    }
+    let (pa, pb) = (w.purchase(&a, 0).await?, w.purchase(&b, 0).await?);
+    for p in [&pa, &pb] {
+        let out = w.pay_near(PRICE, &p.message()).await?;
+        assert!(out.is_success(), "{:?}", out.failures());
+    }
+    let out = w
+        .keeper("claim_key", json!({ "purchase_id": pa.id_hex() }), 100)
+        .await?;
+    assert_eq!(answer(&out)["big_y"], "bls12381g1:mockY");
+
+    // Code-only upgrade: deploy without calling `new`.
+    w.annon
+        .as_account()
+        .deploy(&wasm("annon"))
+        .await?
+        .into_result()?;
+    let meta: Value = w.annon.view("contract_source_metadata").await?.json()?;
+    println!("contract_source_metadata after the upgrade: {meta}");
+
+    // Records survive; the new code finishes the old purchase and its delivery.
+    assert!(w.bought(&pa).await? && w.bought(&pb).await?);
+    let out = w
+        .keeper("claim_key", json!({ "purchase_id": pb.id_hex() }), 100)
+        .await?;
+    assert_eq!(answer(&out)["big_y"], "bls12381g1:mockY");
+    for id in 0..2 {
+        let out = w
+            .keeper("fund_delivery", json!({ "delivery_id": id }), 150)
+            .await?;
+        assert!(out.is_success(), "{:?}", out.failures());
+        for slot in 0..2 {
+            let out = w
+                .keeper("pay_slot", json!({ "delivery_id": id, "slot": slot }), 80)
+                .await?;
+            assert!(out.is_success(), "{:?}", out.failures());
+        }
+        assert!(w.delivery(id).await?.is_null(), "delivery {id} settled");
+    }
+    assert_eq!(w.intents_balance(&w.pay_to()).await?, 2 * 9_500);
+    assert_eq!(w.intents_balance(w.platform.id().as_str()).await?, 2 * 500);
+
+    // A new purchase under the new code.
+    let c = w.file(22);
+    w.register(&c).await?.into_result()?;
+    w.fund_file(&c).await?;
+    let pc = w.purchase(&c, 0).await?;
+    let out = w.pay_near(PRICE, &pc.message()).await?;
+    assert!(out.is_success(), "{:?}", out.failures());
+    let out = w
+        .keeper("claim_key", json!({ "purchase_id": pc.id_hex() }), 100)
+        .await?;
+    assert_eq!(answer(&out)["big_y"], "bls12381g1:mockY");
     Ok(())
 }
 

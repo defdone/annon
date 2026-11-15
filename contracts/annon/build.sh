@@ -63,7 +63,8 @@ else
   fi
 fi
 node contracts/annon/check-imports.mjs "$WASM"
-if LC_ALL=C grep -a -q -E '/(Users|home)/' "$WASM"; then
+# /home/near is the fixed path inside the NEAR build container, recorded in the build metadata.
+if LC_ALL=C grep -a -o -E '/(Users|home)/[A-Za-z0-9._-]*' "$WASM" | grep -q -v -x '/home/near'; then
   echo "annon.wasm contains a local path" >&2
   exit 1
 fi
