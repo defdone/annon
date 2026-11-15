@@ -21,9 +21,6 @@ npm i -g @defdone/annon@alpha         # the annon CLI
 npx -y @defdone/annon-mcp@alpha       # the MCP server, started by the MCP client
 ```
 
-These install commands apply after alpha publication. Until then, build from source and run
-`node packages/annon/dist/node/main.js` for the CLI or `node packages/annon-mcp/dist/main.js` for MCP.
-
 The owner sets up agent mode once, in this order. Agent mode refuses `init`, `login` and per-call
 trust or deployment flags, so `agent: true` comes last, written by `init`.
 
