@@ -50,4 +50,10 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: contracts/annon/build.sh # wasm for the import check and the sandbox tests
+      # The built contract, so anyone can compare it with their own build and with the chain.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: annon-wasm
+          path: target/wasm32-unknown-unknown/release/annon.wasm
+          if-no-files-found: error
       - run: cargo test
