@@ -42,12 +42,23 @@ jobs:
   contract:
     runs-on: ubuntu-26.04
     steps:
+      # The commit itself, not the pull request's merge commit: the release build records the commit
+      # in the contract, so the artifact must match what anyone gets from that commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       # Explicit install from rust-toolchain.toml; the action alone relies on rustup's deprecated
       # auto-install and warns about it.
       - run: rustup toolchain install
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: contracts/annon/build.sh # wasm for the import check and the sandbox tests
+      # Release build in the pinned NEAR container; the sandbox tests and the artifact use this wasm.
+      - run: contracts/annon/build.sh --release
+      # The built contract, so anyone can compare it with their own build and with the chain.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: annon-wasm
+          path: target/wasm32-unknown-unknown/release/annon.wasm
+          if-no-files-found: error
       - run: cargo test

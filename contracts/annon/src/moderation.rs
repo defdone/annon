@@ -1,4 +1,4 @@
-//! Stopping sales (by the seller) and takedowns (by the file's moderator), plan 4.9.
+//! Stopping sales (by the seller) and takedowns (by the file's moderator).
 //! A seller alone can never take a paid key away: payments made before a stop always unlock.
 //! The payment's time comes from its Base block header, never from the block number: Base's block
 //! time changed (2 s to 200 ms on 5 Nov 2026, Denim) and may change again.

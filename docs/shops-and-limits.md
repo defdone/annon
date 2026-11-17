@@ -52,8 +52,8 @@ For the demo shop at [annon.dev/demo](https://annon.dev/demo): The demo's open p
 | File lifetime | 7 days after publication, except the canonical demo file | The host |
 
 An IP bucket here means an IPv4 address or an IPv6 /48. A NEAR seller registers from their own
-account, so the relayer's listing limits do not apply to them. The demo runs until 18 November 2026,
-at the latest 19 November.
+account, so the relayer's listing limits do not apply to them. The demo has no planned end date: it
+stays up for the community and our team to test and study until Annon has a stable release.
 
 When a shop refuses because of a limit, its host or relayer answers with an error code:
 
